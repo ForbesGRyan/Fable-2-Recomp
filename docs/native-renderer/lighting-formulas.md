@@ -1509,3 +1509,83 @@ Each of the seven position mutations fails on every capture (`rows`, `components
 **Single precision (ledger ruling 26).** On the captured registers `impostor_position(single=True)` lies at most 1.7e-5 of max(1, |oPos|) from the double reference (the 1.8e-4 to 2.5e-4 of "Single precision" above came from made rows with entries up to 200). The mirrors' pins (`tools/xdk_sigmatch/impostor_pins.py`: 10 captured quads and 6 made ones, 9 pixel lines, 6 fog lines; `t6_pins.txt`) hold the single-precision reference for the position and the double reference rounded to single for the pixel and the fog; `tests/test_impostor_formulas.py` holds every position pin to the microcode within 1e-4.
 
 **Still on inference or not checked**: the terms of `c46.z` on a captured row (none has one); a quad nearer than 48 units; the `b129` block's arithmetic; that `ucode_eval` is the console.
+
+## Water (sub-project 13)
+
+Native renderer sub-project 13 (water), phase 13a, plan Task 2, 2026-10-12. The lake's surface as closed formulas, each checked against its microcode: vertex shader `BEAD84BD72072E0E` (17 instructions, numbered 3 to 19) and the alpha path of pixel shaders `A17D8AEC3A817D45` (the surface) and `F6D98C7B4D98438B` (the opaque twin; the two dumps differ in instruction 14 alone). Nothing here was run in the game and no captured row was read: the rows are plan Task 4's.
+
+### Result
+
+| What | Function of `light_formulas.py` | State |
+|---|---|---|
+| `oPos`, `o0.xyz`, `o1`, `o3.xy` of `BEAD` | `water_vertex(p, pair, c)` | closed on made inputs: 2,000 of 2,000 made draws, largest relative difference 4.6e-15; four mutations each fail in 400 of 400 |
+| The alpha of `A17D` and `F6D9` | `water_alpha(m, c141)` | closed on made inputs: 2,000 of 2,000 made pixels for each shader, largest difference 0 (the same three operations); three mutations each fail |
+| What becomes of a pixel: killed, skipped, shaded | `water_kept(alpha, c141, kind)` | closed with the alpha; every fate reached: `A17D` 605 killed, 830 skipped, 565 shaded; `F6D9` 1,395, 221, 384 |
+| `F6D9` draws nothing | `water_opaque_dead(c141)` | part (a) of criterion 2, on the microcode: 2,000 of 2,000 made pixels killed at the masks 0, 1 and their own, 500 of them at the margin itself; 256 of 256 levels of a `k_8` mask with the captured `c141`; the control not killed in 500 of 500 ("The dead draw" below: what it assumes) |
+
+(`water_check.py formulas`, `dead` and `used`, seed 1: `out/native-evidence/water/t2_formulas.txt`, `t2_dead.txt`, `t2_used.txt`. The bounds are spec Design 2's: `1e-5 * max(1, |value|)` in every component of the vertex outputs, 1e-6 for the alpha. Both sides are the same arithmetic in double precision on inputs rounded to single precision, which is why they agree to rounding; it is the mutations that show the bounds can tell.)
+
+### The vertex shader `BEAD`
+
+With `p` the fetched position (instr 3: `vf0`, three floats at dword 0 of a vertex of 5 dwords, the fourth component 1) and `pair` the two floats at dword 3 (instr 4):
+
+| Instr | What it makes | In the formula |
+|---|---|---|
+| 5 to 8 | `oPos.x = c0 . (p, 1)`, `.y` with `c1`, `.z` with `c2`, `.w` with `c3`; each row's four products summed in the order z, x, y, w | `pos`: nothing is added to the position (no waves, no time) |
+| 9 | a vertex fetch of slot 16 (the shore mask) at `pair` | not in the formula: its value reaches `o3.z` alone |
+| 10, 16, 18, 19 | `o0.w = sat(c113.x + c255.x - (c9.z - p.z) / |c9 - p|)` | not in the formula: neither pixel shader reads `o0.w` |
+| 11 | `o0.xyz = p` | `place` |
+| 12 | `o1.xy = p.xy * c117.xy + c115.xy` | `coord[0:2]` |
+| 13 | `o1.zw = p.xy * c118.xy + c116.xy` | `coord[2:4]` |
+| 14, 15 | `o2` likewise with `c121`, `c119` and `c122`, `c120` | not in the formula: neither pixel shader reads `o2` |
+| 16, 17 | `o3.xy = pair`; `o3.z = c255.x -` the mask fetched at instr 9 | `mask`; `o3.z` is read by neither pixel shader |
+
+The height `p.z` reaches no coordinate. The registers the formula takes are `c0` to `c3` whole and the first two components of `c115` to `c118` (`WATER_SHADER["reg"]`, `["vs_read"]`); the shader also reads `c9`, `c113`, `c119` to `c122` and its literal `c255.x`, all into `o0.w`, `o2` and `o3.z`. That neither pixel shader reads those is the interpreter's own account and not a reading: `water_check.read_interpolators` changes each component of each interpolator register in turn on 16 shaded pixels, and the pixel moves for `r0.xyz`, `r1.xyzw`, `r3.xy` and `r4.xy` (the position register) and for nothing else, with both shaders (`t2_used.txt`). The native program therefore needs no vertex fetch of the mask, no `c9`, `c113` and no `c119` to `c122`.
+
+### The alpha and the fate (`A17D` and `F6D9`, instr 10 to 18)
+
+| Instr | What it makes | In the formula |
+|---|---|---|
+| 10 | `m` = slot 1 at `o3.xy`, the first component the fetch delivers | the argument `m` of `water_alpha` |
+| 11 | `1 - m` | |
+| 12 | `ramp = sat(-(1 - m) * c141.y + c141.x)` | |
+| 13 | `alpha = 1 - ramp`, kept in `r4.w` to the end (instr 89 writes it out) | `water_alpha` |
+| 14 | `A17D`: `flag = (alpha == 1)`; `F6D9`: `flag = (1 > alpha)`; beside it `r3.w = sat(max(c131.x, c131.x))` (the mix factor of the pixel, plan Task 3) | `water_kept`: `kind` "surface" or "opaque" |
+| 15 | the predicate = `flag != 0`; `r2.xyz = (-|P.x| > 0)`, which is 0 whatever `P.x` holds | |
+| 16 | under the predicate: `kill_gt c254.x, c255.y`, the literals' 0 > -1: the pixel is discarded | "killed" |
+| 17 | `flag2 = (alpha > c141.w)` | |
+| 18 | `setp_ne_push`: the predicate of everything to instr 76 = `flag2 != 0` (and the literal `c254.x` being 0); `r2.w` = 0 where it holds, else 1 (instr 77 asks for it again) | "shaded", else "skipped" |
+
+A skipped pixel runs nothing predicated, jumps at instr 77 and leaves through instr 88 and 89 with the colour `r2.xyz * c20.w` = 0 (instr 15) and the alpha `alpha`: the check holds its colour to exactly 0. So `A17D` kills where the alpha is exactly 1 (the ramp at or below 0) and shades where it is above `c141.w`; `F6D9` kills wherever the alpha is below 1. With the captured `c141` = (2.003, 2, 0.0015, 0.0588) the alpha is `1 - sat(0.003 + 2 m)`: 0.997 in open water (`m` = 0), 0 from `m` = 0.4985 on. The saturate of no number is 0 in the interpreter: a mask sample that is no number gives alpha 1, which `A17D` kills and `F6D9` keeps.
+
+### The dead draw (spec ruling 12, criterion 2 part (a))
+
+**The claim.** If `min(c141.x, c141.x - c141.y) >= 1e-6` and `|c141.x|`, `|c141.y| <= 4` (`water_opaque_dead`), then `F6D9` discards every pixel whose mask sample is a number in [0, 1].
+
+**Why.** By the table above `F6D9` kills exactly where `alpha < 1`, that is where the saturate's argument `X(m) = c141.x - (1 - m) * c141.y` is above 0. `X` is linear in `m`: `X(m) = (1 - m) * (c141.x - c141.y) + m * c141.x`, a weighted mean of its two ends `X(0) = c141.x - c141.y` and `X(1) = c141.x` for `m` in [0, 1]. Both ends are at least the margin, so `X(m) >= 1e-6 > 0` for every such `m`.
+
+**On the microcode** (`water_check.py dead`, `t2_dead.txt`): 2,000 made pixels of `F6D9` whose `c141` satisfies the condition (`c141.y` anywhere in [-4, 4], `c141.x` from `max(0, c141.y) + 1e-6` up to 4, both single-precision numbers), each run at three masks, 0, 1 and its own (one of the 256 levels a `k_8` texture holds, or any value in [0, 1]): the interpreter kills all three in 2,000 of 2,000. 500 of the trials stand at the margin itself (`c141.x` the smallest single-precision number for which the condition holds for its `c141.y`). All 256 levels with the captured `c141`: 256 of 256 killed. The control, `c141.x - c141.y <= 0` with a mask of 0 (alpha exactly 1): not killed in 500 of 500, so the check can tell a live draw.
+
+**In single precision.** The interpreter is double precision; the console computes in single. The three steps of instr 11 to 13 were therefore also made in single precision for the same 2,000 trials and three masks, with the multiply-add both rounded twice and fused: the alpha is below 1 in 2,000 of 2,000. By hand: the rounding of `1 - m` (at most 3.0e-8, times `|c141.y| <= 4`: 1.2e-7), of the product (at most 1.2e-7 at magnitudes up to 4) and of the sum (at most 2.4e-7 at magnitudes up to 8) together stay below 4.8e-7, so a true argument of 1e-6 is computed as at least 5.2e-7, and `1 - ramp` rounds to 1 only for a ramp of 3.0e-8 or less. That is what the margin 1e-6 and the bound 4 stand for; outside the bound the function says "not dead".
+
+**What the proof assumes** (each is somebody's to hold):
+1. *The mask sample is a number in [0, 1].* True of an unsigned normalised `k_8` texture under any filter that is a weighted mean of texels; not true of a fetch constant that delivers the texture signed, biased or with an exponent. The record's rule on the mask's fetch constant (plan Task 9) and the masks' census (part (c), plan Task 4) hold it. A sample that is no number gives alpha 1 and is NOT killed.
+2. *`c141` is one value for the whole draw and the literals are the table's* (`c254.x` = 0, `c255.y` = -1, `c255.z` = 1: the kill is the comparison of two literals under the predicate). The rows (part (b), plan Task 4) and the record's literal rule (plan Task 9) hold it.
+3. *The interpreter is the console* for `tfetch2D`, `subsc`, `mad_sat`, `sgt`, `setp_ne`, `kill_gt` (the SDK's `ucode.h` semantics, as `ucode_eval.py` states them), and a killed pixel writes neither colour nor depth.
+4. Nothing here says what the draw's state does (the alpha test, depth): the research measured the game's depth copy at the lake bed in 17,840 of 18,536 footprint pixels [measured, `water-research.md`].
+
+### The check (`water_check.py`)
+
+One side is the dump's text run by `ucode_eval.Machine` on a made input; the other is the formula on the same input, through nothing of the interpreter's (the vertex is decoded from the buffer's bytes by `struct`, the machine's fetch goes through `capture_replay.element`). The formulas were written from the dumps; no term was fitted to the interpreter's output, and none had to be changed after the first run. Made inputs, the ranges and the reason for each are the module's text. Every register component that no formula reads is drawn at 1e21 to 1e22 with either sign (the third and fourth components of `c115` to `c118`; for the pixel shaders every unread component of the 24 registers), and every register outside the tables is random: a formula that read one would differ.
+
+Mutations, each of which must make trials disagree (`tests/test_water_formulas.py`, `test_mutations_fail`; the counts of `t2_formulas.txt`, of 400 trials): vertex: `c116` for `c115` 400; `c118` for `c117` 400; the coordinates from `p.xz` 400; `c0` and `c1` exchanged 400. Alpha, `A17D` / `F6D9`: `c141.x` and `c141.y` exchanged 330 / 168; `m` for `1 - m` 275 / 88; the other shader's comparison 400 / 400.
+
+One departure from the plan's made inputs, said here because a reader of the plan would look for it: the plan draws the threshold `c141.w` at or above 1 in 15 of 100 trials of one family of three. `F6D9` then "skips" (alpha exactly 1 under a threshold of 1 or more) in about 2.5% of the trials, below the tenth the test asks of every fate. The share is 40 of 100 in two families; no formula changed.
+
+### What stands on inference, and what is not checked
+
+- That `ucode_eval` is the console (it is the repo's reading of the SDK's `ucode.h`; double precision; no denormal flush). [inferred]
+- That the position register is `r4` and holds the pixel's integral position: the shaders read `|r4.xy|`; the SDK rounds the position down before it hands it over (`dxbc_translator.cpp`, the `OpRoundNI` of `in_reg_ps_position_`) [code]; which register a draw generates it into is the draw's state and is not in the dump. [inferred until a row shows it]
+- The bits of `b136` and `b137` in the pixel bool word (`0x100`, `0x200`: bit `N & 31`, as `IMPOSTOR_B129`): by the SDK's layout; plan Task 4 reads both bool members of every row. [inferred]
+- Which component of the mask's and the normal map's texel the fetch delivers first: the formulas take "the first component" and "the first two"; what the fetch constants of slots 1 and 2 make of the stored texel is plan Task 5's. [unknown here]
+- The captured rows: nothing in this part was held to one. Plan Task 4. [not run]

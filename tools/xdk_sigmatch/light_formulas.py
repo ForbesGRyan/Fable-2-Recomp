@@ -2030,3 +2030,129 @@ def impostor_fog(place, eye, c110, c111, tf16, tf17):
     is no number gives the pair of "before the start" (vertex_fog's guard; the microcode fetches at a coordinate
     that is no number there, and the quad's position is no number too)."""
     return vertex_fog(place, eye, 1.0, c110, c111, tf16, tf17)
+
+
+# --- The lake's surface (sub-project 13) --------------------------------------------------------------------------
+# One flat mesh a body of water: vertex shader BEAD84BD72072E0E (17 instructions, numbered 3 to 19) with pixel
+# shader A17D8AEC3A817D45 (the surface: blended late over the lake bed) and with F6D98C7B4D98438B (the opaque twin,
+# which differs in instruction 14 alone and, with the captured c141, kills every pixel: water_opaque_dead)
+# (.superpowers/sdd/water-research.md). The functions below are transcriptions of the microcode, operation by
+# operation in the microcode's order, checked against it by water_check.py on made inputs (plan Tasks 2 and 3) and,
+# by plan Task 4, on the captured rows; docs/native-renderer/lighting-formulas.md, "Water", has the instruction
+# numbers register by register.
+#
+# "reg": the vertex registers the formulas read beyond the rows c0..c3, in the record's order (the shader also reads
+# c9, c113, c119 to c122 and its literal c255.x, into o0.w, o2 and o3.z alone, which neither pixel shader reads:
+# water_check.read_interpolators). "vs_read": {register: the components} that reach oPos, o0.xyz, o1 or o3.xy.
+# "ps_in": {interpolator register: the components either pixel shader reads}: r0 = o0 (the place), r1 = o1 (the
+# two scrolling coordinates), r3 = o3 (the mask's coordinate) and r4, the register the pixel's position is
+# generated into (its magnitude is read; the SDK gives the position rounded down: dxbc_translator.cpp, the
+# OpRoundNI of in_reg_ps_position_); r2 = o2 is read by neither.
+# "ps_lit": the pixel shaders' literal registers as the GPU held them (fog_check.WATER_LITERALS: 24 draws each of
+# frame 1116 of gpu_shadow_bridge2.log); "ps_lit_at" names the components the formulas read and where each lies
+# (c254.z and c254.w are not read). The vertex shader's literal reaches no output a pixel shader reads.
+# "b136", "b137": the bits of the pixel bool word (b128..b159: bit N & 31; see IMPOSTOR_B129). PROVISIONAL until
+# plan Task 4 has read both bool members of every captured row.
+WATER_SHADER = {
+    "vs": "BEAD84BD72072E0E", "ps": "A17D8AEC3A817D45", "ps_opaque": "F6D98C7B4D98438B",
+    "reg": (115, 116, 117, 118),
+    "vs_read": {0: (0, 1, 2, 3), 1: (0, 1, 2, 3), 2: (0, 1, 2, 3), 3: (0, 1, 2, 3),
+                115: (0, 1), 116: (0, 1), 117: (0, 1), 118: (0, 1)},
+    "ps_in": {0: (0, 1, 2), 1: (0, 1, 2, 3), 3: (0, 1), 4: (0, 1)},
+    "ps_reg": (0, 19, 20, 28, 31, 66, 67, 68, 116, 117, 126, 127, 128, 129, 130, 131,
+               136, 137, 138, 139, 140, 141, 142, 143),           # PROVISIONAL: plan Task 3
+    "ps_lit": {254: (0.0, 2.0, 0.0, 0.0), 255: (0.5, -1.0, 1.0, -2.0)},
+    "ps_lit_at": {"zero": (254, 0), "two": (254, 1),
+                  "half": (255, 0), "minus_one": (255, 1), "one": (255, 2), "minus_two": (255, 3)},
+    "b136": 0x00000100, "b137": 0x00000200,
+}
+
+
+def water_literals():
+    """{name: value} of the literals the two pixel shaders read, from WATER_SHADER's table."""
+    table = WATER_SHADER["ps_lit"]
+    return {name: table[reg][comp] for name, (reg, comp) in WATER_SHADER["ps_lit_at"].items()}
+
+
+def _water_ops(single):
+    """(round, product, sum) of one precision: every operation's result rounded to single precision, as the
+    console computes, or left in double. The product follows the console's rule (_imp_mul)."""
+    r = _imp_single if single else _imp_same
+    return r, (lambda x, y: r(_imp_mul(x, y))), (lambda x, y: r(x + y))
+
+
+def _water_rsq(x):
+    """The microcode's rsq: infinity of 0, no number of a negative."""
+    if x == 0.0:
+        return math.inf
+    if x < 0.0:
+        return math.nan
+    return 1.0 / math.sqrt(x)
+
+
+def _water_sqrt(x):
+    return math.sqrt(x) if x >= 0.0 else math.nan
+
+
+def water_vertex(p, pair, c, single=False):
+    """p: the fetched position (3 floats). pair: the fetched 32_32_FLOAT pair. c: {register: [4 floats]} for
+    0..3 and WATER_SHADER["reg"]. Returns {"pos": oPos (4), "place": o0.xyz (3), "coord": o1 (4), "mask": o3.xy (2)}:
+        pos   = (c0 . (p, 1), c1 . (p, 1), c2 . (p, 1), c3 . (p, 1))            instr 5 to 8: nothing added
+        place = p                                                             instr 11
+        coord = (p.x * c117.x + c115.x, p.y * c117.y + c115.y,
+                 p.x * c118.x + c116.x, p.y * c118.y + c116.y)                instr 12, 13
+        mask  = pair                                                          instr 17
+    o0.w, o2 and o3.z are written and read by neither pixel shader: not returned. A row's four products are
+    summed in the microcode's order (z, x, y, w). Only WATER_SHADER["vs_read"]'s components are touched.
+    `single`: the inputs and every operation's result rounded to single precision, as the console computes;
+    without it the arithmetic is double precision on the inputs given."""
+    r, m, ad = _water_ops(single)
+    x, y, z = (r(float(v)) for v in p[:3])
+    rows = [[r(float(v)) for v in c[reg][:4]] for reg in (0, 1, 2, 3)]
+    pos = [ad(ad(ad(ad(0.0, m(row[2], z)), m(row[0], x)), m(row[1], y)), m(row[3], 1.0)) for row in rows]     # 5 to 8
+    c115, c116, c117, c118 = ([r(float(v)) for v in c[reg][:2]] for reg in (115, 116, 117, 118))
+    coord = [ad(m(x, c117[0]), c115[0]), ad(m(y, c117[1]), c115[1]),             # 12
+             ad(m(x, c118[0]), c116[0]), ad(m(y, c118[1]), c116[1])]             # 13
+    return {"pos": pos, "place": [x, y, z], "coord": coord, "mask": [r(float(pair[0])), r(float(pair[1]))]}
+
+
+def water_alpha(m, c141, lit=None, single=False):
+    """alpha = 1 - sat(c141.x - (1 - m) * c141.y)   (instr 10 to 13). m: the shore mask's sample (slot 1, the
+    component the fetch delivers first). The saturate of no number is 0: a mask or a ramp that is no number
+    gives alpha 1. `lit`: the literals by name (default: the table's "one")."""
+    lit = lit or water_literals()
+    r, mul, ad = _water_ops(single)
+    one = lit["one"]
+    inverse = ad(one, -r(float(m)))                                              # 11
+    ramp = r(_imp_sat(ad(mul(-inverse, r(float(c141[1]))), r(float(c141[0])))))  # 12
+    return ad(one, -ramp)                                                        # 13
+
+
+def water_kept(alpha, c141, kind="surface", lit=None):
+    """What becomes of a pixel: "killed" (kind "surface", A17D: alpha == 1; kind "opaque", F6D9: alpha < 1;
+    instr 14 to 16), "skipped" (not killed and alpha <= c141.w: the colour is 0 and the alpha `alpha`;
+    instr 17, 18), or "shaded". A threshold that is no number skips. The kill itself is the literals'
+    comparison 0 > -1 (instr 16) under the predicate, and the predicate of instr 18 asks the literal 0 to be 0."""
+    lit = lit or water_literals()
+    if kind == "surface":
+        hit = alpha == lit["one"]                                                # 14 (A17D): seq
+    elif kind == "opaque":
+        hit = lit["one"] > alpha                                                 # 14 (F6D9): sgt
+    else:
+        raise ValueError("kind %r is neither \"surface\" nor \"opaque\"" % (kind,))
+    if hit and lit["zero"] > lit["minus_one"]:                                   # 15, 16
+        return "killed"
+    return "shaded" if lit["zero"] == 0.0 and alpha > c141[3] else "skipped"     # 17, 18
+
+
+def water_opaque_dead(c141, margin=1e-6):
+    """Whether F6D9 kills every pixel whatever the mask holds: min(c141.x, c141.x - c141.y) >= margin with
+    |c141.x|, |c141.y| <= 4 (the argument of the saturate is linear in m between those two ends, so it is at
+    least the margin for every m in [0, 1], the alpha is below 1 and instr 14 to 16 kill). False for a value
+    that is no number. c141.z and c141.w are not part of it."""
+    x, y = c141[0], c141[1]
+    if not (math.isfinite(x) and math.isfinite(y)):
+        return False
+    if abs(x) > 4.0 or abs(y) > 4.0:
+        return False
+    return min(x, x - y) >= margin

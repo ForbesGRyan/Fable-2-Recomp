@@ -1001,13 +1001,15 @@ def row_kind(row):
     return {PS: "surface", PS_OPAQUE: "opaque"}.get(cr.ps_hash(row))
 
 
-def read_capture(path):
+def read_capture(path, frame=None):
     """{"water": the water rows in file order (each with "line"), "textures": {the six dwords: the first texture row
     of that constant}, "frames": {frame: its frame row}, "order": [(kind, frame, pitch, c0..c3 or None)] of every
-    draw, indx, tess, verts and resolve row in file order (what `views` reads)}; kept once a path."""
+    draw, indx, tess, verts and resolve row in file order (what `views` reads)}. With `frame`, the latest
+    content row at or before that frame overrides global rows (unchanged textures may be emitted once);
+    future frames are excluded. None preserves the legacy first row. Kept once per (path, frame)."""
     import json
     path = cr.find_capture(str(path))
-    key = str(path)
+    key = (str(path), frame)
     if key in _captures:
         return _captures[key]
     out = {"path": path, "water": [], "textures": {}, "frames": {}, "order": []}
@@ -1025,8 +1027,13 @@ def read_capture(path):
                 continue                            # a last line cut short by a killed capture
             r["line"] = n
             if kind == "texture":
-                if len(r.get("fc") or []) == 6:
-                    out["textures"].setdefault(tuple(int(str(v), 16) for v in r["fc"]), r)
+                if len(r.get("fc") or []) == 6 and (frame is None or r.get("frame") is None or r["frame"] <= frame):
+                    fc = tuple(int(str(v), 16) for v in r["fc"])
+                    previous = out["textures"].get(fc)
+                    if frame is not None and r.get("frame") is not None and (previous is None or r["frame"] >= (previous.get("frame") or 0)):
+                        out["textures"][fc] = r
+                    else:
+                        out["textures"].setdefault(fc, r)
             elif kind == "frame":
                 out["frames"][r.get("frame")] = r
             else:
@@ -1080,8 +1087,8 @@ def decode_8888(data, f):
 class RowTextures:
     """The textures of a capture as a water row's fetches read them, each decoded once: the shore mask (slot 1), the
     normal map's base level (slot 2), the reflection picture (slot 13), the near picture (slot 14). A texture is
-    found by its whole fetch constant among the capture's "texture" rows; the bytes are the dump's, kept at the
-    first row that named the constant (for a picture the game renders every frame that is frame 1's)."""
+    found by its whole fetch constant among the capture reader's selected "texture" rows. Explicit frame
+    selection uses the latest content at or before that frame; legacy read_capture(path) keeps the first row."""
 
     def __init__(self, capture):
         self.dir, self.rows, self._kept = Path(capture["path"]).parent, capture["textures"], {}
@@ -1371,7 +1378,7 @@ def check_rows(path, positions=ROW_POSITIONS, mutations=True, dumps=DUMPS):
     sides (module text, above); every mutation of Tasks 2 and 3 on the formula's side against the same machine
     results. Returns RowsResult."""
     capture = read_capture(path)
-    textures = RowTextures(capture)
+    textures_by_frame = {}
     texts = {"surface": _text(dumps, PS), "opaque": _text(dumps, PS_OPAQUE)}
     fates = {kind: {"killed": 0, "skipped": 0, "shaded": 0} for kind in texts}
     names = VERTEX_MUTATIONS + ALPHA_MUTATIONS + PIXEL_MUTATIONS if mutations else ()
@@ -1391,7 +1398,10 @@ def check_rows(path, positions=ROW_POSITIONS, mutations=True, dumps=DUMPS):
             first = first or "%s: not finite: %s" % (where, ", ".join(bad))
             continue
         try:
-            setup = RowSetup(capture, textures, row, texts[kind])
+            frame = row.get("frame")
+            if frame not in textures_by_frame:
+                textures_by_frame[frame] = RowTextures(read_capture(path, frame))
+            setup = RowSetup(capture, textures_by_frame[frame], row, texts[kind])
             draw = cr.Draw(capture["path"], row, dumps)
         except (cr.Unreadable, ValueError) as e:
             unread += 1
@@ -2505,6 +2515,121 @@ def cmd_view_terrain(args, say=print):
     say("entry condition 5 (the views' 7DDA rows pass the far-terrain family's check with their own registers): %d of %d rows: %s" % (
         agreed, total, "holds" if total and not bad else "DOES NOT HOLD"))
     return 1 if bad or not total else 0
+def reflection_differences(record, want):
+    """All captured reflection inputs against the independent tess row, bit for bit."""
+    return [key for key in want if record.get(key) != want[key]]
+
+
+def reflection_view_differences(views, want, count):
+    out = []
+    if len(views) != len(want):
+        out.append("view count")
+    first = 0
+    for k, (v, w) in enumerate(zip(views, want)):
+        for key in ("first", "count", "blurred"):
+            if v.get(key) != w.get(key):
+                out.append("view %d %s" % (k, key))
+        if v.get("first") != first:
+            out.append("view %d continuity" % k)
+        first += v.get("count", 0)
+    if first != count:
+        out.append("record count")
+    return out
+
+
+def reflection_of_row(row, sequence):
+    import impostor_check as ic
+    import texture_thumb as tt
+    c = row.get("consts") or {}
+    vs = lambda r: c["c%d" % r]
+    ps = lambda r: ic.pixel_register(row, r)
+    if cr.vs_hash(row) != "5003700B7C9B1C16" or cr.ps_hash(row) != FAR_TERRAIN_PS:
+        raise cr.Unreadable("reflection row is not the checked far-terrain pair")
+    args = [_word(x) for x in row["args"]]
+    patches = args[3]
+    # JSON may spell an exact float zero as integer 0. Convert before unary
+    # negation so the independent calculation retains C++ float signed zero.
+    tex_offset = [f32(x) for x in vs(46)[2:4]]
+    scale = [f32(x) for x in vs(14)[:2]]
+    # The product computes these in single precision, including the patch sum.
+    patch = [f32(vs(113)[0]), *vs(11)[:2], *vs(8)[:3], *vs(47)[:2], *tex_offset, *vs(46)[:2],
+             *scale, f32(-tex_offset[0] * scale[0]), f32(-tex_offset[1] * scale[1]),
+             *vs(72)[:2], *vs(114)[:2], *vs(115)[:2], ps(21)[3], *ps(21)[:3], *ps(31)[:2], *ps(19)[:3]]
+    fc = _fc(row, 16)
+    pitch = ((fc[0] >> 22) & 511) << 5
+    width, height = (fc[2] & 8191) + 1, ((fc[2] >> 13) & 8191) + 1
+    tiled = fc[0] >> 31
+    size = (tt.tiled_offset_2d((width - 1) & ~31, (height - 1) & ~31, pitch, 1) + 0xC00 if tiled
+            else pitch * 2 * (height - 1) + width * 2)
+    rs = row["rs"]
+    return {"seq": sequence, "start": 0, "count": patches, "vs_hash": cr.vs_hash(row), "ps_hash": cr.ps_hash(row),
+            "rows": [_float_bits(x) for r in range(4) for x in vs(r)],
+            "state": [_word(rs[k]) for k in ("2200", "2201", "2202", "2205", "2104", "2113", "2206")],
+            "patch": [_float_bits(x) for x in patch], "fetch": [list(_fc(row, s)) for s in (13, 3, 18, 19, 17)],
+            "map": [fc[1] & 0xFFFFF000, size, width, height, pitch, (fc[1] >> 6) & 3, tiled,
+                    (fc[0] >> 10) & 7, (fc[0] >> 13) & 7],
+            "c11x": [_float_bits(float(row["lin"]["c11x"]))]}
+
+
+def cmd_reflection(args, say=print):
+    import water_replay as replay
+    bad = total = checked = 0
+    for path in _captures_of(args):
+        for frame_row in cr.rows(path, kinds=("frame",)):
+            frame = frame_row["frame"]
+            block = frame_row.get("water")
+            if not isinstance(block, dict):
+                say("%s frame %s: water off, no reflection block" % (path.name, frame))
+                continue
+            if block.get("reflection_refused"):
+                say("%s frame %s: REFUSED %s" % (path.name, frame, block["reflection_refused"]))
+                bad += 1
+                continue
+            if "reflection_records" not in block or "views" not in block:
+                say("%s frame %s: no Task 16 reflection evidence" % (path.name, frame)); bad += 1; continue
+            captured = block["reflection_records"]
+            wanted, views, first = [], [], 0
+            try:
+                for view in replay.read_views(path, frame):
+                    rows = [r for r in view.rows if cr.ps_hash(r) == FAR_TERRAIN_PS]
+                    expected = {"first": first, "count": len(rows), "blurred": int(view.blur is not None)}
+                    if view.blur is not None:
+                        offsets, weight = replay.blur_taps(view.blur)
+                        expected["offsets"] = [_float_bits(x) for tap in offsets for x in tap]
+                        expected["weight"] = _float_bits(weight)
+                    views.append(expected)
+                    for r in rows:
+                        wanted.append(reflection_of_row(r, len(wanted)))
+                    first += len(rows)
+                actual_views = []
+                for v in block["views"]:
+                    actual_views.append({**v, "offsets": [_word(x) for x in v.get("offsets", [])], "weight": _word(v.get("weight", "0"))})
+                differences = reflection_view_differences(actual_views, views, len(captured))
+                for k, (got, want) in enumerate(zip(actual_views, views)):
+                    if want["blurred"]:
+                        differences += ["view %d %s" % (k, key) for key in ("offsets", "weight") if got[key] != want[key]]
+                if len(captured) != len(wanted) or block["reflection"] != len(captured):
+                    differences.append("reflection count")
+                for k, (got, want) in enumerate(zip(captured, wanted)):
+                    got = dict(got)
+                    for key in ("rows", "state", "patch", "map", "c11x"):
+                        got[key] = [_word(x) for x in got[key]]
+                    got["fetch"] = [[_word(x) for x in f] for f in got["fetch"]]
+                    for key in ("ps_hash", "vs_hash"):
+                        got[key] = got[key].removeprefix("0x").upper()
+                    errors = reflection_differences(got, want)
+                    checked += not errors
+                    differences += ["record %d %s" % (k, key) for key in errors]
+                total += len(wanted)
+                bad += bool(differences)
+                say("%s frame %s: %d records, %d views, blur %s: %s" % (path.name, frame, len(captured), len(views),
+                    "/".join(str(v["blurred"]) for v in actual_views), "; ".join(differences) or "bit equal"))
+            except (cr.Unreadable, KeyError, TypeError, ValueError, IndexError) as error:
+                say("%s frame %s: NOT CHECKED: %s" % (path.name, frame, error)); bad += 1
+    say("reflection: %d of %d independent rows bit equal" % (checked, total))
+    return int(bool(bad) or not total)
+
+
 def main(argv=None, say=print):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dumps", type=Path, default=DUMPS)
@@ -2525,6 +2650,9 @@ def main(argv=None, say=print):
     p = sub.add_parser("records")
     p.add_argument("capture", nargs="+")
     p.set_defaults(run=cmd_records)
+    p = sub.add_parser("reflection")
+    p.add_argument("capture", nargs="+")
+    p.set_defaults(run=cmd_reflection)
     for name, run in (("view-rule", cmd_view_rule), ("view-terrain", cmd_view_terrain)):
         p = sub.add_parser(name)
         p.add_argument("capture", nargs="+")

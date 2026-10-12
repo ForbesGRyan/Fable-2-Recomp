@@ -20,6 +20,7 @@
 #include "../capture/light_block.h"
 #include "../capture/post_block.h"
 #include "../capture/quad_record.h"
+#include "../capture/reflection_view.h"
 #include "../capture/shader_tally.h"
 #include "../capture/shadow_block.h"
 #include "../capture/water_record.h"
@@ -223,6 +224,11 @@ struct FrameScene {
   // row alone reads it; NOTHING THAT DRAWS MAY: they are not the frame's water.
   std::vector<capture::WaterRecord> water;
   std::vector<capture::WaterRecord> water_evidence;
+  std::vector<capture::DrawRecord> reflection_draws;
+  std::vector<capture::TerrainPatch> reflection_terrain;
+  std::vector<capture::LightInputs> reflection_lights;
+  std::vector<capture::ReflectionView> reflection_views;
+  uint32_t reflection_refused = 0;  // 1 over-limit, 2 incomplete view, 3 refused record
   bool water_on = false;
   uint32_t water_seen[2] = {};
   uint32_t water_taken = 0;
@@ -1019,6 +1025,60 @@ class FrameBuilder {
   // The switch for the frames from the next Open on (capture.cpp latches it at the frame's boundary). Off: the
   // three calls below do nothing and the frame's scene has no water.
   void WaterOn(bool on) { water_on_ = on; }
+
+  void RefuseReflection(uint32_t why) {
+    if (water_on_ && !reflection_refused_) reflection_refused_ = why;
+  }
+  void BeginReflectionView(uint32_t view) {
+    if (!water_on_ || reflection_refused_) return;
+    if (view >= capture::kMaxReflectionViews) { RefuseReflection(1); return; }
+    if (view != reflection_views_.size()) { RefuseReflection(2); return; }
+    reflection_open_ = true;
+  }
+  void AddReflection(const capture::DrawRecord& r, const capture::TerrainPatch* terrain,
+                     const capture::LightInputs* light, uint32_t view) {
+    if (!water_on_ || reflection_refused_) return;
+    if (reflection_draws_.size() >= capture::kMaxReflectionDraws || view >= capture::kMaxReflectionViews) {
+      RefuseReflection(1); return;
+    }
+    if (view != reflection_views_.size()) { RefuseReflection(2); return; }
+    reflection_open_ = true;
+    if (r.skip != capture::SkipReason::kNone || r.material.ps_hash != capture::kReflectionTerrainPs ||
+        !r.state_words.read || !terrain || !terrain->active || !light || light->family != capture::LightFamily::kTerrainFar) {
+      RefuseReflection(3); return;
+    }
+    for (float x : r.rows) if (!std::isfinite(x)) { RefuseReflection(3); return; }
+    // Side entries precede the record; a failed allocation refuses the whole set.
+    try {
+      const uint16_t index = uint16_t(reflection_draws_.size());
+      reflection_terrain_.push_back(*terrain);
+      reflection_lights_.push_back(*light);
+      reflection_draws_.push_back(r);
+      auto& own = reflection_draws_.back();
+      own.seq = index; own.terrain_index = index; own.light_index = index; own.wind_index = capture::kNoSideIndex;
+    } catch (...) { RefuseReflection(3); throw; }
+  }
+  void CloseReflectionView(bool blurred) {
+    if (!water_on_ || reflection_refused_) return;
+    if (reflection_views_.size() >= capture::kMaxReflectionViews) { RefuseReflection(1); return; }
+    capture::ReflectionView view;
+    view.first = reflection_views_.empty() ? 0 : reflection_views_.back().first + reflection_views_.back().count;
+    view.count = uint32_t(reflection_draws_.size()) - view.first;
+    view.blurred = blurred;
+    reflection_views_.push_back(view);
+    reflection_open_ = false;
+  }
+  void BlurReflectionView(const capture::ReflectionView& blur) {
+    if (!water_on_ || reflection_refused_) return;
+    if (reflection_views_.empty() || !std::isfinite(blur.weight) || !(blur.weight > 0 && blur.weight <= 1)) {
+      RefuseReflection(3); return;
+    }
+    for (const auto& tap : blur.offsets) for (float x : tap)
+      if (!std::isfinite(x) || std::fabs(x) > 1) { RefuseReflection(3); return; }
+    auto& v = reflection_views_.back();
+    v.blurred = 1; v.weight = blur.weight;
+    std::memcpy(v.offsets, blur.offsets, sizeof(v.offsets));
+  }
   // A draw of the water's pair in the frame's main scene (`kind`: which pixel shader). Every such draw is
   // answered by one AddWater; one that is not is counted "unread" at Finish.
   void WaterSeen(capture::WaterKind kind) {
@@ -1298,6 +1358,20 @@ class FrameBuilder {
     // counts are written either way. The next frame starts with none of it.
     s->water_on = water_on_;
     if (water_on_) {
+      const size_t closed = reflection_views_.empty() ? 0 : reflection_views_.back().first + reflection_views_.back().count;
+      if (reflection_open_ || closed != reflection_draws_.size()) RefuseReflection(2);
+      s->reflection_refused = reflection_refused_;
+      if (!reflection_refused_) {
+        s->reflection_draws = std::move(reflection_draws_);
+        s->reflection_terrain = std::move(reflection_terrain_);
+        s->reflection_lights = std::move(reflection_lights_);
+        s->reflection_views = std::move(reflection_views_);
+      }
+    }
+    reflection_draws_.clear(); reflection_terrain_.clear(); reflection_lights_.clear(); reflection_views_.clear();
+    reflection_refused_ = 0;
+    reflection_open_ = false;
+    if (water_on_) {
       const uint32_t seen = water_seen_[0] + water_seen_[1];
       if (seen > water_answered_) water_refused_[size_t(capture::WaterReason::kUnread)] += seen - water_answered_;
       uint32_t foreign = 0;
@@ -1475,6 +1549,12 @@ class FrameBuilder {
   uint32_t impostor_refused_[size_t(capture::ImpostorReason::kCount)] = {};
   // The frame's water records (AddWater) and its counts.
   bool water_on_ = false;
+  std::vector<capture::DrawRecord> reflection_draws_;
+  std::vector<capture::TerrainPatch> reflection_terrain_;
+  std::vector<capture::LightInputs> reflection_lights_;
+  std::vector<capture::ReflectionView> reflection_views_;
+  uint32_t reflection_refused_ = 0;
+  bool reflection_open_ = false;
   std::vector<capture::WaterRecord> water_;
   uint32_t water_seen_[2] = {}, water_answered_ = 0;
   uint32_t water_refused_[size_t(capture::WaterReason::kCount)] = {};

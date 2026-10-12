@@ -2,9 +2,12 @@
 on a made capture (tests/water_made.py): the cover, criterion 4's measure with its two controls, the level a fetch
 takes, the mirrored sky's horizon, the sets of the edge and the glint."""
 import math
+import copy
+import json
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 import numpy as np
@@ -28,6 +31,72 @@ def made(folder, **kw):
     kw.setdefault("mask", MASK)
     kw.setdefault("picture", UPPER)
     return water_made.capture(folder, **kw)
+
+
+class FramePictures(unittest.TestCase):
+    def capture(self, folder):
+        path = made(folder, picture=bytes([51, 102, 204, 255] * 16), pixel=NO_SUN)
+        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+        picture = next(r for r in rows if r.get("file") == "tex/picture.bin")
+        picture["frame"] = 1
+        normal = next(r for r in rows if r.get("file") == "tex/normal.bin")
+        normal["frame"] = 1
+        second = copy.deepcopy(picture)
+        second.update(frame=2, file="tex/picture2.bin")
+        data = bytearray(Path(folder, picture["file"]).read_bytes())
+        for y in range(4):
+            data[y * 128:y * 128 + 16] = bytes([204, 102, 51, 255] * 4)
+        Path(folder, second["file"]).write_bytes(data)
+        rows.append(second)
+        for row in list(rows):
+            if row.get("kind") in ("draw", "frame") and row.get("frame") == 1:
+                duplicate = copy.deepcopy(row)
+                duplicate["frame"] = 2
+                rows.append(duplicate)
+        path.write_text("".join(water_made._json(r) + "\n" for r in rows), encoding="utf-8", newline="\n")
+        return path, tuple(int(v, 16) for v in picture["fc"])
+
+    def test_each_scene_replay_samples_its_own_frame_picture(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path, fc = self.capture(folder)
+            first = wr.replay(path, 1, place=(0.0, 0.0))
+            second = wr.replay(path, 2, place=(0.0, 0.0))
+        self.assertGreater(int(first.kept.sum()), 0)
+        self.assertTrue(np.array_equal(first.kept, second.kept))
+        self.assertGreater(float(np.max(np.abs(first.colour[first.kept] - second.colour[second.kept]))), 0.1)
+
+    def test_rows_check_samples_each_rows_frame_picture(self):
+        seen = {}
+        original = wr.wc.RowSetup
+
+        def observe(capture, textures, row, text):
+            setup = original(capture, textures, row, text)
+            seen[row["frame"]] = setup.mirror(0.5, 0.5)
+            return setup
+
+        with tempfile.TemporaryDirectory() as folder:
+            path, fc = self.capture(folder)
+            with mock.patch.object(wr.wc, "RowSetup", side_effect=observe):
+                result = wr.wc.check_rows(path, positions=2, mutations=False)
+        self.assertEqual((result.rows, result.unread, result.failed), (2, 0, 0))
+        self.assertEqual(set(seen), {1, 2})
+        self.assertEqual(seen[1], [51 / 255, 102 / 255, 204 / 255])
+        self.assertEqual(seen[2], [204 / 255, 102 / 255, 51 / 255])
+
+    def test_frame_selection_preserves_global_and_legacy_first_rows(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path, fc = self.capture(folder)
+            legacy = wr.wc.read_capture(path)
+            first = wr.wc.read_capture(path, 1)
+            second = wr.wc.read_capture(path, 2)
+            self.assertEqual(legacy["textures"][fc]["file"], "tex/picture.bin")
+            self.assertEqual(first["textures"][fc]["file"], "tex/picture.bin")
+            self.assertEqual(second["textures"][fc]["file"], "tex/picture2.bin")
+            normal = wr.wc._fc(first["water"][0], 2)
+            self.assertEqual(second["textures"][normal]["file"], "tex/normal.bin")
+            mask = wr.wc._fc(first["water"][0], 1)
+            self.assertEqual(second["textures"][mask]["file"], "tex/mask.bin")
+            self.assertEqual(wr.wc.read_capture(path)["textures"][fc]["file"], "tex/picture.bin")
 
 
 class Cover(unittest.TestCase):

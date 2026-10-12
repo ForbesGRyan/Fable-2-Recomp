@@ -4208,6 +4208,112 @@ void ObserveShadowDraw(uint32_t id, const LastArgs& a, uint32_t device) {
   RecordShadowDraw(id, a, device, pass, f);
 }
 
+// --- The lake's off-scene reflection views (frame-map section 20) ---------------------------
+struct ReflectionFrame {
+  ReflectionViewTracker tracker;
+  uint32_t frame = 0;
+};
+thread_local ReflectionFrame t_reflection;
+
+// The blur's weight comes from its own shader literal, not the device's
+// stale c255. At most 32 table entries, and only the one read component.
+bool ReadReflectionBlurWeight(uint32_t obj, float* weight) {
+  uint32_t offset = 0, base = 0, size = 0;
+  const uint32_t header = obj + kPsLayout.header_offset;
+  if (!obj || !ReadVirtualBe32(header + xdk::kShaderLiteralTableField, &offset) || !offset ||
+      !ReadVirtualBe32(obj + 4 * kPsLayout.base_dword, &base)) return false;
+  const uint32_t table = header + offset;
+  if (!ReadVirtualBe32(table + xdk::kLiteralTableSizeOffset, &size) || size > 8 * kMaxLiteralGuardRuns) return false;
+  const uint8_t* entries = size ? ReadVirtual(table + xdk::kLiteralTableEntriesOffset, size) : nullptr;
+  if (!entries) return false;
+  xdk::LiteralRun runs[kMaxLiteralGuardRuns];
+  const uint32_t count = xdk::ParseLiteralRuns(entries, size, runs, kMaxLiteralGuardRuns);
+  bool found = false;
+  for (uint32_t i = 0; i < count; ++i) {
+    if (runs[i].first_register > 511) continue;
+    const uint32_t word = 4 * (511 - runs[i].first_register);
+    if (word >= runs[i].dwords) continue;
+    const uint64_t address = uint64_t(base) + runs[i].offset + uint64_t(4) * word;
+    if (address > UINT32_MAX) return false;
+    const uint8_t* value = ReadPhysical(xdk::GpuAddress(uint32_t(address)), 4);
+    if (!value) return false;
+    const uint32_t bits = LoadBe32(value);
+    std::memcpy(weight, &bits, sizeof(bits));
+    found = true;
+  }
+  return found && std::isfinite(*weight) && *weight > 0 && *weight <= 1;
+}
+
+void ObserveReflectionDraw(uint32_t id, const LastArgs& a, uint32_t device, bool in_scene) {
+  const uint32_t epoch = g_light_tries_frame.load(std::memory_order_relaxed);
+  if (t_reflection.frame != epoch) {
+    t_reflection = ReflectionFrame{};
+    t_reflection.frame = epoch;
+  }
+  uint32_t surface = 0, ps_obj = 0;
+  DeviceSnapshot dev;
+  const PsInfo* ps = nullptr;
+  if (!in_scene && ReadVirtualBe32(device + xdk::kDeviceSurfaceInfoOffset, &surface) && ReadDevice(device, &dev) && ChoosePs(dev, &ps_obj)) {
+    ps = LookupPs(ps_obj);
+  }
+  const uint32_t view = t_reflection.tracker.views();
+  const ReflectionDraw look = t_reflection.tracker.Observe(surface, 0, surface == kShadowMapSurfaceWord,
+      ps ? ps->hash : 0, id == kHook_DrawIndx_82217EE8, id == kHook_D3DDevice_BeginVertices, in_scene);
+  DrawRecord record;
+  TerrainPatch terrain;
+  LightInputs light;
+  bool read = true;
+  ReflectionView blur;
+  if (look == ReflectionDraw::kTerrain) {
+    DrawInputs in;
+    in.func_id = id;
+    DrawShaders shaders;
+    SkipReason extra = SkipReason::kUnsupportedPrim;
+    if (id == kHook_DrawIndx_8221C9C8) {
+      in.prim = kPrimQuadPatch; in.start = a.r[2]; in.count = a.r[3];
+      extra = FillTerrainInputs(device, in.start, in.count, false, in, &shaders);
+    } else if (id == kHook_DrawIndx_82207C30) {
+      uint32_t hos = 0;
+      if (ReadVirtualBe32(device + xdk::kDeviceHosCntlOffset, &hos) && (hos & 3) == xdk::kHosCntlAdaptive) {
+        in.prim = kPrimQuadPatch; in.count = a.r[4];
+        extra = FillTerrainInputs(device, 0, in.count, true, in, &shaders);
+      }
+    }
+    FillMaterial(device, shaders, in);
+    ReadStateWords(device, &in.state_words);
+    record = AssembleRecord(in, 0);
+    record.skip = ResolveSkip(record.skip, extra);
+    const TerrainPatch* own = TerrainInputsOf(in);
+    if (own) terrain = *own;
+    read = own && record.skip == SkipReason::kNone && shaders.have_dev &&
+           FillLightInputs(device, shaders.dev, shaders.vs, shaders.ps, false, -1, &light, nullptr) == LightReason::kNone;
+    float scale[4];
+    // Task 17 draws this family at exposure 1. Its own c20.w must say
+    // exactly that; the other components are not judged by this guard.
+    read = read && terrain.material.valid && terrain.material.base_valid &&
+           ReadPixelConstant(20, scale) && scale[3] == 1.0f;
+  } else if (look == ReflectionDraw::kBlur) {
+    for (uint32_t i = 0; i < 7; ++i) {
+      float reg[4];
+      if (!ReadPixelConstant(116 + i, reg)) { read = false; break; }
+      blur.offsets[i][0] = reg[0]; blur.offsets[i][1] = reg[1];
+    }
+    read = read && ReadReflectionBlurWeight(ps_obj, &blur.weight);
+  }
+  if (look == ReflectionDraw::kNone && !t_reflection.tracker.dropped()) return;
+  if (look == ReflectionDraw::kOther && !t_reflection.tracker.open()) return;
+  std::lock_guard<std::mutex> lock(g_scene_mutex);
+  // Swap advances this epoch under the same mutex; old reads never enter
+  // the following frame, even if the water switch changed at the swap.
+  if (epoch != g_light_tries_frame.load(std::memory_order_relaxed) || !g_water_frame.load(std::memory_order_relaxed)) return;
+  if (t_reflection.tracker.dropped()) g_builder.RefuseReflection(view >= kMaxReflectionViews ? 1 : 2);
+  else if (!read) g_builder.RefuseReflection(3);
+  else if (look == ReflectionDraw::kTerrain) g_builder.AddReflection(record, &terrain, &light, view);
+  else if (look == ReflectionDraw::kSky) g_builder.CloseReflectionView(false);
+  else if (look == ReflectionDraw::kBlur) g_builder.BlurReflectionView(blur);
+  else if (look == ReflectionDraw::kOther) g_builder.BeginReflectionView(view);
+}
+
 // --- The fog and sky blocks (frame-map section 16; fog_block.h) ------------------------------
 // Read only in a frame with records and with the fog wanted (g_fog_frame), once a frame each,
 // at a main-scene draw this thread is capturing.
@@ -6050,6 +6156,51 @@ void AppendFrameWater(std::string& row, const render::FrameScene& sc) {
     row += HexDwords(r.fog_base, 2);
     row += "}";
   }
+  row += "],\"views\":[";
+  for (size_t i = 0; i < sc.reflection_views.size(); ++i) {
+    const auto& v = sc.reflection_views[i];
+    std::snprintf(buf, sizeof(buf), "%s{\"first\":%u,\"count\":%u,\"blurred\":%u,\"offsets\":", i ? "," : "", v.first, v.count, v.blurred);
+    row += buf;
+    uint32_t bits[14];
+    std::memcpy(bits, v.offsets, sizeof(bits)); row += HexDwords(bits, 14);
+    uint32_t weight; std::memcpy(&weight, &v.weight, sizeof(weight));
+    std::snprintf(buf, sizeof(buf), ",\"weight\":\"0x%08X\"}", weight); row += buf;
+  }
+  std::snprintf(buf, sizeof(buf), "],\"reflection\":%u,\"reflection_refused\":%u,\"reflection_records\":[",
+                uint32_t(sc.reflection_draws.size()), sc.reflection_refused);
+  row += buf;
+  for (size_t i = 0; i < sc.reflection_draws.size(); ++i) {
+    const auto& r = sc.reflection_draws[i];
+    const auto& t = sc.reflection_terrain[r.terrain_index];
+    const auto& l = sc.reflection_lights[r.light_index];
+    std::snprintf(buf, sizeof(buf), "%s{\"seq\":%u,\"vs_hash\":\"0x%016llX\",\"ps_hash\":\"0x%016llX\",\"start\":%u,\"count\":%u,\"rows\":",
+                  i ? "," : "", r.seq, static_cast<unsigned long long>(r.vs_hash), static_cast<unsigned long long>(r.material.ps_hash), r.start, r.count);
+    row += buf;
+    auto floats = [&](const float* values, size_t count) {
+      uint32_t bits[32];
+      if (count > 32) return;
+      std::memcpy(bits, values, 4 * count); row += HexDwords(bits, uint32_t(count));
+    };
+    floats(r.rows, 16);
+    const auto& s = r.state_words;
+    const uint32_t state[] = {s.depth_control, s.blend_control, s.color_control, s.su_sc_mode, s.color_mask, s.vport_z_scale, s.vte_cntl};
+    row += ",\"state\":"; row += HexDwords(state, 7);
+    const auto& m = t.material;
+    const float patch[] = {t.patch, t.cols, t.inv_cols, t.cell[0], t.cell[1], t.height_scale, t.origin[0], t.origin[1],
+        t.tex_offset[0], t.tex_offset[1], t.tex_scale[0], t.tex_scale[1], m.base_uv[0], m.base_uv[1], m.base_uv[2], m.base_uv[3],
+        m.far_table[0], m.far_table[1], m.far_table[2], m.far_table[3], m.far_patch[0], m.far_patch[1], m.base_pow,
+        m.base_tint[0], m.base_tint[1], m.base_tint[2], m.fade[0], m.fade[1], m.eye[0], m.eye[1], m.eye[2]};
+    row += ",\"patch\":"; floats(patch, 31);
+    row += ",\"fetch\":[";
+    const uint32_t* fetches[] = {m.detail_fetch, m.base_fetch, m.far_u_fetch, m.far_v_fetch, m.normal_fetch};
+    for (uint32_t k = 0; k < 5; ++k) { if (k) row += ","; row += HexDwords(fetches[k], 6); }
+    row += "]";
+    const uint32_t map[] = {t.map.phys_addr, t.map.size, t.map.width, t.map.height, t.map.pitch, t.map.endian,
+                           uint32_t(t.map.tiled), t.map.clamp_x, t.map.clamp_y};
+    row += ",\"map\":"; row += HexDwords(map, 9);
+    row += ",\"c11x\":"; floats(&l.c11x, 1);
+    row += "}";
+  }
   row += "]}";
 }
 
@@ -6941,6 +7092,7 @@ void OnXdkReturn(uint32_t id, PPCContext&, uint8_t*) {
   // its uploads are followed: with records here, with discovery below (no
   // instruction is added to a draw that neither reads).
   if (records) t_ps_loads.Observe(in_scene);
+  if (records && g_water_frame.load(std::memory_order_relaxed)) ObserveReflectionDraw(id, args, device, in_scene);
   uint32_t seq = kNoRecordSeq;
   if (in_scene && records) {
     seq = RecordDraw(id, args, device);

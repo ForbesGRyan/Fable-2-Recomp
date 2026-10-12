@@ -14,6 +14,103 @@
 using namespace fable2::native;
 using capture::SkipReason;
 
+static int ReflectionTests() {
+  render::FrameBuilder b;
+  capture::DrawRecord r;
+  r.material.ps_hash = capture::kReflectionTerrainPs;
+  r.state_words.read = true;
+  capture::TerrainPatch terrain;
+  terrain.active = true;
+  capture::LightInputs light;
+  light.family = capture::LightFamily::kTerrainFar;
+  b.WaterOn(true);
+  const uint32_t counts[] = {36, 4, 12, 3};
+  uint32_t n = 0;
+  for (uint32_t v = 0; v < 4; ++v) {
+    for (uint32_t i = 0; i < counts[v]; ++i) {
+      r.rows[0] = float(++n);
+      terrain.patch = float(n);
+      light.c11x = float(n);
+      b.AddReflection(r, &terrain, &light, v);
+    }
+    b.CloseReflectionView(v < 2);
+  }
+  auto s = b.Finish(1);
+  if (s->reflection_draws.size() != 55 || s->reflection_views.size() != 4 || s->reflection_refused) return 230;
+  uint32_t first = 0;
+  for (uint32_t v = 0; v < 4; ++v) {
+    const auto& view = s->reflection_views[v];
+    if (view.first != first || view.count != counts[v] || view.blurred != (v < 2)) return 230;
+    first += counts[v];
+  }
+  for (uint32_t i = 0; i < 55; ++i) {
+    const auto& own = s->reflection_draws[i];
+    if (own.seq != i || own.rows[0] != i + 1 || own.terrain_index != i || own.light_index != i ||
+        s->reflection_terrain[i].patch != i + 1 || s->reflection_lights[i].c11x != i + 1) return 230;
+  }
+  for (uint32_t i = 0; i < 257; ++i) b.AddReflection(r, &terrain, &light, 0);
+  b.CloseReflectionView(false);
+  auto over = b.Finish(2);
+  if (!over->reflection_draws.empty() || !over->reflection_views.empty() || over->reflection_refused != 1) return 231;
+  b.AddReflection(r, &terrain, &light, 0);
+  auto incomplete = b.Finish(3);
+  if (!incomplete->reflection_draws.empty() || incomplete->reflection_refused != 2) return 232;
+  b.WaterOn(false);
+  b.AddReflection(r, &terrain, &light, 0); b.CloseReflectionView(false);
+  auto off = b.Finish(4);
+  if (off->reflection_draws.capacity() || off->reflection_views.capacity() || off->reflection_refused) return 233;
+  b.WaterOn(true);
+  auto next = b.Finish(5);
+  if (!next->reflection_draws.empty() || !next->reflection_views.empty() || next->reflection_refused || s->reflection_draws.size() != 55) return 234;
+  b.AddReflection(r, nullptr, &light, 0); b.CloseReflectionView(false);
+  auto bad = b.Finish(6);
+  if (!bad->reflection_draws.empty() || bad->reflection_refused != 3) return 235;
+  b.BeginReflectionView(0);
+  auto empty_open = b.Finish(7);
+  if (empty_open->reflection_refused != 2) return 236;
+  b.CloseReflectionView(false);
+  capture::ReflectionView blur;
+  blur.weight = 1.0f / 7.0f;
+  blur.offsets[2][0] = 2.0f / 256.0f;
+  b.BlurReflectionView(blur);
+  auto blurred = b.Finish(8);
+  if (blurred->reflection_views.size() != 1 || blurred->reflection_views[0].weight != blur.weight ||
+      blurred->reflection_views[0].offsets[2][0] != blur.offsets[2][0]) return 237;
+  b.CloseReflectionView(false); blur.offsets[0][0] = std::nanf(""); b.BlurReflectionView(blur);
+  auto nonfinite = b.Finish(9);
+  if (nonfinite->reflection_refused != 3 || !nonfinite->reflection_views.empty()) return 238;
+  {
+    capture::ReflectionViewTracker tracker;
+    render::FrameBuilder own;
+    own.WaterOn(true);
+    auto feed = [&](uint64_t ps, bool scene = false) {
+      const uint32_t view = tracker.views();
+      const auto look = tracker.Observe(scene ? 320 : 280, 320, false, ps,
+                                       ps == capture::kReflectionSkyPs, false, scene);
+      if (tracker.dropped()) own.RefuseReflection(view >= capture::kMaxReflectionViews ? 1 : 2);
+      else if (look == capture::ReflectionDraw::kTerrain) own.AddReflection(r, &terrain, &light, view);
+      else if (look == capture::ReflectionDraw::kSky) own.CloseReflectionView(false);
+      else if (look == capture::ReflectionDraw::kOther && tracker.open()) own.BeginReflectionView(view);
+    };
+    feed(capture::kReflectionTerrainPs); feed(capture::kReflectionSkyPs);
+    feed(0xA4A965C189287B99ull); feed(0, true);
+    auto missing_sky = own.Finish(10);
+    if (missing_sky->reflection_refused != 2 || !missing_sky->reflection_views.empty() || !missing_sky->reflection_draws.empty()) return 239;
+    tracker.Reset();
+    feed(capture::kReflectionTerrainPs); feed(capture::kReflectionSkyPs);
+    feed(0xA4A965C189287B99ull); feed(capture::kReflectionSkyPs);
+    auto no_terrain = own.Finish(11);
+    if (no_terrain->reflection_views.size() != 2 || no_terrain->reflection_views[1].first != 1 ||
+        no_terrain->reflection_views[1].count != 0 || no_terrain->reflection_refused) return 240;
+    tracker.Reset();
+    for (int i = 0; i < 8; ++i) { feed(capture::kReflectionTerrainPs); feed(capture::kReflectionSkyPs); }
+    feed(0xA4A965C189287B99ull); feed(capture::kReflectionSkyPs);
+    auto ninth = own.Finish(12);
+    if (ninth->reflection_refused != 1 || !ninth->reflection_views.empty() || !ninth->reflection_draws.empty()) return 241;
+  }
+  return 0;
+}
+
 // Every allocation of this program, counted (the buffer reuse cases below read
 // which buffers are kept and which are freed), and one made to fail on request
 // (the next allocation of g_fail_lo <= bytes < g_fail_hi throws once).
@@ -2715,6 +2812,7 @@ int main() {
 
   if (const int failed = ImpostorTests()) return failed;
   if (const int failed = WaterTests()) return failed;
+  if (const int failed = ReflectionTests()) { std::cout << "FAIL: reflection case " << failed << '\n'; return failed; }
 
   render::ScenePublisher pub;
   if (pub.Latest()) return 18;

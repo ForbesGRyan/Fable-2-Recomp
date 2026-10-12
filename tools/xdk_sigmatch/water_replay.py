@@ -329,7 +329,7 @@ def replay(path, frame, flip=False, swap_rb=False, glint=True, levels="mean", de
     not replayed, said. `out_scale`: the frame's output scale in the place of each row's c20.w (the pass writes
     its own: the game's in a post frame, the fixed exposure otherwise), so the colour is in the stored plane's unit."""
     import foliage_replay as fp
-    capture = wc.read_capture(path)
+    capture = wc.read_capture(path, frame)
     textures = wc.RowTextures(capture)
     text = wc._text(dumps, wc.PS)
     rows = [r for r in capture["water"] if r.get("frame") == frame and wc.row_kind(r) == "surface"]
@@ -1000,7 +1000,7 @@ def _view_setup(path, frame):
     """What every view of a frame shares: the capture, the views, the water rows' bases with their heights, the
     pictures by base, the light block, the fog block, the tables, the sky's inputs."""
     import terrain_replay as tr
-    cap = wc.read_capture(path)
+    cap = wc.read_capture(path, frame)
     frame_row = cap["frames"].get(frame) or {}
     block = tr.light_block_of(frame_row)
     fog = frame_row.get("fog") or {}
@@ -1281,7 +1281,7 @@ def cmd_variants(args, say=print):
 
 def _sky_inputs(path, frame):
     """(the frame's sky block for light_formulas.sky, tf4, tf13 or None, tf14 or None, a note)."""
-    capture = wc.read_capture(path)
+    capture = wc.read_capture(path, frame)
     fog = (capture["frames"].get(frame) or {}).get("fog") or {}
     sky = fog.get("sky") or {}
     tables = wc.row_tables(capture, frame)
@@ -1316,7 +1316,7 @@ def cmd_sky(args, say=print):
     bad = compared = 0
     for capture in args.capture:
         path = cr.find_capture(capture)
-        cap = wc.read_capture(path)
+        cap = wc.read_capture(path, args.frame)
         rows = [r for r in cap["water"] if r.get("frame") == args.frame and wc.row_kind(r) == "surface"]
         if not rows:
             say("%s frame %d: no water row" % (path.name, args.frame))
@@ -1436,7 +1436,7 @@ def cmd_lookup(args, say=print):
     if got is None:
         return 1
     path, fr, game, r = got
-    cap = wc.read_capture(path)
+    cap = wc.read_capture(path, args.frame)
     textures = wc.RowTextures(cap)
     sampling = np.zeros(r.kept.shape, dtype=bool)
     done = set()
@@ -1672,7 +1672,7 @@ def cmd_targets(args, say=print):
         return 1
     head, _, _, water, _ = got
     path = cr.find_capture(str(args.capture))
-    cap = wc.read_capture(path)
+    cap = wc.read_capture(path, args.frame)
     textures = wc.RowTextures(cap)
     rows = [r for r in cap["water"] if r.get("frame") == args.frame and wc.row_kind(r) == "surface"]
     by_base = {}
@@ -1798,7 +1798,7 @@ def cmd_cover(args, say=print):
 def _sky_sampling(path, frame, r, say):
     """`lookup`'s set: the replay's kept pixels whose lookup's texel and every texel within LOOKUP_REACH of it is sky in
     the game's own picture of the row's base."""
-    cap = wc.read_capture(path)
+    cap = wc.read_capture(path, frame)
     textures = wc.RowTextures(cap)
     sampling = np.zeros(r.kept.shape, dtype=bool)
     done = set()

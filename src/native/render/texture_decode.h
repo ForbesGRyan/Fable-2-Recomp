@@ -49,9 +49,9 @@ inline TexFormatInfo FormatInfo(TexFormat f) {
 
 // kSign: WaterTextureFetch's alone (a constant that does not deliver unsigned fractions); DecodeTextureFetch never answers it.
 // kLodBias: WaterTextureFetch's alone too (a normal map whose constant has a LOD bias).
-enum class FetchError : uint8_t { kNone, kNotTexture, kNot2D, kFormat, kSize, kSign, kLodBias };
+enum class FetchError : uint8_t { kNone, kNotTexture, kNot2D, kFormat, kSize, kSign, kLodBias, kSampler };
 inline const char* FetchErrorName(FetchError e) {
-  static constexpr const char* kNames[] = {"none", "not-texture", "not-2d", "format", "size", "sign", "lod-bias"};
+  static constexpr const char* kNames[] = {"none", "not-texture", "not-2d", "format", "size", "sign", "lod-bias", "sampler"};
   return size_t(e) < sizeof(kNames) / sizeof(kNames[0]) ? kNames[size_t(e)] : "?";
 }
 
@@ -659,6 +659,15 @@ enum class WaterDecode : uint8_t { kK8, kDxn };
 // at level 0 by the program and its bias is not judged. Said after kSign.
 inline constexpr uint32_t kWaterFetchMaxSide = 8192;
 constexpr uint32_t WaterFetchLodBias(const uint32_t fc[6]) { return (fc[4] >> 12) & 0x3FFu; }
+// The water microcode takes filters and anisotropy from the fetch constant. The pass's static samplers use
+// one address mode for both axes and one point/linear filter for mag, min and mip. Views start at level zero;
+// their level count implements mip_max. Mirror, halfway and border modes, anisotropy and a mip_min need more.
+constexpr bool WaterSamplerSupported(const uint32_t fc[6]) {
+  const uint32_t x = (fc[0] >> 10) & 7u, y = (fc[0] >> 13) & 7u;
+  const uint32_t mag = (fc[3] >> 19) & 3u, min = (fc[3] >> 21) & 3u, mip = (fc[3] >> 23) & 3u;
+  return x == y && (x == 0 || x == 2) && mag <= 1 && mag == min && mag == mip &&
+         ((fc[3] >> 25) & 7u) == 0 && ((fc[4] >> 2) & 0xFu) == 0;
+}
 // Whether the first `components` shader components of a fetch constant (x, y, ...) are each delivered as an
 // unsigned fraction as far as the sign fields say: the sign of the source channel its swizzle names is 0.
 constexpr bool FetchComponentsUnsigned(const uint32_t fc[6], uint32_t components) {
@@ -697,6 +706,7 @@ inline FetchError WaterTextureFetch(const uint32_t fc[6], WaterDecode kind, Text
   const uint32_t delivered = kind == WaterDecode::kK8 ? 1u : 2u;   // x; x and y
   if (!FetchComponentsUnsigned(fc, delivered) || (fc[3] & 1u) != 0 || ((fc[3] >> 13) & 0x3Fu) != 0) return FetchError::kSign;
   if (kind == WaterDecode::kDxn && WaterFetchLodBias(fc) != 0) return FetchError::kLodBias;
+  if (!WaterSamplerSupported(fc)) return FetchError::kSampler;
   *out = t;
   return FetchError::kNone;
 }

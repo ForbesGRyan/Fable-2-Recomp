@@ -167,6 +167,14 @@ def components_unsigned(fc, components):
     return True
 
 
+def sampler_supported(fc):
+    """render::WaterSamplerSupported: states the pass's four static samplers and level-zero view can reproduce."""
+    fc = _words(fc)
+    x, y = (fc[0] >> 10) & 7, (fc[0] >> 13) & 7
+    mag, minimum, mip = (fc[3] >> 19) & 3, (fc[3] >> 21) & 3, (fc[3] >> 23) & 3
+    return x == y and x in (0, 2) and mag == minimum == mip and mag in (0, 1) and not ((fc[3] >> 25) & 7) and not ((fc[4] >> 2) & 15)
+
+
 def fetch(fc, kind):
     """render::WaterTextureFetch: the fields of a 2D fetch constant of the kind's format ("k8": the shore mask,
     "dxn": the normal map). ValueError where the C++ answers anything but kNone: no texture, not 2D, another
@@ -201,6 +209,8 @@ def fetch(fc, kind):
         raise ValueError("an exponent adjust of %d" % (f["exp_adjust"] - 64 if f["exp_adjust"] & 0x20 else f["exp_adjust"]))
     if kind == "dxn" and (_words(fc)[4] >> 12) & 0x3FF:
         raise ValueError("a LOD bias of %g levels (lod-bias): the surface's program applies none" % f["lod_bias"])
+    if not sampler_supported(fc):
+        raise ValueError("sampler: addressing, filters, anisotropy or minimum level unsupported by the water pass")
     return f
 
 

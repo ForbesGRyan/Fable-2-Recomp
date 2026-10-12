@@ -2022,6 +2022,16 @@ static int WaterTests() {
   frame(b, 22);
   s = b.Finish(4);
   if (!s->water.empty() || s->water_refused[size_t(capture::WaterReason::kState)] != 1 || s->water_taken != 22) return 222;
+  // An accepted picture shape with a sampler the pass cannot reproduce empties the whole water block.
+  b.Open();
+  b.SetFog(block, source);
+  frame(b, 22);
+  uint32_t bad_picture[6] = {0x82000002u, 0x13401086u, 0x001FE0FFu, 0x00A80C14u, 6u << 2, 0x00000218u};
+  const auto fetch_reason = capture::water_detail::PictureFetch(bad_picture) ? capture::WaterReason::kNone : capture::WaterReason::kFetch;
+  b.WaterSeen(capture::WaterKind::kSurface);
+  b.AddWater(record(capture::WaterKind::kSurface, 130), fetch_reason);
+  s = b.Finish(4);
+  if (!s->water.empty() || s->water_refused[size_t(capture::WaterReason::kFetch)] != 1 || s->water_taken != 22) return 229;
   // 223: one record whose fog is not the frame's
   b.Open();
   b.SetFog(block, source);

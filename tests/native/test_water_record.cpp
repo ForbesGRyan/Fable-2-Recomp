@@ -217,6 +217,19 @@ int main() {
   { WaterDraw d = Good(); d.fetch[kWatNormal][0] |= 1u << 4; if (!refused(d, WaterReason::kFetch)) return 46; }    // the map's y signed
   { WaterDraw d = Good(); d.fetch[kWatPicture][0] |= 3u << 4; if (!refused(d, WaterReason::kFetch)) return 47; }   // gamma on green
   { WaterDraw d = Good(); d.fetch[kWatPicture][0] |= 3u << 8; if (refused(d, WaterReason::kFetch)) return 47; }    // (alpha: not a colour of the lookup)
+  // An unsupported sampler on any used slot refuses the draw; the captured linear/wrap or clamp states pass.
+  for (uint32_t slot : {uint32_t(kWatMask), uint32_t(kWatNormal), uint32_t(kWatPicture)}) {
+    for (uint32_t mode : {1u, 3u, 4u, 5u, 6u, 7u}) {
+      WaterDraw d = Good();
+      d.fetch[slot][0] |= (mode << 10) | (mode << 13);
+      if (!refused(d, WaterReason::kFetch)) return 63;
+    }
+    { WaterDraw d = Good(); d.fetch[slot][0] |= 2u << 13; if (!refused(d, WaterReason::kFetch)) return 63; }
+    { WaterDraw d = Good(); d.fetch[slot][4] |= 6u << 2; if (!refused(d, WaterReason::kFetch)) return 63; }
+    { WaterDraw d = Good(); d.fetch[slot][3] |= 1u << 19; if (!refused(d, WaterReason::kFetch)) return 63; }
+    { WaterDraw d = Good(); d.fetch[slot][3] |= 1u << 25; if (!refused(d, WaterReason::kFetch)) return 63; }
+    { WaterDraw d = Good(); d.fetch[slot][3] |= (1u << 19) | (1u << 21) | (1u << 23); if (refused(d, WaterReason::kFetch)) return 63; }
+  }
   // (ledger ruling 42) What the log's one line a reason says of a refused draw: the shaders, the bool word, and the
   // value: the first component outside its bound, the scale, the first refused slot's constant.
   {

@@ -871,54 +871,58 @@ int main() {
       }
     }
     // the fetch: the kind's format alone, the cache's own reader still refusing both
+    auto make_water_fc = [](const FcArgs& a, uint32_t fc[6]) {
+      MakeFc(a, fc);
+      fc[3] |= (a.filter << 21) | (a.filter << 23);  // water fixtures use the same min/mag/mip filter
+    };
     FcArgs a;
     a.format = kXenosK8; a.w = 64; a.h = 64; a.pitch = 64; a.endian = 0; a.base = 0x1BD03000; a.mip = 0; a.mip_max = 0;
     a.packed = false; a.clamp_x = 2; a.clamp_y = 2;
     uint32_t p[6];
-    MakeFc(a, p);
+    make_water_fc(a, p);
     TextureFetch t;
     if (DecodeTextureFetch(p, &t) != FetchError::kFormat) return 233;
     if (WaterTextureFetch(p, WaterDecode::kK8, &t) != FetchError::kNone || t.width != 64 || t.height != 64 || t.base_phys != 0x1BD03000u ||
         t.format != TexFormat::kUnsupported || t.xenos_format != kXenosK8 || t.clamp_x != 2) return 234;
     if (WaterTextureFetch(p, WaterDecode::kDxn, &t) != FetchError::kFormat) return 235;
     a.w = 512; a.h = 512; a.pitch = 512;
-    MakeFc(a, p);
+    make_water_fc(a, p);
     // (ledger ruling 42: no size a 2D constant can name is refused for being large; the largest is 8,192 a side)
     if (WaterTextureFetch(p, WaterDecode::kK8, &t) != FetchError::kNone || t.width != 512) return 236;
     a.w = 256; a.h = 256; a.pitch = 256;
-    MakeFc(a, p);
+    make_water_fc(a, p);
     if (WaterTextureFetch(p, WaterDecode::kK8, &t) != FetchError::kNone) return 236;
     a.w = 8; a.h = 257; a.pitch = 32;
-    MakeFc(a, p);
+    make_water_fc(a, p);
     if (WaterTextureFetch(p, WaterDecode::kK8, &t) != FetchError::kNone || t.height != 257) return 236;
     a.w = 8192; a.h = 8192; a.pitch = 8192;
-    MakeFc(a, p);
+    make_water_fc(a, p);
     if (WaterTextureFetch(p, WaterDecode::kK8, &t) != FetchError::kNone || t.width != 8192 || t.height != 8192) return 236;
     a.w = 64; a.h = 64; a.pitch = 32;                                                       // (a pitch below the width is still no texture of the water)
-    MakeFc(a, p);
+    make_water_fc(a, p);
     if (WaterTextureFetch(p, WaterDecode::kK8, &t) != FetchError::kSize) return 236;
     a.format = kXenosDxn; a.w = 256; a.h = 256; a.pitch = 256; a.base = 0x14D40000; a.mip = 0x14D50000; a.mip_max = 8;
-    MakeFc(a, p);
+    make_water_fc(a, p);
     if (WaterTextureFetch(p, WaterDecode::kDxn, &t) != FetchError::kNone || t.mip_max != 8 || t.mip_phys != 0x14D50000u || LevelCount(t) != 9) return 237;
     if (t.format != TexFormat::kUnsupported || t.xenos_format != kXenosDxn || DecodeTextureFetch(p, &t) != FetchError::kFormat ||
         WaterTextureFetch(p, WaterDecode::kK8, &t) != FetchError::kFormat) return 237;
     a.w = 2048; a.h = 2048; a.pitch = 2048;
-    MakeFc(a, p);
+    make_water_fc(a, p);
     if (WaterTextureFetch(p, WaterDecode::kDxn, &t) != FetchError::kNone || t.width != 2048) return 238;      // (ruling 42)
     a.w = 1024; a.h = 1024; a.pitch = 1024;
-    MakeFc(a, p);
+    make_water_fc(a, p);
     if (WaterTextureFetch(p, WaterDecode::kDxn, &t) != FetchError::kNone) return 238;
     a.pitch = 512;                                                                          // (a pitch below the width; no base)
-    MakeFc(a, p);
+    make_water_fc(a, p);
     if (WaterTextureFetch(p, WaterDecode::kDxn, &t) != FetchError::kSize) return 238;
     a.pitch = 1024; a.base = 0;
-    MakeFc(a, p);
+    make_water_fc(a, p);
     if (WaterTextureFetch(p, WaterDecode::kDxn, &t) != FetchError::kSize) return 238;
     a.base = 0x14D40000; a.dim = 0; a.w = 256; a.h = 256; a.pitch = 256;
-    MakeFc(a, p);
+    make_water_fc(a, p);
     if (WaterTextureFetch(p, WaterDecode::kDxn, &t) != FetchError::kNot2D) return 239;
     a.dim = 1; a.type = 0;
-    MakeFc(a, p);
+    make_water_fc(a, p);
     if (WaterTextureFetch(p, WaterDecode::kDxn, &t) != FetchError::kNotTexture) return 239;
     // Ledger ruling 33 (sub-project 13; the review of Tasks 1 to 5, I1): a constant that does not deliver its
     // components as unsigned fractions is refused (kSign), so that a mask's sample is a number in [0, 1] whenever
@@ -1002,7 +1006,7 @@ int main() {
           if (WaterTextureFetch(with(mask, 4, bias << 12), WaterDecode::kK8, &t) != FetchError::kNone) return 260;
         }
         // (the bits beside the field are not it: the levels below, the two above)
-        if (WaterTextureFetch(with(map, 4, 0xFFFu), WaterDecode::kDxn, &t) != FetchError::kNone) return 260;
+        if (WaterTextureFetch(with(map, 4, 0xFC3u), WaterDecode::kDxn, &t) != FetchError::kNone) return 260;
         if (WaterTextureFetch(with(map, 4, 0xFFC00000u), WaterDecode::kDxn, &t) != FetchError::kNone) return 260;
         // (a sign is said before a bias: an old case keeps its name)
         std::memcpy(q, map, sizeof(q));
@@ -1020,8 +1024,9 @@ int main() {
     {
       FcArgs d;                                                                             // the defaults: DXT1, 256 x 128, mips, swizzle, filter, clamps
       d.w = 256; d.h = 128;
+      d.clamp_y = d.clamp_x;
       uint32_t q[6];
-      MakeFc(d, q);
+      make_water_fc(d, q);
       TextureFetch ref, got;
       if (DecodeTextureFetch(q, &ref) != FetchError::kNone) return 242;
       q[1] = (q[1] & ~0x3Fu) | kXenosDxn;
@@ -1035,6 +1040,36 @@ int main() {
       keep.width = 77;
       q[1] = (q[1] & ~0x3Fu) | 18;
       if (WaterTextureFetch(q, WaterDecode::kDxn, &keep) != FetchError::kFormat || keep.width != 77) return 242;
+    }
+    // Unsupported samplers fail before producing an upload or static sampler index (same grid as Python).
+    {
+      uint32_t q[6] = {0x82000002u, 0x14D40071u, 0x001FE0FFu, 0x00A80D10u, 0x00000203u, 0x14D50A18u};
+      TextureFetch keep;
+      keep.width = 77;
+      for (uint32_t x = 0; x < 8; ++x) for (uint32_t y = 0; y < 8; ++y) {
+        q[0] = (q[0] & ~(0x3Fu << 10)) | (x << 10) | (y << 13);
+        const bool supported = x == y && (x == 0 || x == 2);
+        if (WaterSamplerSupported(q) != supported) return 261;
+        if (!supported && (WaterTextureFetch(q, WaterDecode::kDxn, &keep) != FetchError::kSampler || keep.width != 77)) return 261;
+      }
+      q[0] &= ~(0x3Fu << 10);
+      for (uint32_t mag = 0; mag < 4; ++mag) for (uint32_t min = 0; min < 4; ++min) for (uint32_t mip = 0; mip < 4; ++mip) {
+        q[3] = (q[3] & ~(0x3Fu << 19)) | (mag << 19) | (min << 21) | (mip << 23);
+        const bool supported = mag <= 1 && mag == min && mag == mip;
+        if (WaterSamplerSupported(q) != supported) return 261;
+        if (!supported && (WaterTextureFetch(q, WaterDecode::kDxn, &keep) != FetchError::kSampler || keep.width != 77)) return 261;
+      }
+      q[3] = 0x00A80D10u;
+      for (uint32_t minimum = 1; minimum < 16; ++minimum) {
+        q[4] = 0x203u | (minimum << 2);
+        if (WaterTextureFetch(q, WaterDecode::kDxn, &keep) != FetchError::kSampler || keep.width != 77) return 261;
+      }
+      q[4] = 0x203u;
+      for (uint32_t aniso = 1; aniso < 8; ++aniso) {
+        q[3] = 0x00A80D10u | (aniso << 25);
+        if (WaterTextureFetch(q, WaterDecode::kDxn, &keep) != FetchError::kSampler || keep.width != 77) return 261;
+      }
+      if (std::string(FetchErrorName(FetchError::kSampler)) != "sampler") return 261;
     }
     // The captured constants (CAP 155547, a water row's slots 1 and 2): what the two readers make of them
     const uint32_t cap1[6] = {0x80804802u, 0x1BD03002u, 0x0007E03Fu, 0x00A81400u, 0x00000003u, 0x00000218u};

@@ -144,6 +144,41 @@ class DecodeDxnRg8(unittest.TestCase):
 
 
 class Fetch(unittest.TestCase):
+    def test_unsupported_sampler_states_are_refused(self):
+        for kind, fc in (("k8", MASK_FC), ("dxn", NORMAL_FC)):
+            words = wt._words(fc)
+            for dword, clear, bits in ((0, 7 << 13, (0 if kind == "k8" else 2) << 13),
+                                      (4, 0xF << 2, 6 << 2), (3, 3 << 23, 0),
+                                      (0, 0x3F << 10, (1 << 10) | (1 << 13)),
+                                      (3, 7 << 25, 1 << 25)):
+                changed = list(words)
+                changed[dword] = (changed[dword] & ~clear) | bits
+                with self.subTest(kind=kind, dword=dword, bits=bits), self.assertRaisesRegex(ValueError, "sampler"):
+                    wt.fetch(changed, kind)
+
+    def test_shared_sampler_guard_covers_the_picture(self):
+        for fc in (MASK_FC, NORMAL_FC, PICTURE_FC):
+            self.assertTrue(wt.sampler_supported(fc))
+        for x in range(8):
+            for y in range(8):
+                words = wt._words(PICTURE_FC)
+                words[0] = (words[0] & ~(0x3F << 10)) | (x << 10) | (y << 13)
+                self.assertEqual(wt.sampler_supported(words), x == y and x in (0, 2), (x, y))
+        for mag in range(4):
+            for min_filter in range(4):
+                for mip in range(4):
+                    words = wt._words(PICTURE_FC)
+                    words[3] = (words[3] & ~(0x3F << 19)) | (mag << 19) | (min_filter << 21) | (mip << 23)
+                    self.assertEqual(wt.sampler_supported(words), mag == min_filter == mip and mag in (0, 1))
+        for aniso in range(1, 8):
+            words = wt._words(PICTURE_FC)
+            words[3] |= aniso << 25
+            self.assertFalse(wt.sampler_supported(words))
+        for minimum in range(1, 16):
+            words = wt._words(PICTURE_FC)
+            words[4] |= minimum << 2
+            self.assertFalse(wt.sampler_supported(words))
+
     def test_the_captured_constants(self):
         m = wt.fetch(MASK_FC, "k8")
         self.assertEqual((m["width"], m["height"], m["pitch"], m["tiled"], m["endian"], m["base"], m["clamp"], m["swizzle"], m["levels"]),
@@ -256,7 +291,7 @@ class Fetch(unittest.TestCase):
                 wt.fetch(with_bits(NORMAL_FC, 4, bias << 12), "dxn")
             self.assertIn("lod-bias", str(e.exception))
             wt.fetch(with_bits(MASK_FC, 4, bias << 12), "k8")
-        wt.fetch(with_bits(NORMAL_FC, 4, 0xFFF), "dxn")                     # the bits below the field
+        wt.fetch(with_bits(NORMAL_FC, 4, 0xFC3), "dxn")                     # below the field, leaving mip_min at zero
         wt.fetch(with_bits(NORMAL_FC, 4, 0xFFC00000), "dxn")                # and above it
         with self.assertRaises(ValueError) as e:                           # a sign is said first
             wt.fetch(with_bits(with_bits(NORMAL_FC, 0, 1 << 2), 4, 32 << 12), "dxn")
@@ -264,7 +299,7 @@ class Fetch(unittest.TestCase):
         text = (ROOT / "src" / "native" / "render" / "texture_decode.h").read_text(encoding="utf-8")
         self.assertIn("constexpr uint32_t WaterFetchLodBias(const uint32_t fc[6]) { return (fc[4] >> 12) & 0x3FFu; }", text)
         self.assertIn("  if (kind == WaterDecode::kDxn && WaterFetchLodBias(fc) != 0) return FetchError::kLodBias;\n", text)
-        self.assertIn('{"none", "not-texture", "not-2d", "format", "size", "sign", "lod-bias"};', text)
+        self.assertIn('{"none", "not-texture", "not-2d", "format", "size", "sign", "lod-bias", "sampler"};', text)
 
     def test_the_limits_are_the_cpp_headers(self):
         text = (ROOT / "src" / "native" / "render" / "texture_decode.h").read_text(encoding="utf-8")

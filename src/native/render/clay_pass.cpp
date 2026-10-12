@@ -4311,7 +4311,8 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       } else {
         s.swizzle = WaterSwizzleWord(mask_fetch, normal_fetch);
       }
-      if (DecodeTextureFetch(rec.fetch[capture::kWatPicture], &picture_fetch) != FetchError::kNone) {
+      if (!capture::water_detail::PictureFetch(rec.fetch[capture::kWatPicture]) ||
+          DecodeTextureFetch(rec.fetch[capture::kWatPicture], &picture_fetch) != FetchError::kNone) {
         water_in.targets = false;  // (no fetch of a picture: nothing says how the target is sampled)
       } else {
         s.samplers[2] = SamplerIndex(picture_fetch);

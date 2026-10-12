@@ -335,7 +335,7 @@ constexpr bool PsRegisterRead(uint32_t index, uint32_t pbool) {
 // ledger ruling 41; the fraction number format; no exponent adjust).
 inline bool PictureFetch(const uint32_t fc[6]) {
   return render::WaterPictureFetch(fc) && (fc[1] & 0xFFFFF000u) != 0 && render::FetchComponentsUnsigned(fc, 3) && (fc[3] & 1u) == 0 &&
-         ((fc[3] >> 13) & 0x3Fu) == 0;
+          ((fc[3] >> 13) & 0x3Fu) == 0 && render::WaterSamplerSupported(fc);
 }
 }  // namespace water_detail
 

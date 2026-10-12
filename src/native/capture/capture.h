@@ -62,6 +62,16 @@ void SetWindWanted(bool wanted);
 // word and tests two thread-local flags (the pending "indx" and "verts" rows of a discovery capture,
 // never set without one): the pixel bool word's last writer is followed for the impostors' b129 rule.
 void SetImpostorsWanted(ImpostorMode mode);
+// The consumer's water switch (the native view on and fable2_native_water on; water_record.h). Set and
+// latched like SetShadowsWanted, and it has an effect only in a frame with records. Without it nothing of
+// the lake's draws is read, no record or array is made, and a frame's scene says so (FrameScene::water_on
+// false): a main-scene draw whose pixel shader has a no-albedo entry costs one load and one branch, and
+// every recorded draw one compare of its own material status. With it the draws of vertex shader BEAD with
+// pixel shader A17D or F6D9 in the main scene become FrameScene::water, whole or empty with counted
+// reasons, beside the draw records they make as before; and, as with the impostors, every hooked draw
+// also reads the device's pending bool word and tests two thread-local flags: the pixel bool word's last
+// writer is followed for the water's b136 and b137 rules.
+void SetWaterWanted(bool wanted);
 // Starts a discovery capture of `frames` guest frames (1..100000) sampling every `every`th
 // draw (1..64) at the next guest frame, into a new file, like FABLE2_NATIVE_DISCOVERY
 // after its delay. Callable from any thread. Returns false, with a log line, when the

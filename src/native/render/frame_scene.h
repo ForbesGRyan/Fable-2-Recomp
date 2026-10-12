@@ -22,6 +22,7 @@
 #include "../capture/quad_record.h"
 #include "../capture/shader_tally.h"
 #include "../capture/shadow_block.h"
+#include "../capture/water_record.h"
 #include "../capture/wind_inputs.h"
 
 namespace fable2::native::render {
@@ -207,6 +208,25 @@ struct FrameScene {
   capture::ImpostorMode impostor_mode = capture::ImpostorMode::kOff;
   uint32_t impostor_seen = 0, impostor_taken = 0, impostor_quads = 0;
   uint32_t impostor_refused[size_t(capture::ImpostorReason::kCount)] = {};
+  // The frame's water records (water_record.h; frame-map section 20, "Water records"): the lake's draws of both
+  // pixel shaders, a bounded block of the scene's own (at most capture::kMaxWaterRecords), each linked to its draw
+  // record by WaterRecord::place (= DrawRecord::seq).
+  // `water` IS WHOLE OR EMPTY (spec ruling 11): every draw of the pair that the frame saw, each with every rule
+  // passed and the frame's own fog, or none at all. A reader may take it as it is: a frame in which any draw of
+  // the pair was refused has no record here, and the pass then draws that frame as it did before the water.
+  // water_on: the switch as latched for this frame; false: nothing was read, every count is 0 and no array has
+  // memory. water_seen: the frame's draws of the pair, [0] the surface's (A17D), [1] the opaque twin's (F6D9).
+  // water_taken: the records that passed every rule (water.size() or, in a frame refused whole, what it would
+  // have been). water_refused: the draws that gave no record and the records taken out, by reason
+  // (capture::WaterReason); any count above 0 means `water` is empty.
+  // water_evidence: the records a frame REFUSED WHOLE had held (empty in every other frame). Discovery's frame
+  // row alone reads it; NOTHING THAT DRAWS MAY: they are not the frame's water.
+  std::vector<capture::WaterRecord> water;
+  std::vector<capture::WaterRecord> water_evidence;
+  bool water_on = false;
+  uint32_t water_seen[2] = {};
+  uint32_t water_taken = 0;
+  uint32_t water_refused[size_t(capture::WaterReason::kCount)] = {};
   // The drawable records with light inputs by family (index: LightFamily), how
   // many of them are a family's two- or four-light form, the records without
   // inputs by reason (index: LightReason), and the pixel shaders of those,
@@ -500,6 +520,26 @@ inline std::string ImpostorLine(const FrameScene& scene) {
     if (!scene.impostor_refused[i]) continue;
     std::snprintf(buf, sizeof(buf), "%s%s: %u", first ? "" : ", ", capture::ImpostorReasonName(capture::ImpostorReason(i)),
                   scene.impostor_refused[i]);
+    line += buf;
+    first = false;
+  }
+  return line + "}";
+}
+
+// The frame's water records as the log and the overlay write them: "off" for a frame in which they were not
+// wanted, else "seen S (opaque O), taken T | water-record {reason: n, ...}" (the draws of the pair, those of
+// them of the opaque twin, the records that passed every rule, and the draws without a record by reason; with
+// anything in the braces the scene holds no water record: spec ruling 11).
+inline std::string WaterLine(const FrameScene& scene) {
+  if (!scene.water_on) return "off";
+  char buf[96];
+  std::snprintf(buf, sizeof(buf), "seen %u (opaque %u), taken %u | %s {", scene.water_seen[0] + scene.water_seen[1], scene.water_seen[1],
+                scene.water_taken, capture::kWaterRecordReason);
+  std::string line = buf;
+  bool first = true;
+  for (size_t i = 1; i < size_t(capture::WaterReason::kCount); ++i) {
+    if (!scene.water_refused[i]) continue;
+    std::snprintf(buf, sizeof(buf), "%s%s: %u", first ? "" : ", ", capture::WaterReasonName(capture::WaterReason(i)), scene.water_refused[i]);
     line += buf;
     first = false;
   }
@@ -975,6 +1015,39 @@ class FrameBuilder {
     impostor_quads_ += record.quads;
   }
 
+  // --- The water records (FrameScene::water) ---
+  // The switch for the frames from the next Open on (capture.cpp latches it at the frame's boundary). Off: the
+  // three calls below do nothing and the frame's scene has no water.
+  void WaterOn(bool on) { water_on_ = on; }
+  // A draw of the water's pair in the frame's main scene (`kind`: which pixel shader). Every such draw is
+  // answered by one AddWater; one that is not is counted "unread" at Finish.
+  void WaterSeen(capture::WaterKind kind) {
+    if (!water_on_ || kind == capture::WaterKind::kNone) return;
+    ++water_seen_[kind == capture::WaterKind::kOpaque ? 1 : 0];
+  }
+  // The record of a draw counted by WaterSeen, or why it has none (`why` != kNone: counted by reason; the record
+  // is not looked at). An invalid record offered as good is "unread"; a valid record past kMaxWaterRecords is
+  // "over-limit". Nothing of a refused draw is kept. One allocation a frame (the block, for the bound's records)
+  // in a frame that has water; none in any other.
+  void AddWater(const capture::WaterRecord& record, capture::WaterReason why) {
+    if (!water_on_) return;
+    ++water_answered_;
+    if (why != capture::WaterReason::kNone) {
+      ++water_refused_[size_t(why < capture::WaterReason::kCount ? why : capture::WaterReason::kUnread)];
+      return;
+    }
+    if (!capture::WaterRecordValid(record)) {
+      ++water_refused_[size_t(capture::WaterReason::kUnread)];
+      return;
+    }
+    if (water_.size() >= capture::kMaxWaterRecords) {
+      ++water_refused_[size_t(capture::WaterReason::kOverLimit)];
+      return;
+    }
+    if (water_.empty()) water_.reserve(capture::kMaxWaterRecords);
+    water_.push_back(record);
+  }
+
   // Frees the spare buffers (any thread; scenes that die later bring theirs).
   void ReleaseSpares() { pool_->Release(); }
   size_t spare_count() const { return pool_->size(); }
@@ -1216,6 +1289,39 @@ class FrameBuilder {
     impostors_.clear();
     impostor_words_.clear();
     impostor_seen_ = impostor_answered_ = impostor_quads_ = 0;
+    // The water records: whole or empty (spec ruling 11). A draw seen that was never answered is "unread". Then
+    // the `fog` rule, here because the frame's fog block and its tables' addresses are both in hand only now
+    // (s->fog, set above): a record whose fog is not the frame's validated block is counted, and in a frame
+    // without a valid block every record is (the native surface is fogged from the frame's block; unlike an
+    // impostor it is never drawn unfogged). If ANY reason was counted this frame, of either kind, the scene's
+    // `water` stays empty and what was held goes to `water_evidence`; else the records are the scene's. The
+    // counts are written either way. The next frame starts with none of it.
+    s->water_on = water_on_;
+    if (water_on_) {
+      const uint32_t seen = water_seen_[0] + water_seen_[1];
+      if (seen > water_answered_) water_refused_[size_t(capture::WaterReason::kUnread)] += seen - water_answered_;
+      uint32_t foreign = 0;
+      for (const capture::WaterRecord& r : water_) {
+        if (!capture::WaterFogMatches(r, s->fog, s->fog_source.base)) ++foreign;
+      }
+      water_refused_[size_t(capture::WaterReason::kFog)] += foreign;
+      bool whole = true;
+      for (uint32_t n : water_refused_) whole = whole && n == 0;
+      s->water_taken = uint32_t(water_.size()) - foreign;
+      // (the builder's array becomes the scene's; the next frame with water allocates its own)
+      if (whole) {
+        s->water = std::move(water_);
+      } else {
+        s->water_evidence = std::move(water_);
+      }
+      s->water_seen[0] = water_seen_[0];
+      s->water_seen[1] = water_seen_[1];
+      std::copy(std::begin(water_refused_), std::end(water_refused_), std::begin(s->water_refused));
+    }
+    // (also when the switch went off inside the frame: nothing counted before reaches a later frame)
+    std::fill(std::begin(water_refused_), std::end(water_refused_), 0u);
+    water_.clear();
+    water_seen_[0] = water_seen_[1] = water_answered_ = 0;
     if (!draws_.empty() || !terrain_.empty() || !lights_.empty() || !shadow_draws_[0].empty() || !shadow_draws_[1].empty()) {
       const size_t shadows[2] = {shadow_draws_[0].size(), shadow_draws_[1].size()};
       const size_t records = draws_.size(), patches = terrain_.size(), lit = lights_.size(), swaying = wind_.size();
@@ -1367,6 +1473,11 @@ class FrameBuilder {
   uint32_t impostor_seen_ = 0, impostor_answered_ = 0, impostor_quads_ = 0;
   size_t impostor_words_last_ = 0;  // the floats of the last frame that had impostors: what the next one reserves at once
   uint32_t impostor_refused_[size_t(capture::ImpostorReason::kCount)] = {};
+  // The frame's water records (AddWater) and its counts.
+  bool water_on_ = false;
+  std::vector<capture::WaterRecord> water_;
+  uint32_t water_seen_[2] = {}, water_answered_ = 0;
+  uint32_t water_refused_[size_t(capture::WaterReason::kCount)] = {};
   // The sun layer's tree occluders of the frame so far (FrameScene::layer_depth_place).
   uint32_t layer_occluders_ = 0;
   uint32_t layer_occluders_failed_ = 0;

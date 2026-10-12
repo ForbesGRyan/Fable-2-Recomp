@@ -152,6 +152,16 @@ REXCVAR_DEFINE_STRING(fable2_native_impostor_feed, "", "Fable2",
                       "Impostors line says \"on (feed)\", the first-upload log line \"from the feed's file\", and a "
                       "pictures file (.f2np) written beside a scene dump carries a flag that impostor_pictures.py used "
                       "prints. A file that is missing or refused: one log line, and nothing changes.");
+REXCVAR_DEFINE_STRING(fable2_native_water, "off", "Fable2",
+                      "Native water (sub-project 13: the lake's surface; frame map section 20): on (or true, 1) = with a "
+                      "composite view the capture also reads the lake's draws (vertex shader BEAD with pixel shader A17D, "
+                      "the blended surface, or F6D9, its opaque twin that draws nothing in the game) into a side block of "
+                      "the frame: at most 64 records of both, each linked to its draw record, the frame's water whole or "
+                      "empty with counted reasons (the capture log's water line; \"water-record {...}\"). THIS BUILD "
+                      "CAPTURES ONLY: the native view draws the frame as with the switch off (the surface step and its "
+                      "reflection targets come with the next builds of the sub-project), so the switch changes no "
+                      "picture yet. off (or false, 0; the default) = none of it is read or made, and the log has the one "
+                      "line \"water: off\".");
 REXCVAR_DEFINE_STRING(fable2_native_coverage, "off", "Fable2",
                       "Native coverage (sub-project 11, phase 11b; default off until the user's checks: frame map section "
                       "18, \"Validation (11b)\"): on (or true, 1) = the native view "
@@ -447,6 +457,19 @@ bool CurrentWind() {
   const bool on = render::ParseClayLight(REXCVAR_GET(fable2_native_wind), &recognized) == render::ClayLight::kOn;
   if (!recognized && !warned.exchange(true)) {
     REXLOG_WARN("[native] unknown fable2_native_wind '{}', using off (accepted: {})", REXCVAR_GET(fable2_native_wind),
+                render::kClaySwitchWords);
+  }
+  return on;
+}
+
+// fable2_native_water: read like the wind's switch; anything else is off, with one warning that names
+// the words. The capture reads the lake's draws with it, in a frame with records.
+bool CurrentWater() {
+  static std::atomic<bool> warned{false};
+  bool recognized = true;
+  const bool on = render::ParseClayLight(REXCVAR_GET(fable2_native_water), &recognized) == render::ClayLight::kOn;
+  if (!recognized && !warned.exchange(true)) {
+    REXLOG_WARN("[native] unknown fable2_native_water '{}', using off (accepted: {})", REXCVAR_GET(fable2_native_water),
                 render::kClaySwitchWords);
   }
   return on;
@@ -1213,6 +1236,8 @@ void Install(rex::memory::Memory* memory) {
       REXLOG_INFO("[native] impostors: {} (fable2_native_impostors)", capture::ImpostorModeName(impostors));
     }
   }
+  // The water's line always (spec criterion 15 names the off line).
+  REXLOG_INFO("[native] water: {} (fable2_native_water)", CurrentWater() ? "on" : "off");
   // (a diagnostic: its line only when it is on, so that a normal run's log is the one of before)
   if (CurrentSceneDump()) {
     REXLOG_INFO("[native] scene dump: on (fable2_native_scene_dump; each discovery capture made in a native view writes the native "
@@ -1293,6 +1318,8 @@ void PollFrame() {
   capture::SetWindWanted(wanted && CurrentWind());
   // (and the impostors' word: off without a composite view)
   capture::SetImpostorsWanted(wanted ? CurrentImpostors() : capture::ImpostorMode::kOff);
+  // (and the water's: off without a composite view)
+  capture::SetWaterWanted(wanted && CurrentWater());
   if (wanted) capture::SetRecordsWanted(true);
   rex::graphics::RequestNativeGuestOutputPostProcess(wanted);
 }

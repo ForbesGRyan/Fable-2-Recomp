@@ -47,7 +47,12 @@ inline TexFormatInfo FormatInfo(TexFormat f) {
   }
 }
 
-enum class FetchError : uint8_t { kNone, kNotTexture, kNot2D, kFormat, kSize };
+// kSign: WaterTextureFetch's alone (a constant that does not deliver unsigned fractions); DecodeTextureFetch never answers it.
+enum class FetchError : uint8_t { kNone, kNotTexture, kNot2D, kFormat, kSize, kSign };
+inline const char* FetchErrorName(FetchError e) {
+  static constexpr const char* kNames[] = {"none", "not-texture", "not-2d", "format", "size", "sign"};
+  return size_t(e) < sizeof(kNames) / sizeof(kNames[0]) ? kNames[size_t(e)] : "?";
+}
 
 struct TextureFetch {
   uint32_t base_phys = 0, mip_phys = 0;  // GPU physical, 4 KB aligned
@@ -635,7 +640,13 @@ enum class WaterDecode : uint8_t { kK8, kDxn };
 // bits); out->format stays kUnsupported and out->xenos_format is the kind's. kFormat for any other format,
 // kNotTexture / kNot2D / kSize as DecodeTextureFetch; and kSize for a mask above 256 x 256 or a normal map
 // above 1,024 x 1,024 (the capture's `fetch` rule again: the lake's masks are at most 64 x 64 and its normal
-// map 256 x 256 in every capture so far). `out` is untouched unless the answer is kNone.
+// map 256 x 256 in every capture so far). And kSign (ledger ruling 33 of sub-project 13) for a constant that does
+// not deliver its components to the shader as unsigned fractions: a sign field (dword 0 bits 2 to 9, two bits a
+// component: 0 unsigned, 1 signed, 2 unsigned biased, 3 gamma) other than 0 on a DELIVERED component (x for the
+// mask, x and y for the normal map; the others are not judged), the integer number format (dword 3 bit 0) or an
+// exponent adjust other than 0 (dword 3 bits 13 to 18). That is what makes a mask's sample a number in [0, 1],
+// which the dead draw's proof stands on (clay_logic.h, WaterOpaqueDead; tools/xdk_sigmatch/water_textures.py,
+// fetch, is the twin). `out` is untouched unless the answer is kNone.
 inline FetchError WaterTextureFetch(const uint32_t fc[6], WaterDecode kind, TextureFetch* out) {
   if ((fc[0] & 3) != 2) return FetchError::kNotTexture;
   if (((fc[5] >> 9) & 3) != 1) return FetchError::kNot2D;
@@ -663,6 +674,8 @@ inline FetchError WaterTextureFetch(const uint32_t fc[6], WaterDecode kind, Text
   if (t.base_phys == 0 || t.pitch_texels < t.width) return FetchError::kSize;
   const uint32_t limit = kind == WaterDecode::kK8 ? 256u : 1024u;
   if (t.width > limit || t.height > limit) return FetchError::kSize;
+  const uint32_t delivered_signs = kind == WaterDecode::kK8 ? 0x3u : 0xFu;   // x; x and y
+  if (((fc[0] >> 2) & delivered_signs) != 0 || (fc[3] & 1u) != 0 || ((fc[3] >> 13) & 0x3Fu) != 0) return FetchError::kSign;
   *out = t;
   return FetchError::kNone;
 }

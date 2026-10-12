@@ -1937,6 +1937,163 @@ static int ImpostorTests() {
   return 0;
 }
 
+// Water records (sub-project 13, plan Task 9): the frame's water is whole or empty (spec ruling 11).
+static int WaterTests() {
+  capture::FogBlock block{};
+  block.valid = true;
+  block.amount[0] = 1.0f; block.amount[1] = 0.75f;
+  block.axis[0] = 0.25f; block.axis[1] = 0.5f; block.axis[2] = 0.75f;
+  block.range[0] = 12.0f; block.range[1] = 1900.0f; block.range[2] = 0.05f; block.range[3] = 0.002f;
+  block.near_colour[0] = 0.1f; block.near_colour[1] = 0.2f; block.near_colour[2] = 0.3f;
+  capture::FogSource source;
+  source.base[0] = 0x1A100000u;                                   // tf4
+  source.base[1] = 0x1A200000u;                                   // tf5
+  auto record = [&](capture::WaterKind kind, uint32_t place, bool own_fog = true) {
+    capture::WaterRecord r{};
+    r.vs_hash = capture::kWaterVs;
+    r.ps_hash = kind == capture::WaterKind::kOpaque ? capture::kWaterOpaquePs : capture::kWaterPs;
+    r.kind = uint32_t(kind);
+    r.place = place;
+    std::memcpy(r.ps[capture::kWatP28], block.amount, 8);
+    std::memcpy(r.ps[capture::kWatP66], block.axis, 12);
+    r.ps[capture::kWatP67][0] = 12.0f; r.ps[capture::kWatP67][2] = 0.05f; r.ps[capture::kWatP67][3] = 0.002f;
+    std::memcpy(r.ps[capture::kWatP68], block.near_colour, 12);
+    r.fog_base[0] = source.base[0];
+    r.fog_base[1] = own_fog ? source.base[1] : 0x1A300000u;
+    return r;
+  };
+  // The bridge's shape: twelve opaque draws early, twelve of the surface late.
+  auto frame = [&](render::FrameBuilder& b, uint32_t count = 24) {
+    for (uint32_t i = 0; i < count; ++i) {
+      const capture::WaterKind kind = i < count / 2 ? capture::WaterKind::kOpaque : capture::WaterKind::kSurface;
+      b.WaterSeen(kind);
+      b.AddWater(record(kind, 100 + i), capture::WaterReason::kNone);
+    }
+  };
+  auto reasons = [](const render::FrameScene& s) {
+    uint32_t n = 0;
+    for (uint32_t v : s.water_refused) n += v;
+    return n;
+  };
+  const size_t kUnread = size_t(capture::WaterReason::kUnread), kRegister = size_t(capture::WaterReason::kRegister),
+               kFog = size_t(capture::WaterReason::kFog), kOver = size_t(capture::WaterReason::kOverLimit);
+  render::FrameBuilder b;
+  b.FogOn(true);
+  // 220: the switch off: nothing, and no memory (the block of 64 records is one of the counted buffers)
+  static_assert(sizeof(capture::WaterRecord) * capture::kMaxWaterRecords >= kBufferBytes);
+  const long long buffers_before = g_buffers.load();
+  b.Open();
+  b.SetFog(block, source);
+  frame(b);
+  auto s = b.Finish(1);
+  if (g_buffers.load() != buffers_before) return 220;
+  if (s->water_on || s->water_seen[0] != 0 || s->water_seen[1] != 0 || s->water_taken != 0 || !s->water.empty() || reasons(*s) != 0) return 220;
+  if (s->water.capacity() != 0 || s->water_evidence.capacity() != 0 || render::WaterLine(*s) != "off") return 220;
+  // 221: 24 good records with a matching fog block are the scene's 24, in their order
+  b.WaterOn(true);
+  b.Open();
+  b.SetFog(block, source);
+  frame(b);
+  s = b.Finish(2);
+  if (!s->water_on || s->water.size() != 24 || s->water_seen[0] != 12 || s->water_seen[1] != 12 || s->water_taken != 24 || reasons(*s) != 0) return 221;
+  for (uint32_t i = 0; i < 24; ++i) {
+    if (s->water[i].place != 100 + i || s->water[i].kind != uint32_t(i < 12 ? capture::WaterKind::kOpaque : capture::WaterKind::kSurface)) return 221;
+  }
+  if (!s->water_evidence.empty()) return 221;
+  // 228: the line
+  if (render::WaterLine(*s) != "seen 24 (opaque 12), taken 24 | water-record {}") return 228;
+  // 222 (Review Focus 2): one record refused at AddWater: the scene holds NONE; the counts stand
+  b.Open();
+  b.SetFog(block, source);
+  frame(b, 22);
+  b.WaterSeen(capture::WaterKind::kSurface);
+  b.AddWater(capture::WaterRecord{}, capture::WaterReason::kRegister);
+  b.WaterSeen(capture::WaterKind::kSurface);
+  b.AddWater(record(capture::WaterKind::kSurface, 130), capture::WaterReason::kNone);
+  s = b.Finish(3);
+  if (!s->water.empty() || s->water_refused[kRegister] != 1 || reasons(*s) != 1 || s->water_seen[0] != 13 || s->water_seen[1] != 11) return 222;
+  if (s->water_taken != 23 || s->water_evidence.size() != 23 || s->water_evidence[22].place != 130) return 222;   // (what was held: evidence, not the pass's)
+  if (render::WaterLine(*s) != "seen 24 (opaque 11), taken 23 | water-record {register: 1}") return 222;
+  // ... and of either kind: the opaque twin refused empties the scene as well
+  b.Open();
+  b.SetFog(block, source);
+  b.WaterSeen(capture::WaterKind::kOpaque);
+  b.AddWater(capture::WaterRecord{}, capture::WaterReason::kState);
+  frame(b, 22);
+  s = b.Finish(4);
+  if (!s->water.empty() || s->water_refused[size_t(capture::WaterReason::kState)] != 1 || s->water_taken != 22) return 222;
+  // 223: one record whose fog is not the frame's
+  b.Open();
+  b.SetFog(block, source);
+  frame(b, 22);
+  b.WaterSeen(capture::WaterKind::kSurface);
+  b.AddWater(record(capture::WaterKind::kSurface, 140, false), capture::WaterReason::kNone);
+  s = b.Finish(5);
+  if (!s->water.empty() || s->water_refused[kFog] != 1 || reasons(*s) != 1 || s->water_taken != 22 || s->water_evidence.size() != 23) return 223;
+  // 224: a frame without a valid fog block: every record `fog`
+  b.Open();
+  frame(b);
+  s = b.Finish(6);
+  if (s->fog.valid || !s->water.empty() || s->water_refused[kFog] != 24 || s->water_taken != 0) return 224;
+  // 225: the 65th good record
+  b.Open();
+  b.SetFog(block, source);
+  frame(b, 64);
+  s = b.Finish(7);
+  if (s->water.size() != 64 || reasons(*s) != 0 || s->water_taken != 64) return 225;       // (the bound itself holds)
+  b.Open();
+  b.SetFog(block, source);
+  frame(b, 64);
+  b.WaterSeen(capture::WaterKind::kSurface);
+  b.AddWater(record(capture::WaterKind::kSurface, 999), capture::WaterReason::kNone);
+  s = b.Finish(8);
+  if (!s->water.empty() || s->water_refused[kOver] != 1 || reasons(*s) != 1 || s->water_taken != 64 || s->water_evidence.size() != 64) return 225;
+  // 226: a draw seen that got no AddWater
+  b.Open();
+  b.SetFog(block, source);
+  frame(b);
+  b.WaterSeen(capture::WaterKind::kOpaque);
+  s = b.Finish(9);
+  if (!s->water.empty() || s->water_refused[kUnread] != 1 || reasons(*s) != 1 || s->water_seen[1] != 13) return 226;
+  // ... an invalid record offered as good, a reason that is no reason, a draw of no kind
+  b.Open();
+  b.SetFog(block, source);
+  b.WaterSeen(capture::WaterKind::kSurface);
+  b.AddWater(capture::WaterRecord{}, capture::WaterReason::kNone);
+  b.WaterSeen(capture::WaterKind::kSurface);
+  b.AddWater(record(capture::WaterKind::kSurface, 1), capture::WaterReason::kCount);
+  b.WaterSeen(capture::WaterKind::kNone);
+  s = b.Finish(10);
+  if (!s->water.empty() || s->water_refused[kUnread] != 2 || reasons(*s) != 2 || s->water_seen[0] != 2 || s->water_seen[1] != 0) return 226;
+  // 227: nothing of one frame is in the next (a refused frame, then a good one, then an empty one)
+  b.Open();
+  b.SetFog(block, source);
+  frame(b);
+  s = b.Finish(11);
+  if (s->water.size() != 24 || reasons(*s) != 0 || s->water_seen[0] != 12 || !s->water_evidence.empty()) return 227;
+  b.Open();
+  b.SetFog(block, source);
+  s = b.Finish(12);
+  if (!s->water_on || !s->water.empty() || reasons(*s) != 0 || s->water_seen[0] != 0 || s->water_taken != 0) return 227;
+  if (render::WaterLine(*s) != "seen 0 (opaque 0), taken 0 | water-record {}") return 227;
+  // 229: switched off at a frame boundary: that frame's scene says off and holds nothing, whatever was offered
+  b.Open();
+  b.SetFog(block, source);
+  frame(b);
+  b.AddWater(capture::WaterRecord{}, capture::WaterReason::kFetch);
+  b.WaterOn(false);
+  s = b.Finish(13);
+  if (s->water_on || !s->water.empty() || !s->water_evidence.empty() || s->water_seen[0] != 0 || s->water_taken != 0 || reasons(*s) != 0) return 229;
+  b.WaterOn(true);
+  b.Open();
+  b.SetFog(block, source);
+  frame(b, 2);
+  s = b.Finish(14);
+  if (s->water.size() != 2 || reasons(*s) != 0) return 229;                                   // nothing of the frame before
+  static_assert(sizeof(capture::WaterRecord) == 584);
+  return 0;
+}
+
 int main() {
   auto r = capture::AssembleRecord(Good(), 7);
   if (r.skip != SkipReason::kNone || r.seq != 7 || r.rows[0] != 1.0f || r.rows[15] != 16.0f) return 1;
@@ -2547,6 +2704,7 @@ int main() {
   }
 
   if (const int failed = ImpostorTests()) return failed;
+  if (const int failed = WaterTests()) return failed;
 
   render::ScenePublisher pub;
   if (pub.Latest()) return 18;
@@ -2555,6 +2713,6 @@ int main() {
   if (pub.Latest()->frame != 43) return 19;
   std::cout << "PASS: draw record, frame builder, terrain side array, light side array and block, buffer reuse, "
                "pool under threads, shadow lists and block, fog and sky blocks, post block, quad records, wind side arrays, "
-               "impostor records, publisher\n";
+               "impostor records, water records, publisher\n";
   return 0;
 }

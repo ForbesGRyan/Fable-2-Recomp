@@ -704,6 +704,148 @@ class Pins(unittest.TestCase):
             self.skipTest("none of the four captures is here")
 
 
+class Records(unittest.TestCase):
+    """water_check.py records (plan Task 9; spec criterion 6): a frame row's water records against the rows of their
+    own draws, bit for bit. The made capture's records are made from water_made's registers, not from its rows."""
+
+    def check(self, change=None, **kw):
+        with tempfile.TemporaryDirectory() as folder:
+            water_check._captures.clear()
+            return water_check.check_records(water_made.records_capture(folder, change=change, **kw))
+
+    def one_problem(self, change, text):
+        frames, records, problems = self.check(change)
+        self.assertTrue(problems, "nothing was found wrong")
+        self.assertTrue(any(text in line for line in problems), problems)
+        return problems
+
+    def test_a_record_and_its_row_agree(self):
+        self.assertEqual(self.check(), (1, 2, []))
+
+    def test_one_register_word_changed_fails(self):
+        def pixel(rows, water):                                     # c141.w of the surface's record, one unit in the last place
+            words = water["records"][1]["ps"]
+            at = 4 * water_made.RECORD_PIXEL_REGISTERS.index(141) + 3
+            words[at] = "0x%08X" % (int(words[at], 16) + 1)
+        problems = self.one_problem(pixel, "pixel c141.w")
+        self.assertEqual(len(problems), 1, problems)
+
+        def unread(rows, water):                                    # a component no formula reads is the record's too
+            words = water["records"][0]["ps"]
+            at = 4 * water_made.RECORD_PIXEL_REGISTERS.index(129) + 2
+            words[at] = "0x7FC00000"
+        self.one_problem(unread, "pixel c129.z")
+
+        def vertex(rows, water):
+            water["records"][1]["vs"][5] = "0x3F800001"
+        self.assertEqual(len(self.one_problem(vertex, "vertex c116.y")), 1)
+
+    def test_a_record_whose_place_names_another_row_fails(self):
+        def other(rows, water):                                     # the surface's record under the opaque row's number
+            water["records"][1]["place"] = 5
+        problems = self.one_problem(other, "place 5")
+        self.assertTrue(any("has no record" in line for line in problems), problems)
+
+        def exchanged(rows, water):                                 # both records under the other's number: every member differs
+            water["records"][0]["place"], water["records"][1]["place"] = 900, 5
+        problems = self.one_problem(exchanged, "ps_hash")
+        self.assertTrue(any("is not after the record before it" in line for line in problems), problems)
+
+        def nowhere(rows, water):
+            water["records"][1]["place"] = 901
+        self.one_problem(nowhere, "place 901 is no in-scene water row's seq")
+
+        def row_moved(rows, water):                                 # the row's own number changed: the record names no row
+            [r for r in rows if r.get("seq") == 900][0]["seq"] = 899
+        self.one_problem(row_moved, "place 900 is no in-scene water row's seq")
+
+    def test_the_bool_word_is_the_last_writers(self):
+        def shadow(rows, water):
+            water["records"][1]["pbool"] = "0x00000100"             # the device's shadow, which the rows carry as "pbool"
+        self.one_problem(shadow, "pbool 0x00000100, the row's 0x00000110")
+
+    def test_the_fetches_the_bases_the_stride_and_the_hashes(self):
+        def fetch(rows, water):
+            water["records"][1]["fetch"][2][1] = "0x13501086"       # slot 13 at another body's picture
+        self.one_problem(fetch, "fetch")
+
+        def base(rows, water):
+            water["records"][0]["fog_base"][1] = "0x1FAB1000"
+        self.one_problem(base, "fog_base")
+
+        def stride(rows, water):
+            water["records"][0]["stride"] = 6
+        self.one_problem(stride, "stride 6")
+
+        def kind(rows, water):
+            water["records"][0]["kind"] = "surface"
+        self.one_problem(kind, "kind surface, the row's opaque")
+
+    def test_the_counts_are_held_to_the_rows(self):
+        def seen(rows, water):
+            water["seen"]["opaque"] = 2
+        self.one_problem(seen, "seen opaque 2, the frame has 1 in-scene rows of F6D9")
+
+        def dropped(rows, water):
+            del water["records"][0]
+        problems = self.one_problem(dropped, "has no record")
+        self.assertTrue(any("taken 2 and 1 records" in line for line in problems), problems)
+
+        def twice(rows, water):
+            water["records"].append(dict(water["records"][1]))
+        self.one_problem(twice, "is not after the record before it")
+
+        def member(rows, water):
+            del water["records"][1]["fog_base"]
+        self.one_problem(member, "no fog_base")
+
+    def test_a_frame_refused_whole_or_without_the_switch_fails(self):
+        def refused(rows, water):
+            water["whole"] = False
+            water["refused"] = {"register": 1}
+        self.one_problem(refused, "refused whole: register: 1")
+
+        def off(rows, water):
+            [r for r in rows if r.get("kind") == "frame"][0]["water"] = "off"
+        frames, records, problems = self.check(off)
+        self.assertEqual((frames, records), (0, 0))
+        self.assertIn("not made with --fable2_native_water=on", problems[0])
+
+    def test_a_vertex_component_the_row_cannot_print_is_not_compared_and_a_printed_one_is(self):
+        nan = float("nan")
+        vertex = {115: (1.0365, 1.1775, nan, water_made.GARBAGE)}   # c115.z: no formula reads it; the row prints null
+
+        def keep(rows, water):
+            water["records"][1]["vs"][2] = "0x7FC00000"
+            water["records"][0]["vs"][2] = "0x7FC00000"
+        self.assertEqual(self.check(keep, vertex=vertex), (1, 2, []))
+
+        def garbage(rows, water):                                   # c115.w is printed (1.5e22) and so compared
+            water["records"][1]["vs"][3] = "0x00000000"
+        self.one_problem(garbage, "vertex c115.w")
+
+    def test_the_command_exits_1_on_a_difference_and_0_without(self):
+        lines = []
+        with tempfile.TemporaryDirectory() as folder:
+            water_check._captures.clear()
+            good = water_made.records_capture(folder)
+            self.assertEqual(water_check.main(["records", str(good)], lines.append), 0)
+        self.assertIn("native_discovery_made.jsonl: 1 frames with water records, 2 records, 0 problems", lines)
+        self.assertEqual(lines[-1], "every record equals its own row bit for bit")
+
+        def wrong(rows, water):
+            water["records"][1]["ps"][0] = "0x00000001"
+        lines = []
+        with tempfile.TemporaryDirectory() as folder:
+            water_check._captures.clear()
+            bad = water_made.records_capture(folder, change=wrong)
+            self.assertEqual(water_check.main(["records", str(bad)], lines.append), 1)
+        self.assertEqual(lines[-1], "1 captures FAILED")
+        with tempfile.TemporaryDirectory() as folder:               # a capture of a build without the switch: no water at all
+            water_check._captures.clear()
+            self.assertEqual(water_check.main(["records", str(water_made.capture(folder, opaque=True))], [].append), 1)
+
+
 class ViewRule(unittest.TestCase):
     """Plan Task 15, entry condition 4: the k-th view of a frame is the picture at the k-th smallest slot-13 base."""
     VIEW, BLUR, SCENE = ("row", 280, "D72FD0903CCE7DD6", False), ("row", 320, "F186D27249B462F8", False), ("row", 1120, "F6D98C7B4D98438B", True)

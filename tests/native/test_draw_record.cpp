@@ -1,5 +1,6 @@
 // Synthetic standalone test for record assembly with instancing; no game or GPU.
 #include "../../src/native/capture/draw_record.h"
+#include "../../src/native/capture/water_record.h"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -501,6 +502,22 @@ int main() {
     if (!LayerOccluderLooked(0) || !LayerOccluderLooked(kMaxLayerOccluders - 1) || !LayerOccluderLooked(kMaxLayerOccluders)) return 136;
     if (LayerOccluderLooked(kMaxLayerOccluders + 1) || LayerOccluderLooked(~0u)) return 137;
   }
-  std::puts("PASS: record assembly with instance sets, instance range check and cap, distance cut, skin, render state, depth-only, side indices, shadow casters, occluder twin");
+  // 151 (sub-project 13, plan Task 9): the water records are a side block of their own; the draw record a water
+  // draw makes is the one of before, byte for byte in size and in where its last member lies. A water record
+  // names its draw by DrawRecord::seq, and what it does not carry (the state words with the alpha test's
+  // reference) is that draw record's.
+  {
+    static_assert(sizeof(DrawRecord) == 616 && offsetof(DrawRecord, wind_index) == 614, "the water sub-project must not move the draw record");
+    static_assert(sizeof(WaterRecord) == 584 && offsetof(WaterRecord, place) == 16 && offsetof(WaterRecord, vs) == 32 &&
+                  offsetof(WaterRecord, ps) == 96 && offsetof(WaterRecord, fetch) == 480 && offsetof(WaterRecord, fog_base) == 576);
+    DrawInputs in = Good();
+    in.state_words.read = true;
+    in.state_words.alpha_ref = 0x3D70F0F2u;
+    const DrawRecord r = AssembleRecord(in, 1628);
+    WaterRecord w{};
+    w.place = r.seq;
+    if (w.place != 1628 || r.state_words.alpha_ref != 0x3D70F0F2u || sizeof(r) != 616 || sizeof(w) != 584) return 151;
+  }
+  std::puts("PASS: record assembly with instance sets, instance range check and cap, distance cut, skin, render state, depth-only, side indices, shadow casters, occluder twin, the sizes beside the water record's");
   return 0;
 }

@@ -845,6 +845,41 @@ int main() {
     a.dim = 1; a.type = 0;
     MakeFc(a, p);
     if (WaterTextureFetch(p, WaterDecode::kDxn, &t) != FetchError::kNotTexture) return 239;
+    // Ledger ruling 33 (sub-project 13; the review of Tasks 1 to 5, I1): a constant that does not deliver its
+    // components as unsigned fractions is refused (kSign), so that a mask's sample is a number in [0, 1] whenever
+    // the rule admits the draw: a sign field other than 0 on a delivered component (x for the mask; x and y for the
+    // normal map), the integer number format (dword 3 bit 0), an exponent adjust (dword 3 bits 13 to 18). The same
+    // cases as tests/test_water_textures.py holds water_textures.fetch to.
+    {
+      const uint32_t mask[6] = {0x80804802u, 0x1BD03002u, 0x0007E03Fu, 0x00A81400u, 0x00000003u, 0x00000218u};   // CAP 155547, slot 1
+      const uint32_t map[6] = {0x82000002u, 0x14D40071u, 0x001FE0FFu, 0x00A80D10u, 0x00000203u, 0x14D50A18u};    // slot 2
+      uint32_t q[6];
+      TextureFetch keep;
+      keep.width = 77;
+      auto with = [&](const uint32_t* from, uint32_t dword, uint32_t bits) {
+        std::memcpy(q, from, sizeof(q));
+        q[dword] |= bits;
+        return q;
+      };
+      for (uint32_t sign = 1; sign <= 3; ++sign) {                                          // signed, biased, gamma
+        if (WaterTextureFetch(with(mask, 0, sign << 2), WaterDecode::kK8, &keep) != FetchError::kSign || keep.width != 77) return 249;
+        if (WaterTextureFetch(with(map, 0, sign << 2), WaterDecode::kDxn, &keep) != FetchError::kSign) return 249;
+        if (WaterTextureFetch(with(map, 0, sign << 4), WaterDecode::kDxn, &keep) != FetchError::kSign || keep.width != 77) return 249;
+        // a component the shader is not given is not judged: the mask's y, z, w; the map's z, w
+        if (WaterTextureFetch(with(mask, 0, sign << 4), WaterDecode::kK8, &t) != FetchError::kNone) return 250;
+        if (WaterTextureFetch(with(mask, 0, sign << 8), WaterDecode::kK8, &t) != FetchError::kNone) return 250;
+        if (WaterTextureFetch(with(map, 0, sign << 6), WaterDecode::kDxn, &t) != FetchError::kNone) return 250;
+      }
+      if (WaterTextureFetch(with(mask, 3, 1u), WaterDecode::kK8, &keep) != FetchError::kSign ||
+          WaterTextureFetch(with(map, 3, 1u), WaterDecode::kDxn, &keep) != FetchError::kSign) return 251;      // the integer number format
+      for (uint32_t adjust : {1u, 0x20u, 0x3Fu}) {                                          // +1, -32, -1
+        if (WaterTextureFetch(with(mask, 3, adjust << 13), WaterDecode::kK8, &keep) != FetchError::kSign ||
+            WaterTextureFetch(with(map, 3, adjust << 13), WaterDecode::kDxn, &keep) != FetchError::kSign || keep.width != 77) return 252;
+      }
+      // (the size and the format are judged first, as before: a refusal's name does not change for an old case)
+      if (WaterTextureFetch(with(mask, 1, 49u), WaterDecode::kK8, &keep) != FetchError::kFormat) return 253;
+      if (std::string(FetchErrorName(FetchError::kSign)) != "sign") return 253;
+    }
     // every field as DecodeTextureFetch reads it: one constant of a decoded format, its format bits exchanged for
     // the kind's, gives the same fetch but for the two format members
     {

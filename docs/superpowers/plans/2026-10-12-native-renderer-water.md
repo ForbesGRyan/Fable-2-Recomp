@@ -1808,6 +1808,34 @@ int main() {
       enums against the table). Commit "Water records: a bounded side block of both pixel shaders
       linked by sequence number, whole or empty; the switch".
 
+**As executed (Task 9; the report is `.superpowers/sdd/2026-10-12-native-renderer-water/task9-10-report.md`).** Built
+without the game (ledger ruling 39); the three runs above are still owed. Where the build differs from the text
+above, and why:
+- *Step 0 was not taken*: ledger ruling 29 forbids the copy of the build folder and the `-ExeDir` run; criterion
+  15's off picture is compared with sub-project 12's closing off-runs.
+- *The off path*: a recorded draw compares its own material status (`in.material.status == kNoAlbedo`) before the
+  thread-local byte is loaded, so only the no-albedo draws load it; every other draw executes that one compare
+  of a byte of its own inputs and a test of a local under the lock.
+- *The bool word's epoch* is bumped only when neither the impostors nor the water followed the word in the frame
+  before: turning the water on in a running game costs the impostors no frame (the text above had it cost one).
+- *The state rule is by decoded fields*, not by the opaque twin's measured words whole (a bit of unknown meaning
+  is not compared), and asks for the reversed depth range, as the impostors' does.
+- *The registers' rule*: `c136`, `c137`, `c138`, `c142`, `c143` are judged only with `b136` set and `c139` never
+  (`ps_read_under`); `c128.x`, `c136.x`, `c138.x` strictly above 0 (ledger ruling 34); the vertex registers are
+  factors (`gen_water_table.VS_KIND`).
+- *The fetch rule* has ledger ruling 33 (`FetchError::kSign`), and slot 13 a base and no sign on its colours.
+- *The 24 pixel registers* are read `c0` through `ReadPixelConstant` and the other 23 from the bank after one look
+  at the shader's literal registers (`ReadWaterPixelRegisters`), not through 24 calls of `ReadPixelConstant`.
+- *The frame row*: `"vs"` and `"ps"` are arrays of hex words; the row also has `"whole"`, `"ps_hash"`, `"vs_hash"`
+  and `"stride"`; a frame refused whole keeps its held records in `FrameScene::water_evidence` for the row alone.
+- *`"seq"` on every in-scene `"draw"` row* (not in the text above): `RecordDraw` returns the sequence number and the
+  row's writer takes it, so that `water_check.py records` holds a record to the row of ITS OWN draw; the n-th
+  recorded draw cannot be counted from the rows (four hooked calls a frame have no row).
+- `WaterKindOfPs`, `WaterFetchList`, `WaterLiteralsMatch`, `WaterRegistersBounded`, `WaterScaleBounded` and
+  `kWaterSceneWidth` / `kWaterSceneHeight` are in `water_record.h` beside what the text above names.
+- [measured, without the game] the pure rules on the captures in hand: 164 of 164 water rows give a record and
+  each of the ten frames is whole (`out/tests/w910/t9_rows_check.txt`).
+
 ### Task 10: The draw's rules and mirrors (pure; may start beside Task 9)
 
 **Files:** `src/native/render/clay_logic.h` (a new section "Native water" after "Native

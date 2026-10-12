@@ -4,7 +4,8 @@ BEAD84BD72072E0E with pixel shader A17D8AEC3A817D45 (and, if asked, by the opaqu
 its vertex and index dumps, a shore mask, a normal map of one block, a reflection picture, an empty slot 14, the
 frame's two fog tables, and, if asked, the rows of one reflection view. Every row has the members the readers take
 from a real capture's rows and no other. Not a test file: tests/test_water_formulas.py and tests/test_water_replay.py
-import it."""
+import it. records_capture (plan Task 9) is the same capture as a build with the water's switch on writes it:
+"seq" on the water rows, the fog's tables at slots 4 and 5, and the frame row's "water"."""
 import json
 import struct
 from pathlib import Path
@@ -153,4 +154,53 @@ def capture(folder, mask=(0, 255), pixel=None, vertex=None, opaque=False, views=
     out.append(frame)
     path = folder / "native_discovery_made.jsonl"
     path.write_text("".join(_json(r) + "\n" for r in out), encoding="utf-8", newline="\n")
+    return path
+
+
+# --- a capture made with the water's switch on (plan Task 9: water_check.py records) --------------------------------
+
+RECORD_PIXEL_REGISTERS = (0, 19, 20, 28, 31, 66, 67, 68, 116, 117, 126, 127, 128, 129, 130, 131, 136, 137, 138, 139, 140, 141, 142, 143)
+FOG_TABLES = {"4": ["0x00804956", "0x1FAB105D", "0x0000003F", "0x00280D11", "0x00000003", "0x00000018"],
+              "5": ["0x02004802", "0x1FAB0086", "0x000000FF", "0x00280C14", "0x00000003", "0x00000018"]}
+
+
+def _bits(values):
+    return ["0x%08X" % struct.unpack(">I", struct.pack(">f", v))[0] for v in values]
+
+
+def record(kind, place, tf, pixel=None, vertex=None, pbool="0x00000110"):
+    """One record of a frame row's "water" as the capture writes it, made from this file's registers and not from a
+    row: what the capture read at the draw whose sequence number is `place`."""
+    registers = dict(PIXEL)
+    registers.update(pixel or {})
+    vregisters = dict(VERTEX)
+    vregisters.update(vertex or {})
+    return {"place": place, "kind": kind, "ps_hash": "0x" + (PS if kind == "surface" else PS_OPAQUE), "vs_hash": "0x" + VS,
+            "pbool": pbool, "stride": 5,
+            "vs": sum((_bits(vregisters[reg]) for reg in (115, 116, 117, 118)), []),
+            "ps": sum((_bits(registers.get(reg, (0.0, 0.0, 0.0, 0.0))) for reg in RECORD_PIXEL_REGISTERS), []),
+            "fetch": [list(tf[slot]) for slot in ("1", "2", "13", "14")],
+            "fog_base": ["0x%08X" % (int(FOG_TABLES[slot][1], 16) & 0xFFFFF000) for slot in ("4", "5")]}
+
+
+def records_capture(folder, places=(5, 900), change=None, **kw):
+    """capture(opaque=True) as a build with the water's switch on writes it: the opaque twin's row with "seq"
+    places[0] and the surface's with places[1], the fog's two tables at slots 4 and 5 of both, and the frame row's
+    "water": on, whole, seen one of each kind, taken 2, no reason, two records. `change(rows, water)`: called with
+    the capture's rows (dicts, in file order) and the frame row's "water" before the file is written, to make one
+    thing wrong."""
+    path = capture(folder, opaque=True, **kw)
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    water = [r for r in rows if r.get("kind") == "draw" and r.get("in_scene") and (r.get("vs_hash") or "").upper().endswith(VS)]
+    assert len(water) == 2 and water[0]["ps_hash"].endswith(PS_OPAQUE) and water[1]["ps_hash"].endswith(PS)
+    listed = []
+    for r, place, kind in zip(water, places, ("opaque", "surface")):
+        r["seq"] = place
+        r["tf"].update(FOG_TABLES)
+        listed.append(record(kind, place, r["tf"], pixel=kw.get("pixel"), vertex=kw.get("vertex")))
+    frame = [r for r in rows if r.get("kind") == "frame"][0]
+    frame["water"] = {"on": True, "whole": True, "seen": {"surface": 1, "opaque": 1}, "taken": 2, "refused": {}, "records": listed}
+    if change:
+        change(rows, frame["water"])
+    path.write_text("".join(_json(r) + "\n" for r in rows), encoding="utf-8", newline="\n")
     return path

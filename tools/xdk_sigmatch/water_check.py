@@ -23,6 +23,11 @@ On discovery captures (plan Task 4; a name's last digits or a path; "The capture
   bools | states | bounds <capture>...      both bool members and the bits of b136 and b137; the state words by
                                             shader; the smallest and largest of every read component, against the
                                             table's sanity bounds
+  records <capture>...                      plan Task 9, criterion 6: on a capture made with --fable2_native_water=on,
+                                            every water record of every frame row against the "draw" row of its own
+                                            draw (the row whose "seq" is the record's place), bit for bit: the
+                                            registers, the fetch constants, the fog tables' bases, the bool word of
+                                            the last writer, the hashes; "seen" and "taken" against the frame's rows
   view-rule <capture>...                    plan Task 15, entry condition 4: in every frame, the base each reflection
                                             view's picture ends at (the last resolve after the view's rows, or after
                                             the blur's draw that follows them; from the command dwords of the
@@ -2077,6 +2082,177 @@ def cmd_bounds(args, say=print):
     return 0
 
 
+# --- the capture's water records against the rows (plan Task 9; spec criterion 6) ---------------------------------
+
+RECORD_SLOTS = (1, 2, 13, 14)       # WaterRecord::fetch (water_table.inc, FABLE2_WATER_FETCH_SLOT)
+RECORD_FOG_SLOTS = (4, 5)           # WaterRecord::fog_base: the bases of the fog's two tables
+RECORD_KEYS = ("place", "kind", "ps_hash", "vs_hash", "pbool", "stride", "vs", "ps", "fetch", "fog_base")
+
+
+def _word(text):
+    return int(str(text), 16)
+
+
+def _float_bits(x):
+    return struct.unpack("<I", struct.pack("<f", x))[0]
+
+
+def record_of_row(row):
+    """What a water record of a "draw" row must hold, from the row alone (the capture's own second reading of the
+    same draw): {"place": the row's "seq", "kind", "ps_hash", "vs_hash", "pbool": the row's "pbool_load" (the last
+    writer's word, not the device's shadow), "stride": the first fetch's, "vs": the bits of c115 to c118 from "bank"
+    (16 words; None for a component the row prints as no number, which cannot be compared), "ps": the bits of the
+    table's 24 pixel registers from "pfull" (96 words), "fetch": the constants of slots 1, 2, 13, 14 from "tf",
+    "fog_base": the base addresses of slots 4 and 5}. cr.Unreadable when the row lacks one of them."""
+    kind = row_kind(row)
+    if kind is None:
+        raise cr.Unreadable("not a water row")
+    if row.get("seq") is None:
+        raise cr.Unreadable("the row has no \"seq\" (a capture of a build before plan Task 9, or a draw that made no record)")
+    bank = row.get("bank") or []
+    if len(bank) < 4 * 119:
+        raise cr.Unreadable("the row has no vertex bank up to c118")
+    vs = []
+    for reg in lf.WATER_SHADER["reg"]:
+        vs += [None if x is None else _float_bits(x) for x in bank[4 * reg:4 * reg + 4]]
+    ps = []
+    full = row.get("pfull") or ""
+    for reg in lf.WATER_SHADER["ps_reg"]:
+        text = full[32 * reg:32 * reg + 32]
+        if len(text) < 32 or "-" in text:
+            raise cr.Unreadable("the row's \"pfull\" does not hold pixel c%d" % reg)
+        ps += [int(text[8 * k:8 * k + 8], 16) for k in range(4)]
+    if row.get("pbool_load") is None:
+        raise cr.Unreadable("the row has no \"pbool_load\"")
+    fetches = row.get("fetches") or []
+    return {"place": int(row["seq"]), "kind": kind, "ps_hash": cr.ps_hash(row), "vs_hash": cr.vs_hash(row),
+            "pbool": _word(row["pbool_load"]), "stride": int(fetches[0]["stride"]) if fetches else None, "vs": vs, "ps": ps,
+            "fetch": [list(_fc(row, slot)) for slot in RECORD_SLOTS],
+            "fog_base": [_fc(row, slot)[1] & 0xFFFFF000 for slot in RECORD_FOG_SLOTS]}
+
+
+def _record_words(record):
+    """A frame row's record with its hex words as numbers, in record_of_row's shape."""
+    h = lambda text: (str(text)[2:] if str(text).startswith("0x") else str(text)).upper()   # noqa: E731
+    return {"place": int(record["place"]), "kind": record["kind"], "ps_hash": h(record["ps_hash"]), "vs_hash": h(record["vs_hash"]),
+            "pbool": _word(record["pbool"]), "stride": int(record["stride"]), "vs": [_word(v) for v in record["vs"]],
+            "ps": [_word(v) for v in record["ps"]], "fetch": [[_word(v) for v in f] for f in record["fetch"]],
+            "fog_base": [_word(v) for v in record["fog_base"]]}
+
+
+def record_differences(record, want):
+    """The members in which a frame row's record (as _record_words gives it) differs from record_of_row's `want`,
+    each as text; bit for bit. A vertex component the row could not print (None) is not compared."""
+    out = []
+    for key in ("place", "kind", "ps_hash", "vs_hash", "pbool", "stride", "fetch", "fog_base"):
+        if record[key] != want[key]:
+            fmt = (lambda v: "0x%08X" % v) if key == "pbool" else str
+            out.append("%s %s, the row's %s" % (key, fmt(record[key]), fmt(want[key])))
+    if len(record["vs"]) != 16 or len(record["ps"]) != 96:
+        return out + ["%d vertex and %d pixel words, not 16 and 96" % (len(record["vs"]), len(record["ps"]))]
+    for i, (got, row) in enumerate(zip(record["vs"], want["vs"])):
+        if row is not None and got != row:
+            out.append("vertex c%d.%s %08X, the row's %08X" % (lf.WATER_SHADER["reg"][i // 4], "xyzw"[i % 4], got, row))
+    for i, (got, row) in enumerate(zip(record["ps"], want["ps"])):
+        if got != row:
+            out.append("pixel c%d.%s %08X, the row's %08X" % (lf.WATER_SHADER["ps_reg"][i // 4], "xyzw"[i % 4], got, row))
+    return out
+
+
+def check_records(path):
+    """(frames, records, problems) of a capture made with the water's switch on: every record of every frame row's
+    "water" against the "draw" row of its own draw, which is the frame's in-scene row whose "seq" is the record's
+    place (the sequence number the capture recorded that draw under: the row and the record are written from two
+    readings of the same draw). Per frame: the row says the water was on and whole, with no reason counted;
+    "seen" by kind is the number of the frame's in-scene BEAD rows of that pixel shader; "taken" is their number
+    and the records' number; the records are in the rows' order with ascending places; every in-scene water row
+    has its record; and every member of a record equals the row's, bit for bit (record_of_row). A frame whose row
+    says "off", or has no "water" at all, is a problem: the capture was not made with the switch on. Each line of
+    `problems` is one difference."""
+    cap = read_capture(path)
+    rows = {}
+    for r in cap["water"]:
+        if r.get("in_scene"):
+            rows.setdefault(r.get("frame"), []).append(r)
+    frames = records = 0
+    problems = []
+    for frame in sorted(cap["frames"], key=lambda f: (f is None, f)):
+        frame_row = cap["frames"][frame]
+        water = frame_row.get("water")
+        where = "frame %s" % frame
+        if not isinstance(water, dict) or not water.get("on"):
+            problems.append("%s: no water records (%r): the capture was not made with --fable2_native_water=on" % (where, water))
+            continue
+        frames += 1
+        own = rows.get(frame, [])
+        by_kind = {"surface": 0, "opaque": 0}
+        for r in own:
+            by_kind[row_kind(r)] += 1
+        refused = water.get("refused") or {}
+        if refused or not water.get("whole"):
+            problems.append("%s: the frame's water was refused whole: %s" % (where, ", ".join("%s: %s" % kv for kv in sorted(refused.items())) or "\"whole\" is false"))
+        seen = water.get("seen") or {}
+        for kind in ("surface", "opaque"):
+            if seen.get(kind) != by_kind[kind]:
+                problems.append("%s: seen %s %s, the frame has %d in-scene rows of %s" % (where, kind, seen.get(kind), by_kind[kind], PIXEL_HASH[kind][:4]))
+        listed = water.get("records") or []
+        if water.get("taken") != len(own) or len(listed) != len(own):
+            problems.append("%s: taken %s and %d records, the frame has %d in-scene water rows" % (where, water.get("taken"), len(listed), len(own)))
+        by_seq = {}
+        for r in own:
+            if r.get("seq") is None:
+                problems.append("%s: the water row at line %s has no \"seq\"" % (where, r.get("line")))
+            elif r["seq"] in by_seq:
+                problems.append("%s: two water rows with seq %s (lines %s and %s)" % (where, r["seq"], by_seq[r["seq"]].get("line"), r.get("line")))
+            else:
+                by_seq[r["seq"]] = r
+        last = None
+        answered = set()
+        for i, raw in enumerate(listed):
+            records += 1
+            missing = [k for k in RECORD_KEYS if k not in raw]
+            if missing:
+                problems.append("%s record %d: no %s" % (where, i, ", ".join(missing)))
+                continue
+            record = _record_words(raw)
+            if last is not None and record["place"] <= last:
+                problems.append("%s record %d: place %d is not after the record before it (%d)" % (where, i, record["place"], last))
+            last = record["place"]
+            row = by_seq.get(record["place"])
+            if row is None:
+                problems.append("%s record %d: place %d is no in-scene water row's seq" % (where, i, record["place"]))
+                continue
+            if record["place"] in answered:
+                problems.append("%s record %d: a second record of place %d" % (where, i, record["place"]))
+            answered.add(record["place"])
+            try:
+                want = record_of_row(row)
+            except cr.Unreadable as why:
+                problems.append("%s record %d: its row (line %s) cannot be read: %s" % (where, i, row.get("line"), why))
+                continue
+            for line in record_differences(record, want):
+                problems.append("%s record %d (place %d, line %s): %s" % (where, i, record["place"], row.get("line"), line))
+        for seq in sorted(set(by_seq) - answered):
+            problems.append("%s: the water row with seq %s (line %s) has no record" % (where, seq, by_seq[seq].get("line")))
+    return frames, records, problems
+
+
+def cmd_records(args, say=print):
+    failed = 0
+    for capture in args.capture:
+        path = cr.find_capture(capture)
+        frames, records, problems = check_records(path)
+        say("%s: %d frames with water records, %d records, %d problems" % (path.name, frames, records, len(problems)))
+        for line in problems[:40]:
+            say("  " + line)
+        if len(problems) > 40:
+            say("  ... and %d more" % (len(problems) - 40))
+        if problems or frames == 0 or records == 0:
+            failed += 1
+    say("every record equals its own row bit for bit" if not failed else "%d captures FAILED" % failed)
+    return 1 if failed else 0
+
+
 # --- the reflection views: the rule and the far terrain (plan Task 15) --------------------------------------------
 
 FAR_TERRAIN_PS = "7DDAD5C29B3F56EE"
@@ -2344,6 +2520,9 @@ def main(argv=None, say=print):
         if name == "rows":
             p.add_argument("--positions", type=int, default=ROW_POSITIONS)
         p.set_defaults(run=run)
+    p = sub.add_parser("records")
+    p.add_argument("capture", nargs="+")
+    p.set_defaults(run=cmd_records)
     for name, run in (("view-rule", cmd_view_rule), ("view-terrain", cmd_view_terrain)):
         p = sub.add_parser(name)
         p.add_argument("capture", nargs="+")

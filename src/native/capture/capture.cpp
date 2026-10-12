@@ -54,6 +54,7 @@
 #include "stream_resolve.h"
 #include "terrain_patch.h"
 #include "vfetch_decode.h"
+#include "water_record.h"
 #include "window_stats.h"
 #include "xdk_hook_ids.h"
 #include "xdk_layout.h"
@@ -170,9 +171,22 @@ std::atomic<uint8_t> g_impostors_frame{0};
 // One word, so that the two places test what they tested before the impostors existed: one load.
 inline constexpr uint8_t kFollowDiscovery = 1, kFollowImpostors = 2;
 std::atomic<uint8_t> g_pbool_follow{0};
-// Counts the times the impostors' following began: what was followed in an earlier stretch says
-// nothing about the GPU's word now (FollowedBoolWord::epoch).
+// And the water (kFollowWater: set at the frame's latch while g_water_frame is set; a water draw is
+// refused when bool b137 is set in that word, and b136 decides whether its sun term is read). The
+// impostors and the water read the same followed word (t_impostor_pbool): kFollowWord.
+inline constexpr uint8_t kFollowWater = 4;
+inline constexpr uint8_t kFollowWord = kFollowImpostors | kFollowWater;
+// Counts the times the word's following began (neither the impostors nor the water followed it in the
+// frame before): what was followed in an earlier stretch says nothing about the GPU's word now
+// (FollowedBoolWord::epoch). One of the two coming on while the other is on begins nothing: the word
+// has been followed without a gap, and neither loses a frame's records to the other's switch.
 std::atomic<uint32_t> g_impostor_epoch{0};
+// The consumer's water switch (SetWaterWanted: the native view on and fable2_native_water on), and
+// the value latched for the current guest frame with g_records_frame: set only in a frame with
+// records. With it clear nothing of the lake's draws is read: a draw whose pixel shader has no albedo
+// entry costs one load of this word and a branch (FillMaterial), and every other draw nothing there.
+std::atomic<bool> g_water_wanted{false};
+std::atomic<bool> g_water_frame{false};
 std::atomic<bool> g_failed{false};
 std::atomic<uint64_t> g_swaps{0};      // guest frames since start (while enabled)
 std::atomic<int> g_frames_written{0};  // discovery frames completed
@@ -236,6 +250,11 @@ QuadSetReason g_quad_last_reason = QuadSetReason::kOff;
 uint32_t g_impostor_frames = 0;
 uint32_t g_impostor_refused_frames = 0;
 uint32_t g_impostor_refused[size_t(ImpostorReason::kCount)] = {};
+// The same for the water records: frames with them wanted since the last line, those of them whose
+// water was refused whole ("water-record"), and the draws without a record by reason. OnSwap thread only.
+uint32_t g_water_frames = 0;
+uint32_t g_water_refused_frames = 0;
+uint32_t g_water_refused[size_t(WaterReason::kCount)] = {};
 uint32_t g_quad_change_lines = 0;
 constexpr uint32_t kQuadChangeLines = 16;
 
@@ -1379,7 +1398,7 @@ void OnGpuLoadShaders(const LastArgs& a) {
   if (!discovery) t_gpu_pbool.Forget();
   if (!vs || !ReadVirtualBe32(vs + xdk::kVsHeaderOffset, &flags)) {
     t_gpu_pbool.Forget();
-    if (follow & kFollowImpostors) t_impostor_pbool = FollowedBoolWord{};
+    if (follow & kFollowWord) t_impostor_pbool = FollowedBoolWord{};
     return;
   }
   t_gpu_vs.obj = vs;
@@ -1387,7 +1406,7 @@ void OnGpuLoadShaders(const LastArgs& a) {
   // shader; 0x82221A10 forces variant 0 otherwise.
   t_gpu_vs.variant = (!ps && (flags & xdk::kVsVariantFlagMask)) ? 1 : 0;
   if (!follow) return;
-  if (follow & kFollowImpostors) {
+  if (follow & kFollowWord) {
     // The engine's word as it is at this load: what the load uploads if it uploads (FollowedBoolWord).
     uint32_t word = 0;
     const bool read = ReadVirtualBe32(xdk::kEngineFlowConstantsAddress + xdk::kEnginePsBoolWordOffset, &word);
@@ -2423,11 +2442,17 @@ void AppendLightInputs(std::string& row, uint32_t device, const DeviceSnapshot& 
 void AppendWindInputs(std::string& row, uint32_t device, const DeviceSnapshot& dev, const VsChoice* vc, bool indexed,
                       int64_t max_vertex);
 
+// A draw that made no record has no sequence number (RecordDraw's answer, a "draw" row's "seq").
+inline constexpr uint32_t kNoRecordSeq = 0xFFFFFFFFu;
+
 // Caller holds g_mutex. One decoded "draw" row (frame-map section 8) for
 // DrawVertices / DrawIndexedVertices; other draw hooks have no VB objects.
-// `in_scene`: the draw is inside the main-scene bracket.
+// `in_scene`: the draw is inside the main-scene bracket. `seq`: the DrawRecord::seq the draw was
+// recorded under in its frame's scene (RecordDraw; kNoRecordSeq: it made no record), written as
+// "seq": what a side block's record names its draw by (WaterRecord::place), so that a record can be
+// held to its own row and no other (tools/xdk_sigmatch/water_check.py, records).
 void WriteDrawRow(uint32_t id, const LastArgs& args, uint32_t device, const DeviceSnapshot& dev,
-                  bool in_scene) {
+                  bool in_scene, uint32_t seq) {
   char buf[512];
   std::string row;
   std::snprintf(buf, sizeof(buf),
@@ -2437,6 +2462,10 @@ void WriteDrawRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
                 g_frames_written.load(std::memory_order_relaxed) + 1, HookName(id), args.r[1],
                 args.r[2], args.r[3], args.r[4], device, in_scene ? "true" : "false");
   row += buf;
+  if (seq != kNoRecordSeq) {
+    std::snprintf(buf, sizeof(buf), ",\"seq\":%u", seq);
+    row += buf;
+  }
   // Vertex bool constants b0..b31 from the device shadow (frame-map section
   // 12, "The cexec b0 block"): bit 0 of "vbool" is b0.
   if (const uint8_t* bools = ReadVirtual(device + xdk::kDeviceBoolConstantsOffset, 4)) {
@@ -3585,6 +3614,7 @@ SkipReason FillTerrainInputs(uint32_t device, uint32_t first, uint32_t patches, 
 // material or flat clay); a draw whose device was not read
 // stays ps-unknown.
 void ResolveAlbedo(uint32_t device, const DeviceSnapshot& dev, const VsInfo* vs, const AlbedoSpec& a, DrawInputs& in);
+void ObserveWaterDraw(uint32_t device, const DrawShaders& shaders, uint32_t ps_obj, const PsInfo& ps);
 void FillMaterial(uint32_t device, DrawShaders& shaders, DrawInputs& in) {
   Material& m = in.material;
   if (in.terrain_shader) {
@@ -3627,6 +3657,9 @@ void FillMaterial(uint32_t device, DrawShaders& shaders, DrawInputs& in) {
   if (!albedo) return;
   if (albedo->slot < 0) {
     m.status = MaterialStatus::kNoAlbedo;
+    // The lake's draws are among these (water_record.h). With the water's switch off this load and
+    // branch are all a no-albedo draw executes for it; a draw with an albedo entry never comes here.
+    if (g_water_frame.load(std::memory_order_relaxed)) ObserveWaterDraw(device, shaders, ps_obj, *ps);
     return;
   }
   ResolveAlbedo(device, shaders.dev, shaders.vs, *albedo, in);
@@ -5154,6 +5187,180 @@ void FlushPendingImpostor() {
   g_builder.AddImpostor(record, words.data(), why);
 }
 
+// --- The water records (frame-map section 20, "Water records"; water_record.h) -------------------
+// Read only in a frame with records and with the water wanted (g_water_frame), at main-scene draws
+// whose pixel shader is one of the pair's two (both have a no-albedo entry: FillMaterial). The draw
+// keeps making the draw record it made before; what is read here goes to a side block of the frame.
+
+// The vertex registers of a record are the bank's at any hooked draw: no buffer load names one
+// (light_block.h, kBufferLoadRanges). The pixel registers are read as ReadPixelConstant reads them
+// (ReadWaterPixelRegisters), which knows the loads.
+constexpr bool WaterRegistersAreBankOnly() {
+  for (uint8_t reg : kWaterVsRegister) {
+    if (IsBufferLoadRegister(kVertexBank, reg)) return false;
+  }
+  return true;
+}
+static_assert(WaterRegistersAreBankOnly(), "a water vertex register is loaded from a constant buffer");
+
+// What ObserveWaterDraw made of this thread's current draw, for RecordDraw, which takes it and sets
+// the kind back to kNone before anything else: kNone, or which of the pair's pixel shaders the draw
+// runs, with t_water_draw filled as far as it could be read.
+constinit thread_local WaterKind t_water_kind = WaterKind::kNone;
+constinit thread_local WaterDraw t_water_draw;
+
+// Whether a pixel shader object's own literal table is the water table's (water_record.h,
+// WaterLiteralsMatch; kPsLayout, whose table numbers pixel register c as 256 + c). Guest reads, all
+// bounded, as ReadImpostorLiterals makes them: the table's head, at most kMaxLiteralGuardRuns
+// entries, and of each run that reaches c248..c255 at most the dwords up to c255.w. `*read` false:
+// the table could not be read whole (nothing is concluded). A table that loads one of the registers
+// the formulas read from the device's bank is not the pair's shader either: false.
+bool ReadWaterLiterals(uint32_t obj, bool* read) {
+  *read = false;
+  const UcodeLayout& l = kPsLayout;
+  constexpr uint32_t kTableFirst = 256;
+  uint32_t table_off = 0, base = 0, size = 0;
+  const uint32_t header = obj + l.header_offset;
+  if (!obj || !ReadVirtualBe32(header + xdk::kShaderLiteralTableField, &table_off) || !ReadVirtualBe32(obj + 4 * l.base_dword, &base)) {
+    return false;
+  }
+  uint32_t bits[kWindLiteralRegisters][4] = {};
+  uint32_t have = 0;
+  static_assert(kWindLiteralFirst == 248 && kWindLiteralRegisters == 8, "WaterLiteralsMatch reads the window c248..c255");
+  if (table_off != 0) {
+    const uint32_t table = header + table_off;
+    if (!ReadVirtualBe32(table + xdk::kLiteralTableSizeOffset, &size) || size > 8 * kMaxLiteralGuardRuns) return false;
+    const uint8_t* entries = size ? ReadVirtual(table + xdk::kLiteralTableEntriesOffset, size) : nullptr;
+    if (size && !entries) return false;
+    xdk::LiteralRun runs[kMaxLiteralGuardRuns];
+    const uint32_t n = xdk::ParseLiteralRuns(entries, size, runs, kMaxLiteralGuardRuns);
+    for (uint32_t i = 0; i < n; ++i) {
+      if (runs[i].first_register < kTableFirst || runs[i].first_register - kTableFirst >= 256) continue;  // (not this bank's numbering)
+      const uint32_t first = runs[i].first_register - kTableFirst;
+      const uint32_t dwords = WindLiteralRunDwords(first, runs[i].dwords);
+      if (dwords == 0) continue;  // (a run that does not reach the window)
+      const uint8_t* values = ReadPhysical(xdk::GpuAddress(base + runs[i].offset), 4 * dwords);
+      if (!values) return false;
+      AddWindLiteralRun(first, dwords, values, bits, &have);
+    }
+    *read = true;
+    for (uint32_t i = 0; i < n; ++i) {
+      if (runs[i].first_register < kTableFirst || runs[i].first_register - kTableFirst >= 256) continue;
+      const uint32_t first = runs[i].first_register - kTableFirst, count = (uint32_t(runs[i].dwords) + 3) / 4;
+      for (uint32_t k = 0; k < kWaterPsRegisters; ++k) {
+        const uint32_t reg = kWaterPsRegister[k];
+        if (reg >= first && reg - first < count) return false;
+      }
+    }
+  }
+  *read = true;
+  return WaterLiteralsMatch(bits, have);
+}
+
+// This thread's verdict on each of the pair's two pixel shaders' literal tables, asked once for an
+// object in a frame (an object reused at the same address with another table does not keep an old
+// verdict beyond the frame); a table that could not be read leaves none. [0] the surface's, [1] the
+// opaque twin's.
+struct WaterLiteralVerdict {
+  bool valid = false, match = false;
+  uint32_t ps = 0, frame = 0;
+};
+constinit thread_local WaterLiteralVerdict t_water_literals[2];
+
+// The record's pixel registers at the draw this thread is capturing, as ReadPixelConstant gives
+// them, without asking the same questions twenty-four times: a register a constant-buffer load can
+// name (c0 alone of the table's) through ReadPixelConstant itself, and every other from the device's
+// bank, which is their one source (ReadPixelConstant: "any other register is read from the bank,
+// whatever uploads were followed") once the shader's own literal table is known to load none of them.
+// False, with `out` partly written and never used, when any of it cannot be read or a register is a
+// literal of the shader.
+bool ReadWaterPixelRegisters(uint32_t device, const PsInfo& ps, float out[kWaterPsRegisters][4]) {
+  if (!ps.literals_known) return false;
+  // (asked of `ps` before anything is read: ReadPixelConstant looks the shader up again, and the
+  // cache's entry is not held across that)
+  for (uint32_t i = 0; i < kWaterPsRegisters; ++i) {
+    const uint32_t reg = kWaterPsRegister[i];
+    if ((ps.literal_regs[reg / 64] >> (reg % 64)) & 1) return false;
+  }
+  const uint32_t bank = PixelBank(device);
+  for (uint32_t i = 0; i < kWaterPsRegisters; ++i) {
+    const uint32_t reg = kWaterPsRegister[i];
+    if (IsBufferLoadRegister(kPixelBank, reg)) {
+      if (!ReadPixelConstant(reg, out[i])) return false;
+      continue;
+    }
+    const uint8_t* p = bank ? ReadVirtual(bank + 16 * reg, 16) : nullptr;
+    if (!p) return false;
+    for (uint32_t k = 0; k < 4; ++k) {
+      const uint32_t bits = LoadBe32(p + 4 * k);
+      std::memcpy(&out[i][k], &bits, sizeof(bits));
+    }
+  }
+  return true;
+}
+
+// One main-scene draw whose pixel shader has a no-albedo entry, in a frame with the water wanted
+// (FillMaterial; before the scene's mutex is taken). Which draw it is, is told by the pixel shader's
+// hash, which FillMaterial has in hand: any other draw returns at once and nothing is read. For a
+// draw of A17D or F6D9 everything of the record is read here into t_water_draw: the vertex shader's
+// hash (a draw with another vertex shader is read no further: "shader"), the pixel shader's literal
+// verdict, the vertex shader's fetch list, the four vertex registers from the bank, the twenty-four
+// pixel registers, the four fetch constants, the bases of the fog's two tables (slots 4 and 5) and
+// the pixel bool word's last writer (ImpostorBoolWord's rule: the word is followed for the water as
+// it is for the impostors). `read` says whether all of it could be read; MakeWaterRecord judges it
+// (RecordDraw, with the draw's own state words). Nothing here is followed as an address but the
+// shader object and the two banks, each through the bounded readers; nothing is written to the guest.
+void ObserveWaterDraw(uint32_t device, const DrawShaders& shaders, uint32_t ps_obj, const PsInfo& ps) {
+  const uint64_t ps_hash = ps.hash;
+  const WaterKind kind = WaterKindOfPs(ps_hash);
+  if (kind == WaterKind::kNone) return;
+  t_water_kind = kind;
+  WaterDraw& d = t_water_draw;
+  d = WaterDraw{};
+  d.ps_hash = ps_hash;
+  // (`shaders.vs` and `ps` are the caches' entries: nothing below looks a shader up again but
+  // ReadPixelConstant, which finds this same pixel shader object)
+  const VsInfo* vs = shaders.vs;
+  VsChoice vc;
+  if (!vs || !ChooseVs(shaders.dev, &vc)) return;  // ("unread")
+  d.vs_hash = vs->hash;
+  if (d.vs_hash != kWaterVs) {
+    d.read = d.pbool_known = true;  // (what the "shader" rule judges was read; nothing more is)
+    return;
+  }
+  WaterFetchList(vs->fetches.data(), vs->fetches.size(), &d);
+  bool read = true;
+  {
+    WaterLiteralVerdict& v = t_water_literals[kind == WaterKind::kOpaque ? 1 : 0];
+    const uint32_t frame = g_light_tries_frame.load(std::memory_order_relaxed);
+    if (!v.valid || v.ps != ps_obj || v.frame != frame) {
+      bool table_read = false;
+      const bool match = ReadWaterLiterals(ps_obj, &table_read);
+      v = WaterLiteralVerdict{table_read, match, ps_obj, frame};
+    }
+    read = v.valid;
+    d.literals_match = v.valid && v.match;
+  }
+  const uint32_t bank = VertexBank(device);
+  for (uint32_t i = 0; read && i < kWaterVsRegisters; ++i) {
+    const uint8_t* p = bank ? ReadVirtual(bank + 16 * uint32_t(kWaterVsRegister[i]), 16) : nullptr;
+    read = p != nullptr;
+    for (uint32_t k = 0; read && k < 4; ++k) {
+      const uint32_t bits = LoadBe32(p + 4 * k);
+      std::memcpy(&d.vs[i][k], &bits, sizeof(bits));
+    }
+  }
+  read = read && ReadWaterPixelRegisters(device, ps, d.ps);
+  for (uint32_t k = 0; read && k < 4; ++k) read = ReadTextureFetch(device, kWaterFetchSlot[k], d.fetch[k]);
+  for (uint32_t k = 0; read && k < 2; ++k) {
+    uint32_t fc[6] = {};
+    read = ReadTextureFetch(device, kFogTableSlots[k], fc);
+    d.fog_base[k] = read ? (fc[1] & 0xFFFFF000u) : 0u;
+  }
+  d.pbool_known = read && ImpostorBoolWord(vc, ps_obj, &d.pbool);
+  d.read = read;
+}
+
 // One outermost guest draw inside the main scene, as a DrawRecord in the frame.
 // Draw-argument mapping (frame-map section 8): DrawIndexedVertices r4 prim, r5
 // base vertex, r6 start index, r7 index count; DrawVertices r4 prim, r5 start
@@ -5162,7 +5369,9 @@ void FlushPendingImpostor() {
 // (device VGT_HOS_CNTL shadow = 2) r7 patch count from patch 0. Other draw
 // hooks (and 82207C30 in other modes): argument mapping unconfirmed, so
 // recorded as unsupported (prim 0).
-void RecordDraw(uint32_t id, const LastArgs& a, uint32_t device) {
+// Returns the DrawRecord::seq the draw was recorded under (kNoRecordSeq when the scene no longer held it):
+// discovery writes it into the draw's row.
+uint32_t RecordDraw(uint32_t id, const LastArgs& a, uint32_t device) {
   DrawInputs in;
   in.func_id = id;
   SkipReason extra = SkipReason::kNone;
@@ -5197,6 +5406,19 @@ void RecordDraw(uint32_t id, const LastArgs& a, uint32_t device) {
   if (IsSupportedPrim(in.prim)) extra = FillDrawInputs(device, in, &shaders);
   FillMaterial(device, shaders, in);
   ReadStateWords(device, &in.state_words);
+  // The water record of this draw, if it is one of the lake's (ObserveWaterDraw, a moment ago, on the
+  // no-albedo branch): made here, outside the scene's mutex, with the draw's own state words. A draw
+  // with any other material status tests that status alone (a byte of its own inputs); a no-albedo
+  // draw also loads one thread-local byte. The kind is taken and set back at once, so that no later
+  // draw can meet it.
+  WaterKind water_kind = WaterKind::kNone;
+  WaterRecord water_record{};
+  WaterReason water_why = WaterReason::kNone;
+  if (in.material.status == MaterialStatus::kNoAlbedo && t_water_kind != WaterKind::kNone) {
+    water_kind = t_water_kind;
+    t_water_kind = WaterKind::kNone;
+    water_record = MakeWaterRecord(t_water_draw, in.state_words, kWaterSceneWidth, kWaterSceneHeight, &water_why);
+  }
   // HasColourPass is proved only for draws of the tiled main scene (xdk_layout.h);
   // RecordDraw is reached only for those (OnDraw: in_scene) and the bracket is
   // checked again below. Unreadable words leave the draw a colour draw.
@@ -5271,7 +5493,7 @@ void RecordDraw(uint32_t id, const LastArgs& a, uint32_t device) {
   std::lock_guard<std::mutex> lock(g_scene_mutex);
   if (!g_builder.InMainScene()) {
     t_impostor_look = ImpostorLook::kNone;  // (a call the scene no longer holds is no call of the frame)
-    return;
+    return kNoRecordSeq;
   }
   if (block_tried) {
     if (block.valid) {
@@ -5290,9 +5512,21 @@ void RecordDraw(uint32_t id, const LastArgs& a, uint32_t device) {
     // The impostor call of this draw, if it is one: counted in the frame under the seq its record has.
     if (id == kHook_D3DDevice_BeginVertices && g_impostors_frame.load(std::memory_order_relaxed) != 0) TakeImpostorCall(r.seq);
   }
+  // The water record of this draw: counted in the frame, linked to the draw record by its seq, and
+  // refused ("unread") when the draw record itself is skipped (the surface would have no geometry).
+  if (water_kind != WaterKind::kNone) {
+    g_builder.WaterSeen(water_kind);
+    if (water_why == WaterReason::kNone && r.skip != SkipReason::kNone) {
+      water_record = WaterRecord{};
+      water_why = WaterReason::kUnread;
+    }
+    water_record.place = water_why == WaterReason::kNone ? r.seq : 0u;
+    g_builder.AddWater(water_record, water_why);
+  }
   // A terrain draw's inputs, a lit draw's light inputs and a swaying draw's wind inputs go to the
   // frame's side arrays, not into the record.
   g_builder.Add(r, TerrainInputsOf(in), light_reason == LightReason::kNone ? &light : nullptr, light_reason, wind, wind_reason);
+  return r.seq;
 }
 
 // Device tiling flag byte, or nullptr if unreadable.
@@ -5742,6 +5976,61 @@ void AppendFrameImpostors(std::string& row, const render::FrameScene& sc) {
   row += "]}";
 }
 
+// Discovery evidence, in the frame row of a frame with records: the frame's water records AS THE
+// SCENE CARRIES THEM (FrameScene::water; in a frame refused whole, FrameScene::water_evidence, with
+// "whole":false). "water":"off" for a frame in which they were not wanted (nothing was read); else
+// {"water":{"on":true,"whole":bool,"seen":{"surface":S,"opaque":O},"taken":T,"refused":{WaterReasonName: n,
+// ...},"records":[{"place","kind","ps_hash","vs_hash","pbool","stride","vs":[16 words],"ps":[96 words],
+// "fetch":[[6 words] x 4],"fog_base":[2 words]}]}}. "vs" and "ps" are the floats' bits (c115 to c118; the
+// table's twenty-four pixel registers in its order), "fetch" the constants of slots 1, 2, 13 and 14.
+// Zero counts are left out of "refused". tools/xdk_sigmatch/water_check.py (records) holds each
+// record against its own "draw" row bit for bit (spec criterion 6).
+void AppendFrameWater(std::string& row, const render::FrameScene& sc) {
+  if (!sc.water_on) {
+    row += ",\"water\":\"off\"";
+    return;
+  }
+  bool whole = true;
+  for (uint32_t n : sc.water_refused) whole = whole && n == 0;
+  char buf[256];
+  std::snprintf(buf, sizeof(buf), ",\"water\":{\"on\":true,\"whole\":%s,\"seen\":{\"surface\":%u,\"opaque\":%u},\"taken\":%u,\"refused\":{",
+                whole ? "true" : "false", sc.water_seen[0], sc.water_seen[1], sc.water_taken);
+  row += buf;
+  bool first = true;
+  for (size_t i = 1; i < size_t(WaterReason::kCount); ++i) {
+    if (!sc.water_refused[i]) continue;
+    std::snprintf(buf, sizeof(buf), "%s\"%s\":%u", first ? "" : ",", WaterReasonName(WaterReason(i)), sc.water_refused[i]);
+    row += buf;
+    first = false;
+  }
+  row += "},\"records\":[";
+  const std::vector<WaterRecord>& records = whole ? sc.water : sc.water_evidence;
+  for (size_t i = 0; i < records.size() && i < kMaxWaterRecords; ++i) {
+    const WaterRecord& r = records[i];
+    std::snprintf(buf, sizeof(buf),
+                  "%s{\"place\":%u,\"kind\":\"%s\",\"ps_hash\":\"0x%016llX\",\"vs_hash\":\"0x%016llX\",\"pbool\":\"0x%08X\",\"stride\":%u,\"vs\":",
+                  i ? "," : "", r.place, WaterKindName(WaterKind(r.kind)), static_cast<unsigned long long>(r.ps_hash),
+                  static_cast<unsigned long long>(r.vs_hash), r.pbool, r.stride_dwords);
+    row += buf;
+    uint32_t words[4 * kWaterPsRegisters];
+    static_assert(sizeof(words) == sizeof(r.ps) && sizeof(r.vs) <= sizeof(words));
+    std::memcpy(words, r.vs, sizeof(r.vs));
+    row += HexDwords(words, 4 * kWaterVsRegisters);
+    std::memcpy(words, r.ps, sizeof(r.ps));
+    row += ",\"ps\":";
+    row += HexDwords(words, 4 * kWaterPsRegisters);
+    row += ",\"fetch\":[";
+    for (uint32_t k = 0; k < 4; ++k) {
+      if (k) row += ",";
+      row += HexDwords(r.fetch[k], 6);
+    }
+    row += "],\"fog_base\":";
+    row += HexDwords(r.fog_base, 2);
+    row += "}";
+  }
+  row += "]}";
+}
+
 // Ends the frame's bracket and, with the renderer on, finishes the frame's
 // scene (`swap` = guest frame number) with its capture time from `timer`,
 // then latches whether the next frame builds records. With `write`
@@ -5793,15 +6082,29 @@ void EndMainSceneFrame(bool write, int frame, uint64_t swap, SwapTimer& timer,
       g_builder.WindOn(wind);
       // The impostor records, only in a frame with records; and with them the following of the
       // pixel bool word's last writer, which begins anew each time they come on (g_impostor_epoch).
+      // The water records likewise, with the same word followed for them (kFollowWater). The following
+      // begins anew (the epoch) only when NEITHER followed it in the frame before: one of the two coming
+      // on beside the other finds a word that was followed without a gap, so the water's switch turned on
+      // in a running game costs the impostors no frame, and the impostors' costs the water none.
       const ImpostorMode impostors = records ? ImpostorMode(g_impostors_wanted.load(std::memory_order_relaxed)) : ImpostorMode::kOff;
       const uint8_t impostors_before = g_impostors_frame.exchange(uint8_t(impostors), std::memory_order_relaxed);
+      const bool water = records && g_water_wanted.load(std::memory_order_relaxed);
+      const bool water_before = g_water_frame.exchange(water, std::memory_order_relaxed);
+      const bool followed_before = impostors_before != 0 || water_before;
+      const bool followed_now = impostors != ImpostorMode::kOff || water;
+      if (followed_now && !followed_before) g_impostor_epoch.fetch_add(1, std::memory_order_relaxed);
       if (impostors != ImpostorMode::kOff && impostors_before == 0) {
-        g_impostor_epoch.fetch_add(1, std::memory_order_relaxed);
         g_pbool_follow.fetch_or(kFollowImpostors, std::memory_order_relaxed);
       } else if (impostors == ImpostorMode::kOff && impostors_before != 0) {
         g_pbool_follow.fetch_and(uint8_t(~kFollowImpostors), std::memory_order_relaxed);
       }
+      if (water && !water_before) {
+        g_pbool_follow.fetch_or(kFollowWater, std::memory_order_relaxed);
+      } else if (!water && water_before) {
+        g_pbool_follow.fetch_and(uint8_t(~kFollowWater), std::memory_order_relaxed);
+      }
       g_builder.ImpostorsOn(impostors);
+      g_builder.WaterOn(water);
       // The next frame reads its own light block (and its own shadow state: CurrentShadowFrame).
       g_light_tries_frame.fetch_add(1, std::memory_order_relaxed);
     }
@@ -5841,6 +6144,7 @@ void EndMainSceneFrame(bool write, int frame, uint64_t swap, SwapTimer& timer,
     AppendFrameQuads(row, *done->scene);
     AppendFrameWind(row, *done->scene);
     AppendFrameImpostors(row, *done->scene);
+    AppendFrameWater(row, *done->scene);
   }
   row += "}\n";
   std::fputs(row.c_str(), g_file);
@@ -6012,6 +6316,15 @@ void PublishScene(const FinishedScene& done) {
       refused = refused || sc.impostor_refused[i] != 0;
     }
     if (refused) ++g_impostor_refused_frames;
+  }
+  if (sc.records && sc.water_on) {
+    ++g_water_frames;
+    bool refused = false;
+    for (size_t i = 1; i < size_t(WaterReason::kCount); ++i) {
+      g_water_refused[i] += sc.water_refused[i];
+      refused = refused || sc.water_refused[i] != 0;
+    }
+    if (refused) ++g_water_refused_frames;
   }
   if (sc.records && sc.quad_records) {
     ++g_quad_frames;
@@ -6235,6 +6548,23 @@ void PublishScene(const FinishedScene& done) {
     }
     g_impostor_frames = g_impostor_refused_frames = 0;
     std::fill(std::begin(g_impostor_refused), std::end(g_impostor_refused), 0u);
+    // water: this frame's draws of the lake's pair, those of the opaque twin and the records that passed
+    // every rule; in how many of the frames with the water wanted since the last line the water was refused
+    // whole (water-record: such a frame's scene holds no water record), and the draws without a record by
+    // reason over these frames. No line without the water: a run with the switch off has the log of before.
+    if (sc.water_on || g_water_frames) {
+      std::string refused;
+      for (size_t i = 1; i < size_t(WaterReason::kCount); ++i) {
+        if (!g_water_refused[i]) continue;
+        std::snprintf(buf, sizeof(buf), "%s%s: %u", refused.empty() ? "" : ", ", WaterReasonName(WaterReason(i)), g_water_refused[i]);
+        refused += buf;
+      }
+      REXSYS_INFO("[native] capture: frame {} water: seen {} (opaque {}), taken {} | {} in {} of {} frames {{{}}}", sc.frame,
+                  sc.water_seen[0] + sc.water_seen[1], sc.water_seen[1], sc.water_taken, kWaterRecordReason, g_water_refused_frames, g_water_frames,
+                  refused);
+    }
+    g_water_frames = g_water_refused_frames = 0;
+    std::fill(std::begin(g_water_refused), std::end(g_water_refused), 0u);
   }
   LogShaderBreakdown(sc);
 }
@@ -6311,6 +6641,10 @@ void SetWindWanted(bool wanted) {
 
 void SetImpostorsWanted(ImpostorMode mode) {
   g_impostors_wanted.store(uint8_t(mode), std::memory_order_relaxed);
+}
+
+void SetWaterWanted(bool wanted) {
+  g_water_wanted.store(wanted, std::memory_order_relaxed);
 }
 
 // --- Post discovery (frame-map section 17, "Discovery"): resolves and the post buffers' memory ---
@@ -6561,7 +6895,7 @@ void OnXdkReturn(uint32_t id, PPCContext&, uint8_t*) {
     uint32_t shadow = 0;
     const bool shadow_read = ReadVirtualBe32(device + xdk::kDevicePsBoolConstantsOffset, &shadow);
     t_gpu_pbool.OnBuilderFlush(shadow_read, shadow);
-    if (g_pbool_follow.load(std::memory_order_relaxed) & kFollowImpostors) {
+    if (g_pbool_follow.load(std::memory_order_relaxed) & kFollowWord) {
       t_impostor_pbool = FollowedBoolWord{shadow_read, true, shadow_read ? shadow : 0u, g_impostor_epoch.load(std::memory_order_relaxed)};
     }
   }
@@ -6575,8 +6909,9 @@ void OnXdkReturn(uint32_t id, PPCContext&, uint8_t*) {
   // its uploads are followed: with records here, with discovery below (no
   // instruction is added to a draw that neither reads).
   if (records) t_ps_loads.Observe(in_scene);
+  uint32_t seq = kNoRecordSeq;
   if (in_scene && records) {
-    RecordDraw(id, args, device);
+    seq = RecordDraw(id, args, device);
   } else if (records) {
     // Outside the scene, in a frame with shadow records: the two shadow passes.
     if (g_shadows_frame.load(std::memory_order_relaxed)) ObserveShadowDraw(id, args, device);
@@ -6600,7 +6935,7 @@ void OnXdkReturn(uint32_t id, PPCContext&, uint8_t*) {
   WriteRawRow(id, args, device, have_dev ? &dev : nullptr);
   if (have_dev &&
       (id == kHook_D3DDevice_DrawVertices || id == kHook_D3DDevice_DrawIndexedVertices)) {
-    WriteDrawRow(id, args, device, dev, in_scene);
+    WriteDrawRow(id, args, device, dev, in_scene, seq);
   } else if (have_dev && (id == kHook_DrawIndx_8221C9C8 || id == kHook_DrawIndx_82207C30)) {
     WriteTessRow(id, args, device, dev, in_scene);
   } else if (have_dev && id == kHook_D3DDevice_BeginVertices) {

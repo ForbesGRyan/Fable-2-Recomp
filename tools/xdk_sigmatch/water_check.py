@@ -23,6 +23,16 @@ On discovery captures (plan Task 4; a name's last digits or a path; "The capture
   bools | states | bounds <capture>...      both bool members and the bits of b136 and b137; the state words by
                                             shader; the smallest and largest of every read component, against the
                                             table's sanity bounds
+  view-rule <capture>...                    plan Task 15, entry condition 4: in every frame, the base each reflection
+                                            view's picture ends at (the last resolve after the view's rows, or after
+                                            the blur's draw that follows them; from the command dwords of the
+                                            "cmdgap" rows) against the k-th smallest slot-13 base of the frame's A17D
+                                            rows; the heights are `views`
+  view-terrain <capture>... [--pixels 20]   entry condition 5: every 7DDA row of every view: the read components and
+                                            state words that differ from the main scene's 7DDA rows, and the row's
+                                            microcode on its own registers against what the native pass would compute
+                                            from ITS inputs (the frame's light block and fog block, the row's c11.x,
+                                            the main eye mirrored in the view's plane, output scale 1)
 Each exits 1 on any failure. A capture without a water row is said to have none and is not a failure by itself.
 
 What a check is, and why it is not circular. One side is the dump's text run by ucode_eval.Machine on a made input
@@ -2067,6 +2077,256 @@ def cmd_bounds(args, say=print):
     return 0
 
 
+# --- the reflection views: the rule and the far terrain (plan Task 15) --------------------------------------------
+
+FAR_TERRAIN_PS = "7DDAD5C29B3F56EE"
+# The components the far terrain's 36 instructions read (shader_7DDAD5C29B3F56EE.ucode.frag, read by hand: 7 to 35).
+FAR_TERRAIN_READ = {11: (0,), 19: (0, 1, 2), 20: (0, 1, 2, 3), 21: (0, 1, 2, 3), 22: (0, 1, 2), 23: (0, 1, 2), 28: (0, 1),
+                    66: (0, 1, 2), 67: (0, 2, 3), 68: (0, 1, 2), 80: (0, 1, 2), 87: (0, 1, 2)}
+FAR_TERRAIN_STATE = ("2200", "2201", "2202", "2205", "2104")
+FAR_TERRAIN_TOLERANCE = 1e-4        # light_check.TOLERANCE: the family's own bound
+
+
+def view_destinations(events):
+    """[(the base a view's picture ends at or None, whether the blur's draw came between)] for the views of a frame,
+    in their order. `events`, in the capture's order: ("row", surface pitch, pixel shader, in scene) for a draw,
+    indx, tess or verts row and ("resolve", base, pitch, height) for a resolve. A view is a run of rows at pitch
+    VIEW_PITCH outside the scene; the resolves that follow it, and those that follow a row of the blur's pixel shader
+    right after it, are its own, and the last of them is where its picture stands when the scene samples it."""
+    out, state = [], None
+    for e in events:
+        if e[0] == "resolve":
+            if state is not None and e[1] is not None:
+                out[-1][0] = e[1]
+                state = "after"
+            continue
+        _, pitch, ps, in_scene = e
+        if pitch == VIEW_PITCH and not in_scene:
+            if state != "rows":
+                out.append([None, False])
+            state = "rows"
+        elif state is not None and ps == lf.WATER_BLUR_SHADER["ps"] and not out[-1][1]:
+            out[-1][1] = True
+            state = "after"
+        else:
+            state = None
+    return [tuple(v) for v in out]
+
+
+def view_rule(destinations, bases):
+    """(holds, note): whether the k-th view's destination is the k-th smallest of the frame's slot-13 bases, for
+    every view and every base. Nothing to hold (no view and no base) does not hold."""
+    want = sorted(set(bases))
+    got = [d[0] for d in destinations]
+    if not want and not got:
+        return False, "no view and no slot-13 base"
+    if len(want) != len(got):
+        return False, "%d views and %d slot-13 bases" % (len(got), len(want))
+    for k, (a, b) in enumerate(zip(got, want)):
+        if a != b:
+            return False, "view %d ends at %s, the %d-th smallest base is %08X" % (k + 1, "no resolve" if a is None else "%08X" % a, k + 1, b)
+    return True, ""
+
+
+def capture_events(path, frame):
+    """view_destinations' events of a capture's frame: its rows in file order, and the resolves its "cmdgap" and
+    "resolve" rows' command dwords hold (post_tables.draw_events: a draw under RB_MODECONTROL 6, with the copy
+    registers as that run of commands left them; a resolve whose run did not write the base is not listed)."""
+    import post_tables as pt
+    out = []
+    for r in cr.rows(path, kinds=("draw", "tess", "indx", "verts", "resolve", "cmdgap"), frame=frame):
+        if r["kind"] in ("resolve", "cmdgap"):
+            if not r.get("cmd"):
+                continue
+            try:
+                found = pt.draw_events(pt.hex_dwords(r["cmd"]))
+            except ValueError:
+                continue
+            for e in found:
+                c = e["copy"]
+                if e["resolve"] and c.get("base") is not None:
+                    out.append(("resolve", c["base"], c.get("pitch"), c.get("height")))
+            continue
+        out.append(("row", int(str(r.get("surface_info", "0x0")), 16) & 0x3FFF, cr.ps_hash(r), bool(r.get("in_scene"))))
+    return out
+
+
+def check_view_rule(path):
+    """[(frame, destinations, the frame's slot-13 bases ascending, holds, note)] for every frame of a capture that
+    has a view or a water row."""
+    capture = read_capture(path)
+    out = []
+    for frame in sorted(f for f in capture["frames"] if f is not None):
+        bases = sorted({_fc(r, 13)[1] & 0xFFFFF000 for r in capture["water"] if r.get("frame") == frame and row_kind(r) == "surface"})
+        destinations = view_destinations(capture_events(capture["path"], frame))
+        if not bases and not destinations:
+            continue
+        ok, note = view_rule(destinations, bases)
+        out.append((frame, destinations, bases, ok, note))
+    return out
+
+
+def registers_differing(a, b, read=FAR_TERRAIN_READ):
+    """The names ("c19.z") of the components of `read` ({register: components}, or registers: all four) in which
+    two register sets differ; a register the second has not is named whole."""
+    if not isinstance(read, dict):
+        read = {reg: (0, 1, 2, 3) for reg in read}
+    out = []
+    for reg in sorted(read):
+        if reg not in a or reg not in b:
+            out.append("c%d (not in the row)" % reg)
+            continue
+        out += ["c%d.%s" % (reg, "xyzw"[k]) for k in read[reg] if a[reg][k] != b[reg][k]]
+    return out
+
+
+def mirrored_eye(eye, h):
+    return [float(eye[0]), float(eye[1]), 2.0 * float(h) - float(eye[2])]
+
+
+def far_terrain_registers(light, fog, eye, c11x, out_scale):
+    """The far terrain's pixel registers as the native pass's inputs make them: the frame's light block (terrain_replay
+    .light_block_of), its fog block, the eye, the draw's light factor and the output scale. Components no
+    instruction reads are no numbers."""
+    nan = math.nan
+    return {11: [c11x, nan, nan, nan], 19: list(eye[:3]) + [nan], 20: list(light["add"][:3]) + [out_scale],
+            21: list(light["tint"][:3]) + [light["tint_pow"]], 22: list(light["floor"][:3]) + [nan], 23: list(light["axis"][:3]) + [nan],
+            28: list(fog["c28"][:2]) + [nan, nan], 66: list(fog["c66"][:3]) + [nan], 67: [fog["c67"][0], nan, fog["c67"][2], fog["c67"][3]],
+            68: list(fog["c68"][:3]) + [nan], 80: list(light["sun_dir"][:3]) + [nan], 87: list(light["sun_col"][:3]) + [nan]}
+
+
+def check_far_terrain(text, consts, literals, light, fog, tables, eye, c11x, out_scale, trials, rng):
+    """The far terrain's microcode with `consts` (a row's own pixel registers, or far_terrain_registers) and
+    `literals` over them, on made pixels, against what the native pass computes from ITS inputs: terrain_replay
+    .lit_far_colour with the light block and c11x, light_formulas.fog with the fog block, the tables and the eye,
+    times the output scale. {"trials", "agree", "worst", "fogged" (pixels beyond the fog's start), "plain"}."""
+    import terrain_replay as tr
+    c = dict(consts)
+    c.update(literals)
+    tf4, tf5 = tables
+    out = {"trials": 0, "agree": 0, "worst": 0.0, "fogged": 0, "plain": 0}
+    for trial in range(trials):
+        a, b = [rng.uniform(0.05, 0.95) for _ in range(3)], [rng.uniform(0.05, 0.95) for _ in range(3)]
+        reach = rng.uniform(2.0, 30.0) if trial % 4 == 0 else rng.uniform(40.0, 600.0)
+        d = _unit(rng)
+        P = [eye[i] + reach * d[i] for i in range(3)]
+        n = _unit(rng)
+        n = [n[0], n[1], abs(n[2]) + 0.2]
+        scale = rng.uniform(0.5, 2.0)                      # the interpolated normal is not a unit vector
+        normal = [v * scale for v in n]
+
+        def sampler(slot, coords, attrs, a=a, b=b):
+            if slot == 13:
+                return a + [JUNK]
+            if slot == 3:
+                return b + [JUNK]
+            if slot in (4, 5):
+                return list((tf4 if slot == 4 else tf5)(coords[0])[:3]) + [JUNK]
+            raise ValueError("a fetch of slot %d" % slot)
+
+        regs = {0: [rng.random(), rng.random(), rng.random(), rng.random()], 1: P + [JUNK], 2: normal + [JUNK]}
+        got = ue.Machine(text, c, sampler, regs=regs).run()["oC0"][:3]
+        lit = tr.lit_far_colour(light, {"c11x": c11x}, [v * v for v in a], b, normal)
+        want = [v * out_scale for v in lf.fog(lit, P, eye, fog["c28"], fog["c66"], fog["c67"], fog["c68"], tf4, tf5)]
+        out["trials"] += 1
+        out["fogged" if lf.fog_coords(P, eye, fog["c66"], fog["c67"]) is not None else "plain"] += 1
+        if all(math.isfinite(v) for v in got) and all(math.isfinite(v) for v in want):
+            err = max(abs(g - w) / max(1e-6, abs(g), abs(w)) for g, w in zip(got, want))
+            out["worst"] = max(out["worst"], err)
+            out["agree"] += err <= FAR_TERRAIN_TOLERANCE
+    return out
+
+
+def cmd_view_rule(args, say=print):
+    bad = frames = held = 0
+    for capture in _captures_of(args):
+        results = check_view_rule(capture)
+        say("%s: %d frames with a view or a water row" % (Path(capture).name, len(results)))
+        for frame, destinations, bases, ok, note in results:
+            frames += 1
+            held += ok
+            bad += not ok
+            say("  frame %s: the views end at %s; the slot-13 bases: %s: %s" % (
+                frame, ", ".join("%s%s" % ("no resolve" if d is None else "%08X" % d, " (blurred)" if blurred else "") for d, blurred in destinations) or "-",
+                ", ".join("%08X" % b for b in bases) or "-", "holds" if ok else "DOES NOT HOLD: " + note))
+        for v in check_views(capture):
+            if not v.ok:
+                bad += 1
+                say("  frame %s view %d: by the heights it does NOT hold (%s)" % (v.frame, v.view, v.note or "largest error %.3g" % v.worst))
+    say("the rule (the k-th view of a frame is the picture at the k-th smallest slot-13 base), by the resolves' destinations: "
+        "holds in %d of %d frames; by the heights: `views` (criterion 3) on the same captures%s" % (
+            held, frames, "" if not bad else "; %d failures" % bad))
+    return 1 if bad or not frames else 0
+
+
+def cmd_view_terrain(args, say=print):
+    import terrain_replay as tr
+    import water_replay as wr
+    text = _text(args.dumps, FAR_TERRAIN_PS)
+    bad = total = agreed = 0
+    for capture in _captures_of(args):
+        cap = read_capture(capture)
+        textures = RowTextures(cap)
+        for frame in sorted(f for f in cap["frames"] if f is not None):
+            views = wr.read_views(cap["path"], frame)
+            if not views:
+                continue
+            frame_row = cap["frames"][frame]
+            try:
+                light = tr.light_block_of(frame_row)
+            except tr.MissingInput as e:
+                say("%s frame %s: NOT CHECKED: %s" % (Path(capture).name, frame, e))
+                bad += 1
+                continue
+            fog, tables = frame_row.get("fog") or {}, row_tables(cap, frame)
+            heights = {}
+            for r in cap["water"]:
+                if r.get("frame") == frame and row_kind(r) == "surface":
+                    heights.setdefault(_fc(r, 13)[1] & 0xFFFFF000, row_height(textures.dir, r))
+            bases = sorted(heights)
+            main = [r for r in cr.rows(cap["path"], kinds=("tess",), frame=frame) if r.get("in_scene") and cr.ps_hash(r) == FAR_TERRAIN_PS]
+            if not main or not fog.get("valid") or tables is None or len(bases) != len(views):
+                say("%s frame %s: NOT CHECKED: %s" % (Path(capture).name, frame, "no main-scene row of 7DDA" if not main else
+                                                      "no fog block" if not fog.get("valid") or tables is None else "%d views, %d bases" % (len(views), len(bases))))
+                bad += 1
+                continue
+            reference = ic.row_pixel_bank(main[0])
+            spread = set()
+            for r in main[1:]:
+                spread.update(registers_differing(reference, ic.row_pixel_bank(r)))
+            differing, states, rows, ok_rows, worst, fogged = set(), set(), 0, 0, 0.0, 0
+            rng = random.Random(15)
+            for view in views:
+                eye = mirrored_eye(frame_row["light"]["eye"], heights[bases[view.index - 1]])
+                for r in view.rows:
+                    if cr.ps_hash(r) != FAR_TERRAIN_PS:
+                        continue
+                    rows += 1
+                    own = ic.row_pixel_bank(r)
+                    differing.update(registers_differing(reference, own))
+                    states.update("%s %s (the main scene's %s)" % (k, (r.get("rs") or {}).get(k), (main[0].get("rs") or {}).get(k))
+                                  for k in FAR_TERRAIN_STATE if (r.get("rs") or {}).get(k) != (main[0].get("rs") or {}).get(k))
+                    lin = r.get("lin") or {}
+                    if lin.get("reason") != "none" or lin.get("family") != "terrain-far":
+                        continue
+                    res = check_far_terrain(text, {reg: own[reg] for reg in FAR_TERRAIN_READ if reg in own}, ic.row_literals(r, "ps"),
+                                            light, fog, tables, eye, float(lin["c11x"]), 1.0, args.pixels, rng)
+                    ok_rows += res["agree"] == res["trials"]
+                    worst, fogged = max(worst, res["worst"]), fogged + res["fogged"]
+            total += rows
+            agreed += ok_rows
+            bad += ok_rows != rows
+            say("%s frame %s: %d main-scene rows of 7DDA (among themselves they differ in: %s); %d rows in %d views" % (
+                Path(capture).name, frame, len(main), ", ".join(sorted(spread)) or "nothing", rows, len(views)))
+            say("  read components that differ from the main scene's: %s; state words that differ: %s" % (
+                ", ".join(sorted(differing)) or "none", "; ".join(sorted(states)) or "none"))
+            say("  the microcode on each row's own registers against the native inputs (the frame's light block and fog block, the "
+                "row's c11.x, the main eye mirrored in the plane of the view's base, output scale 1), %d made pixels a row (%d beyond "
+                "the fog's start): %d of %d rows agree in every pixel within %.0e; largest difference %.2e" % (
+                    args.pixels, fogged, ok_rows, rows, FAR_TERRAIN_TOLERANCE, worst))
+    say("entry condition 5 (the views' 7DDA rows pass the far-terrain family's check with their own registers): %d of %d rows: %s" % (
+        agreed, total, "holds" if total and not bad else "DOES NOT HOLD"))
+    return 1 if bad or not total else 0
 def main(argv=None, say=print):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dumps", type=Path, default=DUMPS)
@@ -2083,6 +2343,12 @@ def main(argv=None, say=print):
         p.add_argument("capture", nargs="+")
         if name == "rows":
             p.add_argument("--positions", type=int, default=ROW_POSITIONS)
+        p.set_defaults(run=run)
+    for name, run in (("view-rule", cmd_view_rule), ("view-terrain", cmd_view_terrain)):
+        p = sub.add_parser(name)
+        p.add_argument("capture", nargs="+")
+        if name == "view-terrain":
+            p.add_argument("--pixels", type=int, default=20)
         p.set_defaults(run=run)
     p = sub.add_parser("used")
     p.set_defaults(run=cmd_used)

@@ -704,6 +704,81 @@ class Pins(unittest.TestCase):
             self.skipTest("none of the four captures is here")
 
 
+class ViewRule(unittest.TestCase):
+    """Plan Task 15, entry condition 4: the k-th view of a frame is the picture at the k-th smallest slot-13 base."""
+    VIEW, BLUR, SCENE = ("row", 280, "D72FD0903CCE7DD6", False), ("row", 320, "F186D27249B462F8", False), ("row", 1120, "F6D98C7B4D98438B", True)
+
+    def events(self, *destinations):
+        """A frame of views: a destination that is a pair is resolved to the scratch first and blurred."""
+        out = [("row", 320, "6D6B000000000000", False), ("resolve", 0x13401000, 128, 128)]       # the pass before the views
+        for d in destinations:
+            out += [self.VIEW, self.VIEW]
+            if isinstance(d, tuple):
+                out += [("resolve", d[0], 256, 256), self.BLUR, ("resolve", d[1], 256, 256)]
+            else:
+                out += [("resolve", d, 256, 256)]
+        return out + [self.SCENE, ("resolve", 0x199E0000, 1120, 720)]
+
+    def test_a_view_ends_at_its_last_resolve(self):
+        got = water_check.view_destinations(self.events((0x13601000, 0x13401000), 0x13501000))
+        self.assertEqual(got, [(0x13401000, True), (0x13501000, False)])
+        self.assertEqual(water_check.view_destinations([self.SCENE, ("resolve", 0x199E0000, 1120, 720)]), [])
+
+    def test_two_views_in_order_hold_and_exchanged_they_do_not(self):
+        bases = [0x13501000, 0x13401000]
+        ok, note = water_check.view_rule(water_check.view_destinations(self.events(0x13401000, 0x13501000)), bases)
+        self.assertTrue(ok, note)
+        ok, note = water_check.view_rule(water_check.view_destinations(self.events(0x13501000, 0x13401000)), bases)
+        self.assertFalse(ok)
+        self.assertIn("view 1", note)
+
+    def test_a_view_too_many_or_a_base_nobody_drew_fails(self):
+        d = water_check.view_destinations(self.events(0x13401000, 0x13501000))
+        self.assertFalse(water_check.view_rule(d, [0x13401000])[0])
+        self.assertFalse(water_check.view_rule(d, [0x13401000, 0x13501000, 0x13581000])[0])
+        self.assertFalse(water_check.view_rule(d, [0x13401000, 0x13581000])[0])
+        self.assertFalse(water_check.view_rule([], [])[0])              # nothing to hold
+
+    def test_a_view_without_a_resolve_has_no_destination(self):
+        got = water_check.view_destinations([self.VIEW, self.SCENE])
+        self.assertEqual(got, [(None, False)])
+        self.assertFalse(water_check.view_rule(got, [0x13401000])[0])
+
+
+class ViewTerrain(unittest.TestCase):
+    """Plan Task 15, entry condition 5: what the native pass would hold for a view's far-terrain row is enough."""
+
+    def test_the_registers_that_differ_are_named_by_component(self):
+        a = {19: [1.0, 2.0, 3.0, 1.0], 20: [0.1, 0.2, 0.3, 9.0], 21: [1.0, 1.0, 1.0, 1.3]}
+        b = {19: [1.0, 2.0, -3.0, 1.0], 20: [0.1, 0.2, 0.3, 1.0], 21: [1.0, 1.0, 1.0, 1.3]}
+        self.assertEqual(water_check.registers_differing(a, b, (19, 20, 21)), ["c19.z", "c20.w"])
+        self.assertEqual(water_check.registers_differing(a, a, (19, 20, 21)), [])
+        self.assertEqual(water_check.registers_differing(a, {19: a[19]}, (19, 20)), ["c20 (not in the row)"])
+
+    def test_the_mirrored_eye(self):
+        self.assertEqual(water_check.mirrored_eye([82.0, 157.0, 50.0], 20.0), [82.0, 157.0, -10.0])
+
+    @unittest.skipUnless((water_check.DUMPS / "shader_7DDAD5C29B3F56EE.ucode.frag").is_file(), "no shader dumps")
+    def test_the_native_inputs_give_the_microcodes_colour_and_wrong_ones_do_not(self):
+        import random
+        rng = random.Random(7)
+        light = {"sun_dir": [-0.66, 0.07, 0.75], "sun_col": [1.0, 0.84, 0.41], "tint": [1.14, 1.4, 1.94], "tint_pow": 1.3,
+                 "add": [0.0057, 0.07, 0.091], "floor": [0.0588, 0.0902, 0.0], "axis": [-0.66, 0.07, 0.75]}
+        fog = {"c28": [1.0, 1.0], "c66": [-0.83, 0.09, 0.55], "c67": [19.0, 1900.0, 1.0, 0.0005], "c68": [0.27, 0.4, 0.47]}
+        tables = (lambda a: [0.3 + 0.2 * a, 0.4, 0.5 - 0.1 * a], lambda s: [math.exp(-3.0 * s), math.exp(-2.0 * s), math.exp(-s)])
+        eye = [82.0, 157.0, -10.0]
+        consts = water_check.far_terrain_registers(light, fog, eye, c11x=0.47, out_scale=1.0)
+        text = water_check._text(water_check.DUMPS, "7DDAD5C29B3F56EE")
+        r = water_check.check_far_terrain(text, consts, {255: [1.0, 0.0, 0.0, 0.0]}, light, fog, tables, eye, 0.47, 1.0, 40, rng)
+        self.assertEqual((r["agree"], r["fogged"] > 10, r["plain"] > 5), (40, True, True), r)
+        for name, change in (("another eye", dict(eye=[82.0, 157.0, 50.0])), ("the main scene's output scale", dict(out_scale=9.0)),
+                             ("another light factor", dict(c11x=1.0))):
+            kw = dict(eye=eye, c11x=0.47, out_scale=1.0)
+            kw.update(change)
+            r = water_check.check_far_terrain(text, consts, {255: [1.0, 0.0, 0.0, 0.0]}, light, fog, tables, kw["eye"], kw["c11x"],
+                                              kw["out_scale"], 40, random.Random(7))
+            self.assertLess(r["agree"], 40, name)
+
 
 if __name__ == "__main__":
     unittest.main()

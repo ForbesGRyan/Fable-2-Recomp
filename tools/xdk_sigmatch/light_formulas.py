@@ -2374,3 +2374,31 @@ def water_pixel(q, P, coord_a, coord_b, m, c, tex, bools=(136,), kind="surface",
                 "lookup": at13, "lookup14": at14, "shadow_at": shadow_at, "sum": s, "normal": N, "base": base,
                 "fresnel": F, "view": V, "distance": d, "sun": sun, "before_fog": colour, "fog_at": fog_at})
     return out
+
+
+# --- the reflection views' blur (plan Task 15) --------------------------------------------------------------------
+
+WATER_BLUR_SHADER = {"vs": "B2D99AC2C7FB40D6", "ps": "F186D27249B462F8", "offsets": (116, 117, 118, 119, 120, 121, 122),
+                     "weight": (255, 0)}
+# What the captured rows hold (three captures, every blur row; frame map section 20, "The reflection views"): the
+# centre and a hexagon of radius 2 texels of the 256 x 256 picture, in the picture's normalised coordinate, and a
+# seventh as the weight. A native blur takes the offsets from the row; these are for the tests and the pins.
+WATER_BLUR_TEXELS = ((0.0, 0.0), (2.0, 0.0), (1.0, 1.7320508), (-1.0, 1.7320508), (-2.0, 0.0), (-1.0, -1.7320508), (1.0, -1.7320508))
+WATER_BLUR_WEIGHT = 0.142857149
+
+
+def water_blur7(tex, u, v, offsets, weight):
+    """F186D27249B462F8 (30 lines; instr 3 to 22), the blur the game puts over some reflection views:
+        oC0.xyz = weight * sum over k of tex(u + offsets[k].x, v + offsets[k].y);  oC0.w = 0
+    (u, v): the interpolator o0.xy of vertex shader B2D99AC2C7FB40D6, the picture's normalised coordinate;
+    offsets: the xy of pixel c116 to c122, seven pairs in that coordinate; weight: the literal c255.x. tex(u, v):
+    slot 0 with a linear filter, three channels or more. The taps are added in the microcode's order (c117, c116,
+    c118, c119, c120, c121, c122). A tap that is not finite counts as 0."""
+    if len(offsets) != 7:
+        raise ValueError("the blur has 7 taps, got %d" % len(offsets))
+    out = [0.0, 0.0, 0.0]
+    for k in (1, 0, 2, 3, 4, 5, 6):
+        t = tex(u + offsets[k][0], v + offsets[k][1])
+        for i in range(3):
+            out[i] += _finite(t[i])
+    return [_finite(x * weight) for x in out] + [0.0]

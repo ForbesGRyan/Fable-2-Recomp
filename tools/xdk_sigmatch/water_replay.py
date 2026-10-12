@@ -37,6 +37,29 @@ order of the textures, the picture's orientation and channel order, the moment t
   glint <capture> [--frame 1]         the kept pixels whose sun term is above 5% of the pixel (criterion 12, W4)
   edge <capture> [--frame 1]          the kept pixels within 20 units of the eye, those with an alpha below 0.99, the
         nearest distance (criterion 11's sets, W3)
+  view <capture>... [--frame 1] [--view K]... [--png file] [--water]   plan Task 15: the reflection views. For each
+        view of the frame (a run of rows at surface pitch 280 outside the scene): a census of its rows by shader
+        pair (count, what is drawn, state words, texture slots), then the view replayed into a 256 x 256 picture as
+        the native pass would draw it: the mirrored sky (`sky`), and over it every patch of the view's far-terrain
+        rows (7DDA) by the native grid (terrain_replay: 17 x 17 points a patch at the heightmap's height, under the
+        row's own c0..c3), only the triangles whose upper side faces the view's eye (the rows' cull word), cut at
+        the water's plane, 2 x 2 sampling places a texel, shaded by terrain_replay.lit_far_colour with the frame's
+        light block and light_formulas.fog with the frame's fog block from the view's eye, output scale 1; then, for
+        a view the game blurs, light_formulas.water_blur7 with the blur row's own offsets (`view_blur`). ASSUMED,
+        because no capture holds a view's viewport, scissor or clip registers: the viewport is the whole 256 x 256,
+        a texel's square is centred on its integral window position, the clip is the plane z = h. The picture checks
+        each: the silhouette's agreement is printed with the square moved by -1, -0.5, 0 and +0.5 texels, and a
+        replay without the cull or the cut is `replay_view(cull=False)` / `plane=None`. Against the game's picture
+        of the view's base (the k-th smallest slot-13 base): the silhouette texels (a channel 8 / 255 or more from
+        the sky's, 3 texels inside the drawn part) of each within one texel of the other's (criterion 10's measure),
+        the share on the same side within 8 texels of the game's shore line, the colour on the texels that are
+        silhouette in both, and what the replay has on top at the game's silhouette texels. The object rows (ECD6 /
+        8D90) are rasterised for the cover alone where the capture holds their streams (it holds none for a view's
+        rows: they are then among "nothing"); the export rows (6954 / A4A9) write the position (0, 0, 0, 0) and
+        draw no pixel; the flares are not replayed. Where the scratch base 0x13601000 holds the view's sharp picture
+        (the frame's last blurred view), the sharp replay against it and the blur on the game's own pair. --water:
+        the replayed pictures through `scene` in the game's pictures' place: the game's own, the mirrored sky alone,
+        sky and far terrain sharp, sky and far terrain blurred as the game blurs.
 Each prints its inputs' names and exits 1 when a bound it states is missed or its inputs are not there.
 
 The level a fetch takes (`level`): the SDK's translator (thirdparty/rexglue-sdk/src/graphics/pipeline/shader/
@@ -184,10 +207,11 @@ def _plane_xy(M, h, px, py, size):
 
 
 def replay(path, frame, flip=False, swap_rb=False, glint=True, levels="mean", decode="exact", place=(0.0, 0.0), depth=None,
-           zscale=-1.0, zoffset=1.0, dumps=wc.DUMPS):
+           zscale=-1.0, zoffset=1.0, dumps=wc.DUMPS, pictures=None):
     """The frame's A17D rows as the game's formula draws them (module text, `scene`): Replay. `depth`: the game's
     depth copy [h, w] as stored (None: no depth test); `place`: the sampling place, offsets from the integral
-    position."""
+    position. `pictures`: {slot-13 base: a picture [h, w, 3] of floats in the shader's red, green, blue} that takes
+    the dump's place for the rows of that base, under the same addressing (plan Task 15: the replayed views)."""
     import foliage_replay as fp
     capture = wc.read_capture(path)
     textures = wc.RowTextures(capture)
@@ -238,6 +262,9 @@ def replay(path, frame, flip=False, swap_rb=False, glint=True, levels="mean", de
             v = lf.water_vertex(p, pair, setup.vbank)
             clip.append(list(v["pos"]) + list(v["place"]) + list(v["coord"]) + list(v["mask"]))
         picture = setup.mirror
+        if pictures and slot13 in pictures:
+            def picture(u, v, image=np.asarray(pictures[slot13], dtype=np.float64), clamp=textures.fields(wc._fc(row, 13))["clamp"]):
+                return wc.bilinear(image, u, v, clamp)
         if flip or swap_rb:
             def picture(u, v, read=setup.mirror):
                 t = read(u, 1.0 - v if flip else v)
@@ -483,6 +510,527 @@ def first_content_row(picture, floor=0.01):
     return float(np.median(first))
 
 
+# --- the reflection views (plan Task 15) ---------------------------------------------------------------------------
+# What a view's rows are, by pixel shader: the far terrain; the tessellation factors' memory export (695413A9831D88DA
+# writes the clip position (0, 0, 0, 0) for every vertex: no pixel); the objects; the sky's cube; the flares.
+VIEW_FAMILIES = {"7DDAD5C29B3F56EE": "terrain", "A4A965C189287B99": "export", "8D900846800943C8": "object",
+                 "F7601FBE485936FD": "sky", "D72FD0903CCE7DD6": "flare"}
+VIEW_KINDS = ("nothing", "terrain", "export", "object", "sky", "flare", "other")
+VIEW_SIZE = 256
+VIEW_SAMPLES = 2                # sampling places a texel edge (the game's views have four samples a texel)
+VIEW_SHIFT = -0.5               # a texel's square is centred on the integral window position (`view` prints the others)
+SILHOUETTE = 8.0 / 255.0        # a texel is silhouette when a channel lies this far from the sky's there
+EDGE_BAND = 8                   # texels about the game's shore line on which the side is judged
+BLUR_REACH = 3                  # texels a blurred view's draw reaches beyond its own
+
+# kind [h, w] (index into VIEW_KINDS; 0 where nothing is drawn), ident [h, w] (the draw's place in the list + 1),
+# depth [h, w] (z / w; infinity where nothing), world [h, w, 3] (the place's interpolated attributes; NaN without).
+Top = namedtuple("Top", "kind ident depth world")
+
+
+def view_top(draws, size, plane=None, origin=0.0):
+    """What a view has on top at every sampling place: `draws` is [(clip [n, 4] or [n, 7] with the world place of
+    each vertex, tris [m, 3], kind)] in any order; the nearest z / w wins (the views' depth function), a later draw
+    at an equal depth. `plane`: fragments whose world height is below it are not drawn (the views' clip at the water;
+    draws without a world place are not cut)."""
+    import foliage_replay as fp
+    width, height = size
+    depth = np.full((height, width), np.inf)
+    kind = np.zeros((height, width), dtype=np.int8)
+    ident = np.zeros((height, width), dtype=np.int32)
+    world = np.full((height, width, 3), np.nan)
+    for n, (clip, tris, name) in enumerate(draws):
+        if name not in VIEW_KINDS[1:]:
+            raise ValueError("not a view's kind: %r" % (name,))
+        clip = np.asarray(clip, dtype=np.float64)
+        for _, ys, xs, d, attrs in fp.fragments(clip, tris, size, origin):
+            keep = d <= depth[ys, xs]
+            if plane is not None and attrs.shape[1] >= 3:
+                keep &= attrs[:, 2] >= plane
+            if not keep.any():
+                continue
+            ys, xs = ys[keep], xs[keep]
+            depth[ys, xs] = d[keep]
+            kind[ys, xs] = VIEW_KINDS.index(name)
+            ident[ys, xs] = n + 1
+            world[ys, xs] = attrs[keep][:, :3] if attrs.shape[1] >= 3 else np.nan
+    return Top(kind, ident, depth, world)
+
+
+def view_shares(selected, top):
+    """{kind: share} of the selected sampling places by what `top` has there ("nothing" where no draw); {} when none
+    is selected."""
+    n = int(selected.sum())
+    if n == 0:
+        return {}
+    return {name: float((top.kind[selected] == k).sum()) / n for k, name in enumerate(VIEW_KINDS)}
+
+
+def _taps(picture, u, v):
+    """A picture [h, w, c] at normalised (u, v) arrays: linear between texel centres, clamped to the edge."""
+    h, w = picture.shape[:2]
+    x, y = u * w - 0.5, v * h - 0.5
+    x0, y0 = np.floor(x).astype(np.int64), np.floor(y).astype(np.int64)
+    fx, fy = (x - x0)[..., None], (y - y0)[..., None]
+    xa, xb, ya, yb = np.clip(x0, 0, w - 1), np.clip(x0 + 1, 0, w - 1), np.clip(y0, 0, h - 1), np.clip(y0 + 1, 0, h - 1)
+    return (picture[ya, xa] * (1 - fx) + picture[ya, xb] * fx) * (1 - fy) + (picture[yb, xa] * (1 - fx) + picture[yb, xb] * fx) * fy
+
+
+def view_blur(picture, offsets, weight, shift=0.0):
+    """light_formulas.water_blur7 over a whole picture [h, w, 3]: pixel (i, j) reads at ((i + shift) / w, (j + shift)
+    / h) plus each offset. shift 0: the pixel's integral position, which is what the game's blur has (the captured
+    sharp and blurred pictures: frame map section 20); 0.5 would be the texel's centre."""
+    picture = np.asarray(picture, dtype=np.float64)
+    if len(offsets) != 7:
+        raise ValueError("the blur has 7 taps, got %d" % len(offsets))
+    h, w = picture.shape[:2]
+    u, v = np.meshgrid((np.arange(w) + shift) / w, (np.arange(h) + shift) / h)
+    out = np.zeros_like(picture)
+    for k in (1, 0, 2, 3, 4, 5, 6):
+        out += _taps(picture, u + offsets[k][0], v + offsets[k][1])
+    return out * weight
+
+
+def eight_bits(picture):
+    return np.rint(np.clip(np.asarray(picture, dtype=np.float64), 0.0, 1.0) * 255.0) / 255.0
+
+
+def near_share(a, b, reach=1):
+    """The share of a's texels that lie within `reach` texels of a texel of b (criterion 10's measure); NaN when a
+    has none."""
+    n = int(a.sum())
+    if n == 0:
+        return math.nan
+    return float((a & _grow(b, reach)).sum()) / n
+
+
+def _shrink(mask, steps):
+    return ~_grow(~mask, steps)
+# A view of a frame: its place in the frame (1 for the first), its rows, its c0..c3, the eye its rows' c19 holds (the
+# main eye mirrored), the F186 row that follows it (None: the game does not blur this view).
+View = namedtuple("View", "index rows matrix eye blur")
+
+
+def _hash(row, stage="ps"):
+    text = cr.ps_hash(row) if stage == "ps" else cr.vs_hash(row)
+    text = text or ""
+    return text[2:].upper() if text.lower().startswith("0x") else text.upper()
+
+
+def family_of(row):
+    return VIEW_FAMILIES.get(_hash(row), "other")
+
+
+def read_views(path, frame):
+    """The reflection views of a frame, in their order: a view is a run of draw, indx, tess and verts rows at surface
+    pitch 280 outside the scene (water_check.capture_views); a verts row of the blur's pixel shader right after the
+    run is the view's blur."""
+    found, current = [], None
+    for r in cr.rows(path, kinds=("draw", "tess", "indx", "verts", "resolve"), frame=frame):
+        if r["kind"] == "resolve":
+            current = None
+            continue
+        pitch = int(str(r.get("surface_info", "0x0")), 16) & 0x3FFF
+        if pitch == wc.VIEW_PITCH and not r.get("in_scene"):
+            if current is None:
+                current = {"rows": [], "blur": None}
+                found.append(current)
+            current["rows"].append(r)
+            continue
+        if current is not None and r["kind"] == "verts" and _hash(r) == lf.WATER_BLUR_SHADER["ps"]:
+            current["blur"] = r
+        current = None
+    out = []
+    for k, v in enumerate(found):
+        matrix = eye = None
+        for r in v["rows"]:
+            c = r.get("consts") or {}
+            if family_of(r) == "terrain" and all("c%d" % i in c for i in range(4)):
+                matrix = np.array([c["c%d" % i] for i in range(4)], dtype=np.float64)
+            elif family_of(r) == "sky" and r.get("bank") and matrix is None:
+                matrix = np.array(r["bank"][0:16], dtype=np.float64).reshape(4, 4)
+            else:
+                continue
+            reg = ic.pixel_register(r, 19)
+            eye = [float(x) for x in reg[:3]] if reg is not None else eye
+        out.append(View(k + 1, v["rows"], matrix, eye, v["blur"]))
+    return out
+
+
+def blur_taps(row):
+    """(the seven offsets, the weight) of a blur row: the xy of its c116 to c122 and its literal c255.x."""
+    offsets = [tuple(ic.pixel_register(row, reg)[:2]) for reg in lf.WATER_BLUR_SHADER["offsets"]]
+    literals = ic.row_literals(row, "ps")
+    reg, comp = lf.WATER_BLUR_SHADER["weight"]
+    if reg not in literals:
+        raise cr.Unreadable("the blur row has no literal register c%d" % reg)
+    return offsets, float(literals[reg][comp])
+
+
+def census(view):
+    """[(kind of row, vertex shader, pixel shader, family, rows, what is drawn, the state words, texture slots)] of a
+    view's rows, in first-appearance order."""
+    groups = {}
+    for r in view.rows:
+        key = (r["kind"], _hash(r, "vs")[:4], _hash(r)[:4], family_of(r))
+        g = groups.setdefault(key, {"rows": 0, "prim": set(), "count": 0, "state": set(), "slots": set(), "textures": set()})
+        g["rows"] += 1
+        args = [int(str(a), 16) for a in r.get("args") or []]
+        if r["kind"] == "tess":
+            g["prim"].add("patches")
+            g["count"] += args[3] if len(args) > 3 else 0
+        elif r["kind"] == "indx":
+            g["prim"].add("prim %s" % r.get("prim"))
+            g["count"] += int(r.get("indices") or 0)
+        else:
+            g["prim"].add("prim %d" % args[0] if args else "?")
+            g["count"] += int((r.get("ib") or {}).get("count") or (args[2] if len(args) > 2 else 0))
+        rs = r.get("rs") or {}
+        g["state"].add(tuple(rs.get(k) for k in ("2200", "2201", "2202", "2205", "2104")))
+        for slot, fc in (r.get("tf") or {}).items():
+            g["slots"].add(int(slot))
+            g["textures"].add(fc[1])
+    return [key + (g["rows"], "%d %s" % (g["count"], "/".join(sorted(g["prim"]))), sorted(g["state"]), sorted(g["slots"]), len(g["textures"]))
+            for key, g in groups.items()]
+
+
+_GRID_TRIS = {}
+
+
+def _grid_tris(n):
+    if n not in _GRID_TRIS:
+        tris = []
+        for j in range(n):
+            for i in range(n):
+                a = j * (n + 1) + i
+                tris += [(a, a + 1, a + n + 2), (a, a + n + 2, a + n + 1)]      # BuildGridIndices: cut from a to c
+        _GRID_TRIS[n] = np.array(tris, dtype=np.int64)
+    return _GRID_TRIS[n]
+
+
+def facing(points, tris, eye):
+    """Which triangles [m, 3] over world points [n, 3] show the eye their upper side: (b - a) x (c - a) . (eye - a)
+    > 0 for a triangle that is counter-clockwise seen from above. A view's rows cull the back with the winding
+    turned (0x2205 is 0x00218006 where the main scene's rows have 0x00218002: the mirror turns the handedness), so
+    what a view draws of the ground is its upper side as the mirrored eye sees it, and ground seen from below is
+    not drawn."""
+    p = np.asarray(points, dtype=np.float64)[:, :3]
+    a, b, c = p[tris[:, 0]], p[tris[:, 1]], p[tris[:, 2]]
+    return (np.cross(b - a, c - a) * (np.asarray(eye, dtype=np.float64)[None, :] - a)).sum(1) > 0.0
+
+
+def terrain_draws(view, textures, segments=16, cull=True):
+    """([(clip with the world place [289, 7], tris, "terrain")], [(row, Far, SquareGrid)] in step, problems): every
+    patch of every far-terrain row of a view as the native pass draws a far patch (terrain_replay: the square from
+    the row's constants, 17 x 17 grid points at the heightmap's point-sampled height, two triangles a grid quad),
+    under the row's own c0..c3. `segments`: 16 is the native pass's grid; 8, 4, 2 or 1 takes every second, fourth,
+    eighth or only the corner points of it (what a patch the game tessellates less finely would show); a dict
+    {cell size: segments} gives each patch size its own. `cull`: only the triangles `facing` the view's eye."""
+    import terrain_replay as tr
+    draws, shade, problems = [], [], []
+    for row in view.rows:
+        if family_of(row) != "terrain":
+            continue
+        c = row.get("consts") or {}
+        try:
+            T = np.array([c["c%d" % i] for i in range(4)], dtype=np.float64)
+            height, normals = textures.get(row, 16, "heightmap"), textures.get(row, 17, "normal map")
+            far = tr.Far(tr.far_inputs(c, row.get("pconst")), textures.get(row, 13, "far colour"), textures.get(row, 3, "base map"),
+                         textures.get(row, 18, "far u table"), textures.get(row, 19, "far v table"), _hash(row) == tr.FADING_FAR[2:])
+            far.lin = tr.light_inputs_of(row, "terrain-far")
+            patches = int(str(row["args"][3]), 16)
+            for p in range(patches):
+                sq = tr.patch_square(c, p, far=True)
+                grid = tr.SquareGrid(sq, row, height, normals, far=True)
+                n = segments.get(round(sq[2]), 16) if isinstance(segments, dict) else segments
+                step = grid.N // n
+                if step * n != grid.N:
+                    raise ValueError("%d segments do not divide the grid's %d" % (n, grid.N))
+                pts = np.array([[sq[0] + sq[2] * i / n, sq[1] + sq[3] * j / n, grid.points[j * step * (grid.N + 1) + i * step][3], 1.0]
+                                for j in range(n + 1) for i in range(n + 1)])
+                tris = _grid_tris(n)
+                if cull:
+                    tris = tris[facing(pts, tris, view.eye)]
+                draws.append((np.concatenate([pts @ T.T, pts[:, :3]], axis=1), tris, "terrain"))
+                shade.append((row, far, grid))
+        except (tr.MissingInput, KeyError, IndexError, ValueError) as e:
+            problems.append("line %s: a far-terrain row NOT REPLAYED: %s" % (row.get("line"), e))
+    return draws, shade, problems
+
+
+def object_draws(view, capture_dir):
+    """([(clip with the world place, tris, "object")], problems): the view's object rows by their table entry's
+    position (the microcode's where the table has none); the world place is the view's c0..c3 solved for the clip
+    position."""
+    import foliage_replay as fp
+    table = fp.load_table()
+    draws, problems = [], []
+    inverse = np.linalg.inv(view.matrix)
+    for row in view.rows:
+        if family_of(row) != "object":
+            continue
+        g = fp.row_geometry(row, capture_dir, wind=False, table=table)
+        if g.reason:
+            g = fp.row_geometry(row, capture_dir, wind=True)
+        if g.reason or g.state != "whole":
+            problems.append("line %s: an object row NOT REPLAYED: %s" % (row.get("line"), g.reason or g.note or g.state))
+            continue
+        world = g.clip @ inverse.T
+        with np.errstate(divide="ignore", invalid="ignore"):
+            world = world[:, :3] / world[:, 3:4]
+        draws.append((np.concatenate([g.clip, world], axis=1), g.tris, "object"))
+    return draws, problems
+
+
+# colour [256 s, 256 s, 3] and cover [256 s, 256 s] of the far terrain at the sampling places (shift 0: a texel's square
+# from its integral position to the next), `top`: view_top of terrain and objects together, the counts and problems.
+ViewReplay = namedtuple("ViewReplay", "colour cover top patches objects shaded problems")
+
+
+def replay_view(view, capture_dir, textures, block, fog, tables, plane, samples=VIEW_SAMPLES, objects=True, segments=16, shade=True,
+                cull=True):
+    """A view's far terrain as the native pass would draw it into a 256 x 256 target (module text, `view`)."""
+    import terrain_replay as tr
+    size = (VIEW_SIZE * samples, VIEW_SIZE * samples)
+    terrain, shading, problems = terrain_draws(view, textures, segments, cull)
+    top = view_top(terrain, size, plane, 0.5)
+    colour = np.zeros((size[1], size[0], 3))
+    tf4, tf5 = tables
+    ys, xs = np.nonzero(top.kind == VIEW_KINDS.index("terrain"))
+    for y, x in zip(ys.tolist(), xs.tolist()) if shade else ():
+        row, far, grid = shading[int(top.ident[y, x]) - 1]
+        wx, wy, wz = (float(v) for v in top.world[y, x])
+        c = far.colour.sample(*tr.far_uv(far, wx, wy))
+        normal, _ = grid.at(wx, wy)
+        lit = tr.lit_far_colour(block, far.lin, [c[i] * c[i] for i in range(3)], far.base.sample(*tr.apply_uv(far.inp["base_uv"], wx, wy)), normal)
+        fogged = lf.fog(lit, (wx, wy, wz), view.eye, fog["c28"], fog["c66"], fog["c67"], fog["c68"], tf4, tf5)
+        scale = float(ic.pixel_register(row, 20)[3])                    # 1 in a view
+        colour[y, x] = [v * scale for v in fogged]
+    cover = top.kind == VIEW_KINDS.index("terrain")
+    count = 0
+    if objects:
+        more, more_problems = object_draws(view, capture_dir)
+        problems += more_problems
+        count = len(more)
+        if more:
+            over = view_top(more, size, plane, 0.5)
+            nearer = over.depth < top.depth
+            top = Top(np.where(nearer, over.kind, top.kind), np.where(nearer, over.ident + len(terrain), top.ident),
+                      np.minimum(over.depth, top.depth), np.where(nearer[..., None], over.world, top.world))
+    return ViewReplay(colour, cover, top, len(terrain), count, len(ys), problems)
+
+
+def texels(values, samples=VIEW_SAMPLES, shift=VIEW_SHIFT):
+    """A sampling-place array [h s, w s(, c)] as texels: the mean of each texel's s x s places, the texel's square
+    moved by `shift` texels along both axes (a multiple of 1 / s)."""
+    step = int(round(shift * samples))
+    if abs(step - shift * samples) > 1e-9:
+        raise ValueError("the shift is not a multiple of a sampling place")
+    v = np.roll(np.asarray(values, dtype=np.float64), (-step, -step), axis=(0, 1))
+    h, w = v.shape[0] // samples, v.shape[1] // samples
+    return v.reshape((h, samples, w, samples) + v.shape[2:]).mean(axis=(1, 3))
+
+
+def view_picture(r, sky, shift=VIEW_SHIFT, samples=VIEW_SAMPLES):
+    """The 256 x 256 picture of a ViewReplay over a sky picture [256, 256, 3] (floats): each texel the mean of its
+    sampling places, a place the terrain's colour where the terrain covers it and the sky's texel elsewhere; 8 bits."""
+    cover = texels(r.cover, samples, shift)
+    colour = texels(r.colour * r.cover[..., None], samples, shift)
+    return eight_bits(colour + np.asarray(sky, dtype=np.float64) * (1.0 - cover[..., None]))
+
+
+# The measures of a replayed picture against the game's (frame map section 20, "The reflection views").
+ViewMeasure = namedtuple("ViewMeasure", "game replay near_game near_replay side band_side band both ratio median")
+
+
+def compare_view(game, picture, sky, sharp_sky):
+    """`game`, `picture`: [256, 256, 3]; `sky`: the sky as the picture holds it (blurred where the picture is);
+    `sharp_sky`: the sky before any blur (it says which texels lie below the water plane's line). A texel is
+    silhouette when it lies at least 3 texels inside the drawn part and one of its channels is SILHOUETTE or more
+    from the sky's there (the far shore stands in haze: a rule on the luminance alone loses it)."""
+    drawn = _shrink(luminance(sharp_sky) > 0.0, 3)
+    sil_g = drawn & (np.abs(game - sky).max(-1) >= SILHOUETTE)
+    sil_r = drawn & (np.abs(picture - sky).max(-1) >= SILHOUETTE)
+    band = drawn & _grow(sil_g, EDGE_BAND) & ~_shrink(sil_g | ~drawn, EDGE_BAND)
+    both = _shrink(sil_g & sil_r, 1)
+    if both.any():
+        ratio = tuple(float(x) for x in picture[both].mean(0) / game[both].mean(0))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            median = float(np.median(luminance(picture[both]) / luminance(game[both])))
+    else:
+        ratio, median = (math.nan,) * 3, math.nan
+    return ViewMeasure(int(sil_g.sum()), int(sil_r.sum()), near_share(sil_g, sil_r), near_share(sil_r, sil_g),
+                       float((sil_g == sil_r)[drawn].mean()) if drawn.any() else math.nan,
+                       float((sil_g == sil_r)[band].mean()) if band.any() else math.nan, int(band.sum()), int(both.sum()), ratio, median), sil_g
+
+
+def _say_view(say, name, m):
+    say("    %-34s silhouette texels game %5d replay %5d; within one texel: game's of the replay's %.1f%%, the replay's of the "
+        "game's %.1f%%; same side: all drawn texels %.2f%%, the %d within %d of the game's shore line %.1f%%" % (
+            name, m.game, m.replay, 100 * m.near_game, 100 * m.near_replay, 100 * m.side, m.band, EDGE_BAND, 100 * m.band_side))
+    say("    %-34s silhouette in both, one texel inside: %d texels; replay / game red %.3f green %.3f blue %.3f; the median "
+        "luminance ratio a texel %.3f" % ("", m.both, m.ratio[0], m.ratio[1], m.ratio[2], m.median))
+
+
+def _view_setup(path, frame):
+    """What every view of a frame shares: the capture, the views, the water rows' bases with their heights, the
+    pictures by base, the light block, the fog block, the tables, the sky's inputs."""
+    import terrain_replay as tr
+    cap = wc.read_capture(path)
+    frame_row = cap["frames"].get(frame) or {}
+    block = tr.light_block_of(frame_row)
+    fog = frame_row.get("fog") or {}
+    if not fog.get("valid"):
+        raise cr.Unreadable("the frame row has no valid fog block")
+    tables = wc.row_tables(cap, frame)
+    textures = wc.RowTextures(cap)
+    bases = {}
+    for r in cap["water"]:
+        if r.get("frame") == frame and wc.row_kind(r) == "surface":
+            fc = wc._fc(r, 13)
+            bases.setdefault(fc[1] & 0xFFFFF000, (fc, wc.row_height(textures.dir, r)))
+    return {"cap": cap, "views": read_views(path, frame), "bases": bases, "textures": textures, "block": block, "fog": fog,
+            "tables": tables, "eye": frame_row["light"]["eye"], "terrain": tr._Textures(tr.read_capture(path, frame)[1]),
+            "sky": _sky_inputs(path, frame)}
+
+
+def _picture_of(textures, fc):
+    image, f = textures.image(fc)
+    return image[..., list(f["swizzle"][:3])]
+
+
+def view_pictures(path, frame, say=print, png=None, only=None):
+    """Replays every view of a frame and compares each with the game's picture of its base. Returns {base: {"sky",
+    "sharp", "blurred" (None where the game does not blur the view), "game"}} for `water`."""
+    s = _view_setup(path, frame)
+    views, bases = s["views"], sorted(s["bases"])
+    say("%s frame %d: %d views at pitch %d; the water rows' slot-13 bases: %s" % (
+        Path(path).name, frame, len(views), wc.VIEW_PITCH, ", ".join("%08X (h %.6g)" % (b, s["bases"][b][1]) for b in bases)))
+    block_sky, tf4, tf13, tf14, note = s["sky"]
+    sky = None
+    out, sheets = {}, []
+    scratch = [k for k in s["textures"].rows if (k[1] & 0xFFFFF000) == SCRATCH_BASE]
+    for view in views:
+        say("  view %d: %d rows; the eye in its rows (%.4f, %.4f, %.4f); %s" % (
+            view.index, len(view.rows), view.eye[0], view.eye[1], view.eye[2],
+            "followed by the blur (line %s)" % view.blur.get("line") if view.blur else "no blur row follows"))
+        for kind, vs, ps, family, rows, drawn, state, slots, n_tex in census(view):
+            say("    %-5s %s / %s %-8s rows %3d: %s; depth, blend, alpha, cull, colour mask %s; slots %s (%d textures)" % (
+                kind, vs, ps, family, rows, drawn, "; ".join(" ".join(str(w) for w in st) for st in state), slots, n_tex))
+        if only is not None and view.index not in only:
+            continue
+        if view.index > len(bases):
+            say("    NOT COMPARED: no slot-13 base for this view")
+            continue
+        base = bases[view.index - 1]
+        fc, height = s["bases"][base]
+        plane = (float(s["eye"][2]) + view.eye[2]) / 2.0
+        say("    its picture by the rule: %08X; the plane from the two eyes %.4f, the meshes' height %.6g" % (base, plane, height))
+        if sky is None:
+            sky = sky_picture(view.matrix, block_sky, tf4, tf13, tf14, VIEW_SIZE).astype(np.float64) / 255.0
+        r = replay_view(view, s["textures"].dir, s["terrain"], s["block"], s["fog"], s["tables"], plane)
+        for text in r.problems:
+            say("    " + text)
+        say("    replayed: %d patches of the far terrain, %d sampling places shaded (%d x %d a texel), %d object rows rasterised for "
+            "the cover alone" % (r.patches, r.shaded, VIEW_SAMPLES, VIEW_SAMPLES, r.objects))
+        game = _picture_of(s["textures"], fc)
+        sharp = view_picture(r, sky)
+        entry = {"sky": sky, "sharp": sharp, "blurred": None, "game": game}
+        if view.blur is not None:
+            offsets, weight = blur_taps(view.blur)
+            entry["blurred"] = eight_bits(view_blur(sharp, offsets, weight))
+            blurred_sky = view_blur(sky, offsets, weight)
+            m, sil = compare_view(game, entry["blurred"], blurred_sky, sky)
+            _say_view(say, "blurred, against %08X:" % base, m)
+            _say_view(say, "control: NOT blurred against it:", compare_view(game, sharp, blurred_sky, sky)[0])
+            _say_view(say, "control: the sky alone, blurred:", compare_view(game, eight_bits(blurred_sky), blurred_sky, sky)[0])
+        else:
+            m, sil = compare_view(game, sharp, sky, sky)
+            _say_view(say, "sharp, against %08X:" % base, m)
+            _say_view(say, "control: the sky alone:", compare_view(game, sky, sky, sky)[0])
+        for shift in (-1.0, -0.5, 0.0, 0.5):
+            other = view_picture(r, sky, shift)
+            if view.blur is not None:
+                other = eight_bits(view_blur(other, offsets, weight))
+            mm = compare_view(game, other, blurred_sky if view.blur is not None else sky, sky)[0]
+            say("      a texel's square moved by %+.1f: same side on the band %.1f%%, within one texel %.1f%% and %.1f%%%s" % (
+                shift, 100 * mm.band_side, 100 * mm.near_game, 100 * mm.near_replay, "  (the one used)" if shift == VIEW_SHIFT else ""))
+        # what the replay has on top at the game's silhouette texels, by sampling place; under a blur a place counts
+        # for a draw that lies within the blur's reach of it (two texels and the taps' own half texel)
+        places = np.roll(np.repeat(np.repeat(sil, VIEW_SAMPLES, 0), VIEW_SAMPLES, 1), int(round(VIEW_SHIFT * VIEW_SAMPLES)), axis=(0, 1))
+        top = r.top
+        if view.blur is not None:
+            spread = np.zeros_like(top.kind)
+            for k in range(len(VIEW_KINDS) - 1, 0, -1):
+                spread[_grow(top.kind == k, BLUR_REACH * VIEW_SAMPLES)] = k
+            top = Top(spread, top.ident, top.depth, top.world)
+        shares = view_shares(places, top)
+        say("    the game's %d silhouette texels by what the replay has on top%s (by sampling place): %s; the export rows (A4A9) "
+            "write the position (0, 0, 0, 0): none; the %d object rows have no vertex streams in the capture and are NOT "
+            "rasterised: their texels are among \"nothing\"" % (
+                int(sil.sum()), " or within %d texels (the blur's reach)" % BLUR_REACH if view.blur is not None else "",
+                ", ".join("%s %.1f%%" % (k, 100 * v) for k, v in shares.items() if v > 0.0) or "-", sum(1 for x in view.rows if family_of(x) == "object") - r.objects))
+        if scratch and view.blur is not None:
+            # the scratch base holds the sharp picture of the frame's LAST blurred view (as the previous frame left it)
+            last = [v for v in views if v.blur is not None][-1]
+            if last.index == view.index:
+                held = _picture_of(s["textures"], scratch[0])
+                _say_view(say, "sharp, against the scratch %08X:" % SCRATCH_BASE, compare_view(held, sharp, sky, sky)[0])
+                d = np.abs(eight_bits(view_blur(held, offsets, weight)) - game)[8:-8, 8:-8] * 255.0
+                say("    the blur on the game's own pictures: blur7(%08X) against %08X: mean |difference| %.3f of 255, within 1 of 255 "
+                    "at %.2f%% of the texels (taps at the texel's centre instead: %.3f)" % (
+                        SCRATCH_BASE, base, float(d.mean()), 100 * float((d.max(-1) <= 1.0 + 1e-9).mean()),
+                        float((np.abs(eight_bits(view_blur(held, offsets, weight, 0.5)) - game)[8:-8, 8:-8] * 255.0).mean())))
+        out[base] = entry
+        shown = entry["blurred"] if entry["blurred"] is not None else sharp
+        sheets.append(np.concatenate([game, shown, np.abs(game - shown) * 4.0], axis=1))
+    if png and sheets:
+        import impostor_pictures as ip
+        sheet = np.concatenate(sheets, axis=0)
+        ip.write_png(Path(png), (np.sqrt(np.clip(sheet * 3.0, 0.0, 1.0)) * 255.0 + 0.5).astype(np.uint8))
+        say("  sheet %s: a row a view: the game's picture, the replay, four times their difference (shown at 3 times, square root)" % png)
+    return out
+
+
+SCRATCH_BASE = 0x13601000       # where a view that is to be blurred is resolved first
+
+
+def _percentiles(values):
+    return [float(np.percentile(values, q)) for q in (5, 50, 95)]
+
+
+def cmd_view(args, say=print):
+    bad = 0
+    for capture in args.capture:
+        path = cr.find_capture(capture)
+        pictures = view_pictures(path, args.frame, say, args.png, set(args.view) if args.view else None)
+        if not pictures:
+            bad += 1
+            continue
+        if not args.water:
+            continue
+        path, fr, game, place = _inputs(capture, args.frame, args.place if args.place else (-0.25, -0.25), say)
+        if fr is None or game is None or fr.depth is None:
+            say("  the water: NOT COMPARED (no scene or no depth copy)")
+            bad += 1
+            continue
+        variants = (("the game's own pictures", None),
+                    ("the mirrored sky alone", {b: p["sky"] for b, p in pictures.items()}),
+                    ("sky and far terrain, sharp", {b: p["sharp"] for b, p in pictures.items()}),
+                    ("sky and far terrain, blurred as the game", {b: p["blurred"] if p["blurred"] is not None else p["sharp"] for b, p in pictures.items()}))
+        lum_game = luminance(game)
+        for name, given in variants:
+            r = replay(path, args.frame, place=place, depth=fr.depth, zscale=fr.zscale, zoffset=fr.zoffset, pictures=given)
+            m = measure(r, game)
+            _say_measure(say, name, r, m)
+            judged = r.kept & (r.alpha >= JUDGED_ALPHA)
+            if judged.any():
+                a, b = _percentiles(luminance(r.colour)[judged]), _percentiles(lum_game[judged])
+                err = np.abs(luminance(r.colour)[judged] - lum_game[judged]) / lum_game[judged]
+                say("      luminance at the 5th, 50th, 95th percentile: replay %s, game %s, ratios %s; a pixel's |replay - game| / "
+                    "game: mean %.3f, 90th percentile %.3f" % (" ".join("%.3f" % v for v in a), " ".join("%.3f" % v for v in b),
+                                                               " ".join("%.3f" % (x / y) for x, y in zip(a, b)), float(err.mean()), float(np.percentile(err, 90))))
+    return 1 if bad else 0
 # --- the commands -------------------------------------------------------------------------------------------------
 
 def _inputs(path, frame, place, say):
@@ -898,6 +1446,12 @@ def main(argv=None, say=print):
         if name == "lookup":
             p.add_argument("--out")
         p.set_defaults(run=run)
+    p = common(sub.add_parser("view"), many=True)
+    p.add_argument("--frame", type=int, default=1)
+    p.add_argument("--view", type=int, action="append", help="only this view (1 for the frame's first); may be given again")
+    p.add_argument("--png")
+    p.add_argument("--water", action="store_true", help="the replayed pictures through `scene` in the game's pictures' place")
+    p.set_defaults(run=cmd_view)
     args = ap.parse_args(argv)
     try:
         return args.run(args, say)

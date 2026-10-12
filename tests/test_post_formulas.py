@@ -1334,5 +1334,57 @@ class FurnitureRealDumps(unittest.TestCase):
         self.assertIn("1 of 1 furniture shaders agree", out.getvalue())
 
 
+class WaterBlur(unittest.TestCase):
+    """The reflection views' blur (F186D27249B462F8, plan Task 15): seven linear taps at the coordinate plus each of
+    c116.xy to c122.xy, summed and multiplied by the literal c255.x; alpha 0."""
+    OFFSETS = [(0.0, 0.0), (2.0, 0.0), (1.0, 1.75), (-1.0, 1.75), (-2.0, 0.0), (-1.0, -1.75), (1.0, -1.75)]
+
+    def test_a_flat_picture_comes_back_times_seven_weights(self):
+        got = lf.water_blur7(lambda u, v: [0.25, 0.5, 1.0], 0.3, 0.6, self.OFFSETS, 1.0 / 7.0)
+        near(self, got, [0.25, 0.5, 1.0, 0.0])
+        near(self, lf.water_blur7(lambda u, v: [0.25, 0.5, 1.0], 0.3, 0.6, self.OFFSETS, 0.5), [0.875, 1.75, 3.5, 0.0])
+
+    def test_each_tap_is_the_coordinate_plus_its_own_offset(self):
+        seen = []
+
+        def tex(u, v):
+            seen.append((u, v))
+            return [u, v, u * v]
+
+        got = lf.water_blur7(tex, 10.0, 20.0, self.OFFSETS, 1.0)
+        self.assertEqual(sorted(seen), sorted((10.0 + a, 20.0 + b) for a, b in self.OFFSETS))
+        near(self, got[:2], [70.0, 140.0])
+        self.assertEqual(got[3], 0.0)
+
+    def test_seven_offsets_or_none(self):
+        with self.assertRaises(ValueError):
+            lf.water_blur7(lambda u, v: [0.0, 0.0, 0.0], 0.0, 0.0, self.OFFSETS[:6], 1.0)
+
+    def test_a_tap_that_is_no_number_counts_as_zero(self):
+        got = lf.water_blur7(lambda u, v: [NAN, 1.0, INF], 0.0, 0.0, self.OFFSETS, 1.0)
+        near(self, got, [0.0, 7.0, 0.0, 0.0])
+
+    @unittest.skipUnless((DUMPS / "shader_F186D27249B462F8.ucode.frag").is_file(), NO_DUMPS)
+    def test_the_microcode_agrees_and_three_wrong_forms_do_not(self):
+        r = pc.check("F186D27249B462F8", trials=60)
+        self.assertEqual((r.agree, r.errors), (r.values, {}), r.line())
+        self.assertEqual(r.values, 60 * 4)
+
+        def a_tap_moved(tex, u, v, offsets, weight):
+            moved = [list(o) for o in offsets]
+            moved[3][0] += 1.0 / 256.0
+            return lf.water_blur7(tex, u, v, moved, weight)
+
+        def a_weight(tex, u, v, offsets, weight):
+            return lf.water_blur7(tex, u, v, offsets, weight * 7.0 / 6.0)
+
+        def the_axes(tex, u, v, offsets, weight):
+            return lf.water_blur7(tex, u, v, [(b, a) for a, b in offsets], weight)
+
+        for wrong in (a_tap_moved, a_weight, the_axes):
+            r = pc.check("F186D27249B462F8", trials=60, formula=wrong)
+            self.assertLess(r.agree, r.values, wrong.__name__)
+
+
 if __name__ == "__main__":
     unittest.main()

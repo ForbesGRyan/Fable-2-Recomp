@@ -280,7 +280,9 @@ task that consumes it starts by reading the fixing task's report and amends the 
 | the normal map's channels at the fetch (which block is `a.x`), the masks' tiling and endian | the fetch constant's own swizzle over (first block, second block) as `DecodeDxnTexel` gives them; the mask by its constant's tiled bit [code]. **As fixed by Task 5** [measured, the same rows]: the normal map's constant `82000002 14Dx0071 001FE0FF 00A80D10 00000203 14Dx0A18` (its address differs in each of the three captures: `14D40000`, `14D20000`, `14DE0000`; the decoded base is the same bytes in all three) has swizzle (0, 1, 2, 3): the shader's x is the first block and y the second, as `DecodeDxnLevelRg8` writes them; unsigned; endian 1; tiled; 256 x 256; levels 0 to 8 with a packed tail; magnification, minification and mip filter linear, no anisotropy, both axes repeat. The twelve masks (eleven at the third spot) are tiled, endian 0, pitch 64 for the 64 x 64 and 32 for the 8 x 16, 16 x 32 and 32 x 32, without levels, filters linear, both axes clamp to edge, swizzle (0, 0, 0, 5): x, y and z are the byte and w is the constant 1, so a formula that read the mask's w would read 1 | Task 5 (the captured constants of slots 1 and 2, printed) | Tasks 6, 10, 12 |
 | the normal map's stored levels and the level a fetch takes (open question 3) | levels made by a 2 x 2 mean of the decoded base until W1; the level by the SDK translator's rule, which Task 6's first step reads and names (`thirdparty/rexglue-sdk/src/graphics/pipeline/shader/dxbc_translator_fetch.cpp`). **As fixed by Task 6** [code: that file's lines 1401 to 1528]: `sample_d` with the coordinate's coarse screen derivatives times 2 ^ (the constant's LOD bias / 32 + the instruction's), so with anisotropy off the level is log2 of the longer derivative in texels, held to the constant's mip range, linear between levels (`water_replay.level`); on the lake's pixels the two fetches stand at a mean level of 4.66 (bridge) and 4.53 (third spot). The stored levels still wait for W1; with the mean pyramid criterion 4's figures are 1.006 to 1.011, so the looser band is not needed | Task 6 (the rule), Task 8 (W1: the stored levels) | Tasks 6, 13 |
 | `sizeof(ClayWaterConstants)`, the small slots a record takes, `kClayWaterStepSlots` | 432 bytes (64 + 64 + 272 + 16 + 16), 2 slots a record, 153 = 2 x 64 + 4 + 21 (the records', the targets' sky constants, one second frame block) | Task 10 (after Task 4's components) | Tasks 10, 11, 12; Task 17 amends the count for a frame block a target |
-| the viewport, scissor and clip registers of the views (open question 5) | not in any capture; of the registers the spec names, `0x2080` to `0x2082` (window offset and scissor) and `0x2388` to `0x239F` (the six user clip planes) have no device shadow in `xdk::DeviceRegShadowOffset` (`xdk_layout.h` line 309: it covers `0x2000..0x200F`, `0x2100..0x2114`, `0x2200..0x220B`, `0x2380..0x2387`). **As fixed by Task 1** [code]: a view's row (pitch 280, `"draw"`, `"indx"` or `"tess"`, outside the scene) carries in `"vp"` the viewport `0x210F..0x2114`, the screen scissor `0x200E`, `0x200F` and the clip control word `0x2204`; it cannot carry the window offset and scissor `0x2080..0x2082` or any of the 24 clip-plane registers `0x2388..0x239F` (no shadow; none invented). So W1 can say whether a user clip plane is enabled, not what it is | Task 1 (which registers a row can carry), Task 8 (W1: their values) | Task 17 (the reflected shoreline's clip) |
+| the viewport, scissor and clip registers of the views (open question 5) | not in any capture; of the registers the spec names, `0x2080` to `0x2082` (window offset and scissor) and `0x2388` to `0x239F` (the six user clip planes) have no device shadow in `xdk::DeviceRegShadowOffset` (`xdk_layout.h` line 309: it covers `0x2000..0x200F`, `0x2100..0x2114`, `0x2200..0x220B`, `0x2380..0x2387`). **As fixed by Task 1** [code]: a view's row (pitch 280, `"draw"`, `"indx"` or `"tess"`, outside the scene) carries in `"vp"` the viewport `0x210F..0x2114`, the screen scissor `0x200E`, `0x200F` and the clip control word `0x2204`; it cannot carry the window offset and scissor `0x2080..0x2082` or any of the 24 clip-plane registers `0x2388..0x239F` (no shadow; none invented). So W1 can say whether a user clip plane is enabled, not what it is. **As found by Task 15** [measured on the pictures: `out/native-evidence/water/t15_controls_<stamp>.txt`, `t15_view_<stamp>.txt`; FM section 20 "The reflection views"]: a replay with the viewport the whole 256 x 256, a texel's square centred on its integral window position and the clip at the plane `z = h` puts the far terrain's silhouette within one texel of the game's at 94.5 to 100% of its texels in the six pictures that hold terrain alone; without the cut at the plane the bridge's second view has 1,145 silhouette texels for the game's 548; the square at 0 instead of -0.5 is within 0.2 to 2.8 points (a weak decision), at +0.5 1.6 to 5.9 points worse. The registers themselves still wait for W1 | Task 1 (which registers a row can carry), Task 8 (W1: their values), Task 15 (what the pictures say) | Task 17 (the reflected shoreline's clip) |
+| the views' cull (not named before Task 15) | `0x2205` = `0x00218006` in every `7DDA` row of a view, `0x00218002` in the main scene's [measured: 358 of 358 rows, `t15_view_terrain.txt`]: back-face culling with the winding turned. A view's ground is drawn only where its upper side faces the mirrored eye (`water_replay.facing`); without it the third spot's first view has 23,675 silhouette texels for the game's 2,327 | Task 15 | Tasks 16 (the record keeps the word), 17 (the pipeline obeys it: spec Design 9 "with the cull the record's own state word asks for") |
+| the blur's taps and its coordinate (not named before Task 15) | seven: `c116.xy` to `c122.xy` of the `F186` row, captured as the centre and a hexagon of radius 2 / 256; weight `c255.x` = 1 / 7; the pixel's coordinate is its integral position over 256 (not the texel's centre) [microcode; measured on the game's own sharp and blurred pair] | Task 15 (`lf.water_blur7`, `lf.WATER_BLUR_TEXELS`, `water_replay.view_blur`) | Task 17 (`WaterBlurConstants`, the blur's program, its pins) |
 | the shader test's case number | 55 (the next free number below 256 after the impostors' 54) | Task 11 | Tasks 11, 12, 17 |
 | `test_clay_logic.cpp`'s CHECK numbers | 838 to 852 (the file's last is 837) | Task 10 | Tasks 10, 11, 12 |
 | the water step's index at the bridge, and whether any frame reads `order` | expected: the sky step, the moon, the clouds, the water, then the blended group (912 of 916 records at the bridge: FM line 4072) | Task 12's first real-GPU run | Task 13 |
@@ -2564,6 +2566,8 @@ ledger ruling 28):**
    every frame of every capture, by the resolves' destinations and by the heights (Task 15).
 5. The views' `7DDA` rows pass the far-terrain family's check with their own registers (`c20.w` =
    1, the mirrored eye in `c19`, `c11.x` = 0.4704 where the main scene's is 1) (Task 15).
+   *(As fixed by Task 15: `c11.x` is 0.4704 in the main scene's `7DDA` rows as well; the 1 is the
+   main sky's row. Conditions 3, 4 and 5 hold: Task 15's "As executed".)*
 
 If any fails, none of Tasks 16 to 18 is started: the sub-project goes from Task 15's report to
 Task 19 and closes at phase 13b, and the closing says so for criteria 9 and 10's second part.
@@ -2625,6 +2629,52 @@ W1 and W2.
       Task 6's `lookup` has it for each body's own pixels). Frame map "The reflection views".
       Commit "Water phase 13c: the entry conditions (what A4A9 draws, the views' rule and light,
       the blur's formula)".
+
+**As executed (Task 15; frame map section 20, "The reflection views"; report
+`.superpowers/sdd/2026-10-12-native-renderer-water/task15-report.md`; evidence
+`out/native-evidence/water/t15_*`).** Python and documents only; no game, nothing native.
+- *Entry condition 3: holds.* `6954` / `A4A9` is the terrain's tessellation-factor export (a
+  memory export of four numbers a patch; the position is (0, 0, 0, 0) for every vertex): its share
+  of the pictures is 0 and the native pass needs none of it. Decided on the listing, the planes
+  (the view's own frustum) and the counts (a view's export vertices are its `7DDA` patches);
+  **`ucode_eval` was not run on it** (the machine lacks `setp_inv`, `setp_pop`, `setp_eq_push`,
+  `sges`, `sgts`, `subsc` and the export; the capture has no dump of its 192-byte stream). What the
+  condition did not foresee: **the objects (`ECD6` / `8D90`) are about three tenths of the first
+  view's silhouette** (31.6% of the game's silhouette texels at the third spot have no terrain
+  within a texel, against 0 to 5.5% in the views without objects), and no pipeline of this plan
+  draws them into a target.
+- *Entry condition 4: holds*, 10 of 10 frames by the resolves' destinations (`water_check.py
+  view-rule`), 32 of 32 views by the heights (criterion 3).
+- *Entry condition 5: holds*, 358 of 358 rows (`water_check.py view-terrain`). **Its text above is
+  wrong in one point**: `c11.x` is 0.4704 in the main scene's `7DDA` rows too (the 1 is the main
+  sky's row). A view's row differs from the main scene's in `c19.z`, `c20.w` and the cull word
+  (`0x00218006` for `0x00218002`), and in nothing else it reads.
+- *The blur*: `lf.water_blur7(tex, u, v, offsets, weight)`, **not** the signature written above
+  (`weights, vertical`): the shader is one pass of seven equal taps at the coordinate plus
+  `c116.xy` to `c122.xy` (captured: the centre and a hexagon of radius 2 texels), times `c255.x`
+  (1 / 7). `post_check.py --water-blur`: 2,000 of 2,000, three mutations (a tap's offset, the
+  weight, the axes) caught. A `BeginVertices` call of `F186` right after a view decides the blur in
+  10 of 10 frames. A pixel's coordinate is its integral position over 256 (the game's own sharp and
+  blurred pair agrees within 1 of 255 at 100% of the texels so, not with the texel's centre).
+- *The share and the replay*: `water_replay.py view <capture>... [--view K] [--png F] [--water]`
+  (not `view <capture> <frame> <k>`): the `7DDA` rows by the FORMULAS the native pass has
+  (`terrain_replay`, `light_formulas.fog`), not through the interpreter (`view-terrain` holds the
+  two equal on every row); the export rows are not rasterised (their position is 0); the object
+  rows could not be (no streams in a view's rows) and are counted as "nothing".
+- *What the replay adds to the plan's Tasks 16 and 17* (each measured: without it the picture is
+  not the game's): the **cull** by the record's own word (without it the mirrored eye sees the hill
+  it stands under: 23,675 silhouette texels for 2,327); the **clip at `z = h`** (1,145 for 548);
+  the **blur** with the row's offsets at the integral position (the lake's correlation 0.86 with
+  it, 0.79 without); **four samples or 2 x 2** for the shore's edge.
+- *The figures that decide the phase*: the lake against the game's scene, all judged pixels, three
+  captures: the game's own pictures 1.006 to 1.011 a channel, correlation 0.85 to 0.86; **the sky
+  alone 1.15 to 1.19, correlation -0.26 to -0.29**; **sky and native far terrain, blurred as the
+  game, without objects and flares: 1.012 to 1.016, correlation 0.85 to 0.86**. Criterion 10's
+  second part would be missed on the first view without the objects (73.8% and 53.7% of 85%).
+- *Tests*: written before the code and seen red (`AttributeError`, `KeyError: 'F186...'`) for the
+  blur, the view rule, the far terrain's check and the shares; `view_top`, `view_blur`,
+  `near_share` and `replay(pictures=)` likewise; the capture-reading part of `view` (the census,
+  `terrain_draws`, `replay_view`, `compare_view`) has no unit test: the captures are its check.
 
 ### Task 16: The capture of the reflection views' far terrain
 

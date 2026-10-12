@@ -512,6 +512,22 @@ def _cube_vs(text, shader, rng, aux, formula, opts):
     return _Trial(out["oPos"], want, reached=["the eye's face" if v[2] == c[255][0] else "the other faces"])
 
 
+def _water_blur(text, shader, rng, aux, formula, opts):
+    """The reflection views' blur: the seven fetch coordinates and the sum, with the offsets drawn (the captured
+    hexagon would not tell two taps apart that a wrong form exchanges) and no number in what no instruction reads."""
+    uv = _uv(rng)
+    c = {reg: [rng.uniform(-0.05, 0.05), rng.uniform(-0.05, 0.05), math.nan, math.nan] for reg in lf.WATER_BLUR_SHADER["offsets"]}
+    weight = rng.uniform(0.1, 0.2)
+    c[255] = [weight, math.nan, math.nan, math.nan]
+    m = ue.Machine(text, c, _normalised, regs={0: [uv[0], uv[1], math.nan, math.nan]})
+    out = m.run()["oC0"]
+    if len(m.fetches) != 7:
+        raise ValueError(f"{len(m.fetches)} fetches, not 7")
+    offsets = [c[reg][:2] for reg in lf.WATER_BLUR_SHADER["offsets"]]
+    want = sorted((uv[0] + a, uv[1] + b) for a, b in offsets)
+    got = sorted((f[2][0], f[2][1]) for f in m.fetches)
+    coords = all(_close(g[0], w[0]) and _close(g[1], w[1]) for g, w in zip(got, want))
+    return _Trial(out, formula(lambda u, v: field(0, u, v), uv[0], uv[1], offsets, weight), coords)
 # hash -> (the body of a trial, the formula it checks)
 CHECKS = {
     "0A96B3FD5121E331": (_reduce, lf.post_reduce),
@@ -537,6 +553,9 @@ CHECKS = {
     "C304C6A1AF18B46F": (_quad_vs(True), lf.post_quad_position),
     "D1CC6DC28244C55A": (_cube_vs, lf.post_cube_position),
 }
+# The reflection views' blur (the water sub-project, plan Task 15) is checked by the same machine and is no shader of
+# the post chain: CHECKS stays the post chain's and the furniture's alone (tests/test_post_formulas.py holds that).
+WATER_CHECKS = {lf.WATER_BLUR_SHADER["ps"]: (_water_blur, lf.water_blur7)}
 STAGES = {s.hash: s.stage for s in lf.POST_FURNITURE_SHADERS}      # the others are pixel shaders
 
 _REGISTER = re.compile(r"(?<![A-Za-z0-9_])c(\d+)\b")
@@ -555,7 +574,7 @@ def check_text(shader, text, trials=TRIALS, seed=SEED, formula=None, tol=TOLERAN
     formula (`formula` in its place: a wrong form for the tests). opts: bias (the downsample: added to the
     pixel position on both sides), texel (the composite: another addressing of the table, u -> texel),
     literals ("random": a furniture shader's literal registers are drawn, not the capture rows')."""
-    body, reference = CHECKS[shader]
+    body, reference = CHECKS[shader] if shader in CHECKS else WATER_CHECKS[shader]
     rng, aux = random.Random(seed), random.Random(seed + 1)
     res = Result()
     for k in range(trials):
@@ -596,6 +615,35 @@ def check(shader, trials=TRIALS, dumps=DUMPS, **kw):
     return check_text(shader, ue.load(dumps, shader, STAGES.get(shader, "frag")), trials, **kw)
 
 
+WATER_BLUR_MUTATIONS = ("a tap's offset", "the weight", "the axes")
+
+
+def water_blur_mutant(name):
+    """A wrong form of light_formulas.water_blur7, by name (WATER_BLUR_MUTATIONS)."""
+    def wrong(tex, u, v, offsets, weight):
+        if name == "a tap's offset":
+            offsets = [list(o) for o in offsets]
+            offsets[3][0] += 1.0 / 256.0
+        elif name == "the weight":
+            weight = weight * 7.0 / 6.0
+        else:
+            offsets = [(b, a) for a, b in offsets]
+        return lf.water_blur7(tex, u, v, offsets, weight)
+    return wrong
+
+
+def water_blur_report(trials=TRIALS, dumps=DUMPS, say=print):
+    """The reflection views' blur against its microcode, and each wrong form: 0 when the formula agrees in every
+    value and coordinate and every mutation fails."""
+    shader = lf.WATER_BLUR_SHADER["ps"]
+    res = check(shader, trials, dumps)
+    say(f"ps {shader} water blur: {res.line()}")
+    bad = not res.ok
+    for name in WATER_BLUR_MUTATIONS:
+        m = check(shader, trials, dumps, formula=water_blur_mutant(name))
+        say(f"    mutation, {name}: {m.values - m.agree} of {m.values} values disagree: {'caught' if not m.ok else 'NOT CAUGHT'}")
+        bad = bad or m.ok
+    return 1 if bad else 0
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--shader", help="only this shader (16 hex digits)")
@@ -605,7 +653,10 @@ def main(argv=None):
     ap.add_argument("--literals", choices=("captured", "random"), default="captured",
                     help="the furniture shaders' literal registers: the capture rows' (default) or drawn")
     ap.add_argument("--list", action="store_true", help="print what would be checked and exit")
+    ap.add_argument("--water-blur", action="store_true", help="the reflection views' blur (F186) and its three mutations, alone")
     args = ap.parse_args(argv)
+    if args.water_blur:
+        return water_blur_report(args.trials, args.dumps)
     want = args.shader.upper().replace("0X", "") if args.shader else None
     shaders = [s for s in lf.POST_SHADERS if want in (None, s.hash)]
     furniture = [s for s in lf.POST_FURNITURE_SHADERS if want in (None, s.hash)]

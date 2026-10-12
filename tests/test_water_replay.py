@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools" / "xdk_sigmatch"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import light_formulas as lf  # noqa: E402
 import water_made  # noqa: E402
 import water_replay as wr  # noqa: E402
 
@@ -245,6 +246,106 @@ class Sets(unittest.TestCase):
             r = wr.replay(made(folder), 1, place=(0.0, 0.0))
         at = r.lookup[r.kept]
         self.assertTrue((np.abs(at - 0.5) < 0.2).all())               # the screen place scaled about the centre, plus the normal's sway
+
+
+def _quad(x0, y0, x1, y1, zw, z=None):
+    """A quad in clip space with w = 1 (x and y in -1..1, y up), its two triangles; with `z`, the world place of
+    every vertex is (x, y, z)."""
+    clip = [[x, y, zw, 1.0] + ([x, y, z] if z is not None else []) for x, y in ((x0, y0), (x1, y0), (x1, y1), (x0, y1))]
+    return np.array(clip), np.array([[0, 1, 2], [0, 2, 3]])
+
+
+class ViewShare(unittest.TestCase):
+    """Plan Task 15: which draw a reflection view has on top at the game's texels that are neither sky nor black."""
+    SIZE = (16, 16)
+
+    def test_a_quad_wholly_behind_another_has_no_share(self):
+        back = _quad(-0.5, -0.5, 0.5, 0.5, 0.6) + ("export",)
+        front = _quad(-0.5, -0.5, 0.5, 0.5, 0.2) + ("terrain",)
+        for order in ((back, front), (front, back)):
+            top = wr.view_top(order, self.SIZE)
+            game = top.kind != 0
+            self.assertEqual(int(game.sum()), 64)
+            shares = wr.view_shares(game, top)
+            self.assertEqual((shares["export"], shares["terrain"], shares["nothing"]), (0.0, 1.0, 0.0))
+
+    def test_beside_it_its_share_is_one(self):
+        left = _quad(-0.75, -0.5, -0.25, 0.5, 0.6) + ("export",)
+        right = _quad(0.25, -0.5, 0.75, 0.5, 0.2) + ("terrain",)
+        top = wr.view_top((left, right), self.SIZE)
+        game = np.zeros((16, 16), dtype=bool)
+        game[4:12, 2:6] = True                                      # the left quad's texels
+        self.assertEqual(wr.view_shares(game, top)["export"], 1.0)
+        game[4:12, 6:8] = True                                      # and two columns nothing covers
+        shares = wr.view_shares(game, top)
+        self.assertAlmostEqual(shares["export"], 2.0 / 3.0)
+        self.assertAlmostEqual(shares["nothing"], 1.0 / 3.0)
+        self.assertEqual(wr.view_shares(np.zeros((16, 16), dtype=bool), top), {})
+
+    def test_what_lies_below_the_plane_is_not_drawn(self):
+        under = _quad(-0.5, -0.5, 0.5, 0.5, 0.2, z=1.0) + ("terrain",)
+        over = _quad(-0.5, -0.5, 0.5, 0.5, 0.6, z=3.0) + ("object",)
+        top = wr.view_top((under, over), self.SIZE, plane=2.0)
+        self.assertEqual(set(np.unique(top.kind)), {0, wr.VIEW_KINDS.index("object")})
+        self.assertTrue((top.world[top.kind != 0][:, 2] == 3.0).all())
+        self.assertEqual(int((wr.view_top((under, over), self.SIZE).kind == wr.VIEW_KINDS.index("terrain")).sum()), 64)
+
+    def test_the_ground_shows_its_upper_side_or_nothing(self):
+        points = np.array([[0.0, 0.0, 5.0], [1.0, 0.0, 5.0], [1.0, 1.0, 5.0], [0.0, 1.0, 5.0]])
+        tris = np.array([[0, 1, 2], [0, 2, 3]])                     # counter-clockwise seen from above
+        self.assertEqual(wr.facing(points, tris, [0.5, 0.5, 9.0]).tolist(), [True, True])
+        self.assertEqual(wr.facing(points, tris, [0.5, 0.5, 1.0]).tolist(), [False, False])     # the mirrored eye under it
+        self.assertEqual(wr.facing(points, tris, [40.0, 0.5, 5.0]).tolist(), [False, False])    # edge on: not drawn
+        slope = points + np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 3.0], [0.0, 0.0, 3.0], [0.0, 0.0, 0.0]])   # rising towards +x
+        self.assertEqual(wr.facing(slope, tris, [-40.0, 0.5, 0.0]).tolist(), [True, True])      # a slope facing an eye below its foot
+        self.assertEqual(wr.facing(slope, tris, [40.0, 0.5, 0.0]).tolist(), [False, False])
+
+    def test_an_unknown_kind_is_refused(self):
+        with self.assertRaises(ValueError):
+            wr.view_top((_quad(-0.5, -0.5, 0.5, 0.5, 0.6) + ("cloud",),), self.SIZE)
+
+
+class ViewPictures(unittest.TestCase):
+    def test_the_blur_keeps_a_flat_picture_and_spreads_a_texel_over_the_hexagon(self):
+        offsets = [(a / 16.0, b / 16.0) for a, b in lf.WATER_BLUR_TEXELS]
+        flat = np.full((16, 16, 3), 0.25)
+        self.assertTrue(np.allclose(wr.view_blur(flat, offsets, 1.0 / 7.0), 0.25))
+        one = np.zeros((16, 16, 3))
+        one[8, 8] = 7.0
+        got = wr.view_blur(one, offsets, 1.0 / 7.0)
+        self.assertAlmostEqual(float(got[..., 0].sum()), 7.0)           # nothing is lost inside the picture
+        # a tap at an integral position lies on a texel corner: the centre tap gives a quarter to each of four texels
+        self.assertAlmostEqual(float(got[8, 8, 0]), 0.25)
+        self.assertAlmostEqual(float(got[9, 9, 0]), 0.25)
+        self.assertAlmostEqual(float(got[8, 11, 0]), 0.25)              # the tap two texels to the LEFT of that pixel
+        self.assertEqual(float(got[8, 3, 0]), 0.0)
+        # the formula, pixel for pixel
+        want = lf.water_blur7(lambda u, v: wr.wc.bilinear(one, u, v, (2, 2)), 9.0 / 16.0, 9.0 / 16.0, offsets, 1.0 / 7.0)
+        self.assertTrue(np.allclose(got[9, 9], want[:3]))
+
+    def test_near_share_forgives_one_texel_and_not_three(self):
+        a = np.zeros((32, 32), dtype=bool)
+        a[10:20, 10:20] = True
+        for shift, want in ((1, 1.0), (3, 0.8)):
+            b = np.roll(a, shift, axis=1)
+            self.assertAlmostEqual(wr.near_share(a, b), want)
+            self.assertAlmostEqual(wr.near_share(b, a), want)
+        self.assertEqual(wr.near_share(a, np.zeros_like(a)), 0.0)
+        self.assertTrue(math.isnan(wr.near_share(np.zeros_like(a), a)))
+
+    def test_a_given_picture_takes_the_dumps_place_in_the_replay(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = made(folder)
+            own = wr.replay(path, 1, place=(0.0, 0.0))
+            base = int(np.unique(own.base[own.kept])[0])
+            grey = wr.replay(path, 1, place=(0.0, 0.0), pictures={base: np.full((4, 4, 3), 0.5)})
+            dark = wr.replay(path, 1, place=(0.0, 0.0), pictures={base: np.full((4, 4, 3), 0.25)})
+            none = wr.replay(path, 1, place=(0.0, 0.0), pictures={base + 0x1000: np.full((4, 4, 3), 0.5)})
+        self.assertTrue(np.array_equal(none.colour, own.colour))        # another base's picture changes nothing
+        self.assertTrue(np.array_equal(grey.kept, own.kept))
+        self.assertFalse(np.allclose(grey.colour[own.kept], own.colour[own.kept]))
+        self.assertTrue((grey.colour[own.kept] >= dark.colour[own.kept]).all())      # the reflection enters with a positive weight
+        self.assertGreater(float((grey.colour[own.kept] - dark.colour[own.kept]).max()), 0.0)
 
 
 if __name__ == "__main__":

@@ -6,10 +6,12 @@
 // three levels, one after another) and <bin>.cpp.stats for tests/test_impostor_pictures.py.
 #include "../../src/native/render/impostor_picture.h"
 #include "../../src/native/render/texture_decode.h"
+#include "../../src/native/render/texture_residency.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <utility>
 #include <vector>
 using namespace fable2::native::render;
 
@@ -61,17 +63,20 @@ int main() {
   tree.ring_clear = kImpostorRingTexels;
   tree.covered = 10381;                               // the median of D1's 28 covered counts (t13_content.txt)
   if (!ImpostorPictureUsable(tree)) return 13;                                                                 // a clear ring, a covered middle
-  tree.covered = kImpostorCoverMax + 1;
-  if (ImpostorPictureUsable(tree)) return 14;
-  // Each bound at its own edge, and the fitted numbers against what the captures hold (t13_content.txt): every
-  // tree read back (ring clear 1,017 to 1,020; covered 4,356 to 18,613) passes, the noise pictures (ring clear at
-  // most 868; five of the six also covered 32,995 or more) and the empty ones fail.
-  tree.covered = kImpostorCoverMax;
+  // The cover has no upper bound and its lower bound is 1 (ledger ruling 45; review of Tasks 10 to 14, I1): the
+  // rule refuses what is provably no picture (a ring that is not clear; a base without a covered texel) and
+  // nothing for its size. A round crown inscribed in the square covers 78% of it before its gaps.
+  static_assert(kImpostorCoverMin == 1);
+  tree.covered = 25801;                               // (one more than the bound of before)
+  if (!ImpostorPictureUsable(tree)) return 14;
+  tree.covered = 65536 - kImpostorRingTexels;         // everything inside a clear ring
   if (!ImpostorPictureUsable(tree)) return 17;
-  tree.covered = kImpostorCoverMin;
+  tree.covered = 1;
   if (!ImpostorPictureUsable(tree)) return 18;
-  tree.covered = kImpostorCoverMin - 1;
+  tree.covered = 0;
   if (ImpostorPictureUsable(tree)) return 19;
+  // The ring's bound at its own edge, and the numbers the captures hold (t13_content.txt): every tree read back
+  // (ring clear 1,017 to 1,020) passes, the noise pictures (ring clear at most 868) and the empty ones fail.
   tree.covered = 10381;
   tree.ring_clear = kImpostorRingClearMin;
   if (!ImpostorPictureUsable(tree)) return 20;
@@ -84,8 +89,96 @@ int main() {
   // A picture half new and half noise (a read that met a half-written level at start-up): about half the ring of a
   // noise picture, which is below the minimum.
   if (ImpostorPictureUsable(ImpostorPictureStats{(1020 + 506) / 2, (10381 + 32995) / 2})) return 24;
-  // The cover's upper bound by itself: the least covered of the five dense noise pictures, were its ring clear.
-  if (ImpostorPictureUsable(ImpostorPictureStats{1020, 32995})) return 25;
+  // The survey: the 374 whole bases of eighteen captures, {ring clear, covered} in the order of
+  // out/native-evidence/distant-trees/t13_content.txt. Each keeps the verdict the rule of before gave it (ring
+  // clear at least 944 and 1,024 to 25,800 covered): 296 usable, 78 refused. tests/test_impostor_pictures.py
+  // reads this table for the Python twin.
+  {
+    static const ImpostorPictureStats survey[] = {
+      // survey-begin
+      {1020, 18211}, {1019, 17012}, {1020, 4679}, {1020, 9591}, {1020, 10386}, {1020, 9577}, {1020, 10431}, {1020, 8323}, {1020, 7618}, {1020, 18579},
+      {1020, 18457}, {1020, 10541}, {1020, 18387}, {1020, 10333}, {1020, 18252}, {1019, 17027}, {1020, 4681}, {1020, 9608}, {1020, 10376}, {1020, 9513},
+      {1020, 10351}, {1020, 8328}, {1020, 7619}, {1020, 18561}, {1020, 18534}, {1020, 10372}, {1020, 18354}, {1020, 10446}, {1020, 18503}, {1017, 16687},
+      {1020, 4664}, {1020, 9405}, {1020, 10362}, {1020, 9452}, {1020, 10435}, {1020, 8304}, {1020, 7630}, {1020, 18216}, {1020, 18255}, {1020, 10347},
+      {1020, 18224}, {1020, 10375}, {1020, 18528}, {1017, 16664}, {1020, 4657}, {1020, 9386}, {1020, 10396}, {1020, 9462}, {1020, 10457}, {1020, 8308},
+      {1020, 7622}, {1020, 18216}, {1020, 18192}, {1020, 10355}, {1020, 18206}, {1020, 10366}, {1020, 18405}, {1017, 16781}, {1020, 4707}, {1020, 9565},
+      {1020, 10415}, {1020, 9470}, {1020, 10374}, {1020, 8301}, {1020, 7672}, {1020, 18304}, {1020, 18432}, {1017, 16829}, {1020, 4644}, {1020, 9478},
+      {1020, 10407}, {1020, 9515}, {1020, 10348}, {1020, 8318}, {1020, 7643}, {1020, 18262}, {1020, 18225}, {1019, 17041}, {1020, 4678}, {1020, 9615},
+      {1020, 10385}, {1020, 9561}, {1020, 10496}, {1020, 8378}, {1020, 7610}, {1020, 18341}, {1020, 18154}, {1019, 17006}, {1020, 4705}, {1020, 9558},
+      {1020, 10369}, {1020, 9567}, {1020, 10476}, {1020, 8344}, {1020, 7612}, {1020, 18298}, {1020, 17583}, {1020, 17083}, {1020, 4362}, {1020, 9753},
+      {1020, 9368}, {1020, 8743}, {1020, 9526}, {1020, 7608}, {1020, 7188}, {1020, 17503}, {1020, 17629}, {1020, 17079}, {1020, 4356}, {1020, 9842},
+      {1020, 9384}, {1020, 8762}, {1020, 9495}, {1020, 7639}, {1020, 7163}, {1020, 17561}, {1020, 18246}, {478, 34484}, {485, 35165}, {490, 34758},
+      {506, 32995}, {493, 35535}, {868, 9924}, {1020, 0}, {1020, 0}, {1020, 0}, {1020, 0}, {1020, 0}, {1020, 0}, {1020, 0},
+      {1020, 18247}, {1020, 18255}, {1019, 17007}, {1020, 4713}, {1020, 9589}, {1020, 10440}, {1020, 9554}, {1020, 10501}, {1020, 8435}, {1020, 7666},
+      {1020, 18594}, {1020, 18390}, {1020, 10551}, {1020, 18210}, {1020, 10409}, {1020, 18270}, {1019, 17014}, {1020, 4716}, {1020, 9590}, {1020, 10443},
+      {1020, 9549}, {1020, 10494}, {1020, 8452}, {1020, 7674}, {1020, 18593}, {1020, 18394}, {1020, 10553}, {1020, 18236}, {1020, 10419}, {1020, 18228},
+      {1019, 16985}, {1020, 4702}, {1020, 9582}, {1020, 10422}, {1020, 9558}, {1020, 10487}, {1020, 8466}, {1020, 7657}, {1020, 18610}, {1020, 18390},
+      {1020, 10458}, {1020, 18255}, {1020, 10427}, {1020, 18232}, {1019, 16980}, {1020, 4704}, {1020, 9605}, {1020, 10427}, {1020, 9555}, {1020, 10469},
+      {1020, 8440}, {1020, 7649}, {1020, 18601}, {1020, 18373}, {1020, 10490}, {1020, 18238}, {1020, 10435}, {1020, 18230}, {478, 34484}, {485, 35165},
+      {490, 34758}, {506, 32995}, {493, 35535}, {868, 9924}, {1020, 0}, {1020, 0}, {1020, 0}, {1020, 0}, {1020, 0}, {1020, 0},
+      {1020, 0}, {1020, 18237}, {1020, 18222}, {478, 34484}, {485, 35165}, {490, 34758}, {506, 32995}, {493, 35535}, {868, 9924}, {1020, 0},
+      {1020, 0}, {1020, 0}, {1020, 0}, {1020, 0}, {1020, 0}, {1020, 0}, {1020, 18205}, {1020, 18184}, {1019, 16990}, {1020, 4704},
+      {1020, 9600}, {1020, 10406}, {1020, 9560}, {1020, 10492}, {1020, 8435}, {1020, 7636}, {1020, 18607}, {1020, 18342}, {1020, 10479}, {1020, 18216},
+      {1020, 10436}, {1020, 18201}, {1019, 16985}, {1020, 4696}, {1020, 9591}, {1020, 10410}, {1020, 9553}, {1020, 10485}, {1020, 8432}, {1020, 7623},
+      {1020, 18613}, {1020, 18335}, {1020, 10464}, {1020, 18217}, {1020, 10442}, {1020, 18180}, {1019, 16991}, {1020, 4702}, {1020, 9608}, {1020, 10405},
+      {1020, 9561}, {1020, 10494}, {1020, 8435}, {1020, 7639}, {1020, 18610}, {1020, 18350}, {1020, 10466}, {1020, 18218}, {1020, 10439}, {1020, 18200},
+      {1019, 16984}, {1020, 4695}, {1020, 9590}, {1020, 10406}, {1020, 9550}, {1020, 10483}, {1020, 8423}, {1020, 7622}, {1020, 18610}, {1020, 18336},
+      {1020, 10465}, {1020, 18216}, {1020, 10442}, {1020, 18244}, {478, 34484}, {485, 35165}, {490, 34758}, {506, 32995}, {493, 35535}, {868, 9924},
+      {1020, 0}, {1020, 0}, {1020, 0}, {1020, 0}, {1020, 0}, {1020, 0}, {1020, 0}, {1020, 18232}, {1020, 18266}, {478, 34484},
+      {485, 35165}, {490, 34758}, {506, 32995}, {493, 35535}, {868, 9924}, {1020, 0}, {1020, 0}, {1020, 0}, {1020, 0}, {1020, 0},
+      {1020, 0}, {1020, 0}, {1020, 18284}, {1020, 18219}, {1019, 17019}, {1020, 4718}, {1020, 9592}, {1020, 10382}, {1020, 9545}, {1020, 10461},
+      {1020, 8431}, {1020, 7627}, {1020, 18571}, {1020, 18356}, {1020, 10443}, {1020, 18224}, {1020, 10442}, {1020, 18194}, {1019, 17030}, {1020, 4714},
+      {1020, 9606}, {1020, 10337}, {1020, 9551}, {1020, 10458}, {1020, 8435}, {1020, 7607}, {1020, 18571}, {1020, 18382}, {1020, 10415}, {1020, 18218},
+      {1020, 10448}, {1020, 18219}, {1019, 17017}, {1020, 4703}, {1020, 9601}, {1020, 10391}, {1020, 9539}, {1020, 10462}, {1020, 8435}, {1020, 7630},
+      {1020, 18567}, {1020, 18345}, {1020, 10441}, {1020, 18220}, {1020, 10449}, {1020, 18197}, {1019, 17028}, {1020, 4715}, {1020, 9624}, {1020, 10354},
+      {1020, 9540}, {1020, 10457}, {1020, 8428}, {1020, 7607}, {1020, 18581}, {1020, 18369}, {1020, 10430}, {1020, 18221}, {1020, 10450}, {1020, 18216},
+      {478, 34484}, {485, 35165}, {490, 34758}, {506, 32995}, {493, 35535}, {868, 9924}, {1020, 0}, {1020, 0}, {1020, 0}, {1020, 0},
+      {1020, 0}, {1020, 0}, {1020, 0}, {1020, 18212},
+      // survey-end
+    };
+    uint32_t usable = 0, refused = 0;
+    for (const ImpostorPictureStats& t : survey) {
+      const bool before = t.ring_clear >= 944 && t.covered >= 1024 && t.covered <= 25800;
+      if (ImpostorPictureUsable(t) != before) return 100;
+      ++(before ? usable : refused);
+    }
+    if (sizeof(survey) / sizeof(survey[0]) != 374 || usable != 296 || refused != 78) return 101;
+  }
+  // Made pictures, through the two counters the pass uses: an honest picture covering 60% of its texels and one
+  // covering 100 texels are used; noise (every other texel covered by a generator's bit) and an empty base are not.
+  {
+    auto usable = [&](const std::vector<uint8_t>& rgba, uint32_t want_covered) {
+      const ImpostorPictureStats m = MeasureImpostorPicture(rgba.data(), n);
+      if (want_covered != ~0u && m.covered != want_covered) return -1;
+      if (ImpostorRingClear(rgba.data(), n) != m.ring_clear) return -1;
+      return ImpostorPictureUsable(m) ? 1 : 0;
+    };
+    auto block = [&](uint32_t w, uint32_t h) {
+      std::vector<uint8_t> rgba(n, 0);
+      for (uint32_t y = (256 - h) / 2; y < (256 - h) / 2 + h; ++y) {
+        for (uint32_t x = (256 - w) / 2; x < (256 - w) / 2 + w; ++x) {
+          uint8_t* p = &rgba[(size_t(y) * 256 + x) * 4];
+          p[0] = 41; p[1] = 99; p[2] = 16; p[3] = 255;
+        }
+      }
+      return rgba;
+    };
+    if (200u * 197u * 100u < 60u * 65536u || usable(block(200, 197), 200u * 197u) != 1) return 102;   // 39,400 texels: 60.1%
+    if (usable(block(10, 10), 100) != 1) return 103;
+    if (usable(block(1, 1), 1) != 1) return 104;
+    std::vector<uint8_t> noise(n, 0);
+    uint32_t lcg = 12345u;
+    for (size_t i = 0; i < n; i += 4) {
+      lcg = lcg * 1664525u + 1013904223u;
+      noise[i + 3] = (lcg >> 31) ? 255 : 0;
+    }
+    const ImpostorPictureStats noisy = MeasureImpostorPicture(noise.data(), n);
+    if (noisy.ring_clear < 400 || noisy.ring_clear > 620 || noisy.covered < 30000 || noisy.covered > 35536) return 105;   // about half of each
+    if (usable(noise, ~0u) != 0) return 106;
+    if (usable(std::vector<uint8_t>(n, 0), 0) != 0) return 107;
+    // (a block that reaches the ring on every side: covered to its edge, refused by the ring however small its cover)
+    if (usable(block(256, 256), 65536) != 0) return 108;
+  }
 
   // The colour's rule: each five-bit field the mean of ALL four parents', covered or not, a half rounded up; a
   // level is made from the level above it.
@@ -171,6 +264,54 @@ int main() {
     }
   }
 
+  // The picture's hash (ImpostorPictureHash; review of Tasks 10 to 14, Minor 5): over every byte of the base, so
+  // that a change of any one byte is a change of the picture. The texture cache's SampleHash reads sixteen
+  // ranges of 256 bytes of a base this size: a change between them left a picture as it was.
+  {
+    std::vector<uint8_t> bytes(kImpostorBaseBytes);
+    for (size_t i = 0; i < bytes.size(); ++i) bytes[i] = uint8_t(i * 31 + (i >> 8) * 7 + 3);
+    const uint64_t h0 = ImpostorPictureHash(bytes.data(), bytes.size());
+    if (ImpostorPictureHash(bytes.data(), bytes.size()) != h0) return 110;
+    uint32_t unsampled = 0;
+    for (size_t at = 0; at < bytes.size(); at += 97) {                         // 1,352 places, every residue of 8 among them
+      const uint64_t s0 = SampleHash(bytes.data(), uint32_t(bytes.size()));
+      bytes[at] ^= 0x40;
+      if (ImpostorPictureHash(bytes.data(), bytes.size()) == h0) return 111;
+      if (SampleHash(bytes.data(), uint32_t(bytes.size())) == s0) ++unsampled;
+      bytes[at] ^= 0x40;
+    }
+    if (unsampled < 1000) return 112;                                          // (what the sampled hash did not see)
+    for (size_t at : {size_t(0), size_t(7), size_t(8), bytes.size() - 9, bytes.size() - 8, bytes.size() - 1}) {
+      bytes[at] ^= 1;
+      if (ImpostorPictureHash(bytes.data(), bytes.size()) == h0) return 113;
+      bytes[at] ^= 1;
+    }
+    // Two bytes exchanged, the same bit changed in two words, a shorter and a longer range: other hashes.
+    std::swap(bytes[1000], bytes[1008]);
+    if (bytes[1000] == bytes[1008] || ImpostorPictureHash(bytes.data(), bytes.size()) == h0) return 114;
+    std::swap(bytes[1000], bytes[1008]);
+    bytes[2000] ^= 4;
+    bytes[2008] ^= 4;
+    if (ImpostorPictureHash(bytes.data(), bytes.size()) == h0) return 115;
+    bytes[2000] ^= 4;
+    bytes[2008] ^= 4;
+    if (ImpostorPictureHash(bytes.data(), bytes.size()) != h0) return 116;
+    if (ImpostorPictureHash(bytes.data(), bytes.size() - 1) == h0 || ImpostorPictureHash(bytes.data(), bytes.size() - 8) == h0) return 117;
+    std::vector<uint8_t> zeros(kImpostorBaseBytes, 0);
+    if (ImpostorPictureHash(zeros.data(), zeros.size()) == ImpostorPictureHash(zeros.data(), zeros.size() - 8)) return 118;
+    if (ImpostorPictureHash(nullptr, 0) != ImpostorPictureHash(nullptr, 5) || ImpostorPictureHash(nullptr, 0) == h0) return 119;
+    // A range that does not end on a word: its last bytes count, and the size does (zeros that the padding would
+    // also give are another range).
+    const uint64_t h13 = ImpostorPictureHash(bytes.data(), 13);
+    bytes[12] ^= 0x10;
+    if (ImpostorPictureHash(bytes.data(), 13) == h13) return 120;
+    bytes[12] ^= 0x10;
+    bytes[8] ^= 0x10;
+    if (ImpostorPictureHash(bytes.data(), 13) == h13) return 121;
+    bytes[8] ^= 0x10;
+    if (ImpostorPictureHash(zeros.data(), 5) == ImpostorPictureHash(zeros.data(), 6) || ImpostorPictureHash(zeros.data(), 13) == ImpostorPictureHash(zeros.data(), 16)) return 122;
+  }
+
   // The diagnostic feed's file (fable2_native_impostor_feed; tools/xdk_sigmatch/impostor_pictures.py `feed`): one
   // or two sets of a capture's dumped bases, which the pass reads in place of guest memory.
   {
@@ -251,6 +392,6 @@ int main() {
     std::printf("picture levels made: wrote %s (ring clear %u, covered %u, %s)\n", outp.c_str(), st.ring_clear, st.covered,
                 ImpostorPictureUsable(st) ? "usable" : "refused");
   }
-  std::printf("PASS: impostor pictures (the native levels' rule, the content rule and its fitted bounds)\n");
+  std::printf("PASS: impostor pictures (the native levels' rule; the content rule: a clear ring and not empty, the survey's 374 verdicts; the picture's hash)\n");
   return 0;
 }

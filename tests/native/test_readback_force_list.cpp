@@ -121,8 +121,66 @@ int main() {
     }
   }
   if (ImpostorPictureBase(13) != 0x12933000u) return 131;
-  // The seeding's log lines: nothing added without the pictures (criterion 13 holds an off-run's line to log 657's).
-  if (std::string(ForceReadbackSeedSuffix(false)) != "" || std::string(ForceReadbackSeedSuffix(true)) != ", fable2_native_impostors=on") return 140;
+  // Ledger ruling 47: the pictures' bases are listed only when the switch is `on` AND the native renderer is on
+  // (with the renderer off nothing reads them: about 1.8 ms a frame for no consumer). Every combination of the
+  // four inputs: the list is that of before without the pictures unless both hold.
+  for (int mask = 0; mask < 16; ++mask) {
+    const bool dog = (mask & 1) != 0, exposure = (mask & 2) != 0, on = (mask & 4) != 0, render = (mask & 8) != 0;
+    const bool listed = ImpostorPicturesInList(render, on);
+    if (listed != (on && render)) return 141;
+    const std::string list = ForceReadbackList(dog, exposure, listed);
+    if (!listed && list != ForceReadbackList(dog, exposure)) return 142;                 // the list of before, byte for byte
+    if (listed && (list.find("0x12933000") == std::string::npos || !ForceListHasImpostorPictures(list))) return 143;
+    if (!listed && ForceListHasImpostorPictures(list)) return 144;
+    // The seeding's log lines: nothing added with the switch off or flat (criterion 13 holds an off-run's line to
+    // log 657's), whatever the renderer; with it on, which of the two happened and why.
+    const std::string suffix = ForceReadbackSeedSuffix(on, render);
+    if (!on && !suffix.empty()) return 145;
+    if (on && render && suffix != ", fable2_native_impostors=on with fable2_native_render=true: the fourteen picture bases listed") return 146;
+    if (on && !render && suffix != ", fable2_native_impostors=on without fable2_native_render: the picture bases NOT listed") return 147;
+    // (a list given by hand is never seeded: its line gains a word only with the switch on)
+    const std::string hand_suffix = ForceReadbackHandSuffix(on);
+    if (on ? hand_suffix != ", fable2_native_impostors=on: the pictures are read back only if this list holds their fourteen bases" : !hand_suffix.empty()) return 151;
+  }
+  static_assert(ImpostorPicturesInList(true, true) && !ImpostorPicturesInList(true, false) && !ImpostorPicturesInList(false, true) &&
+                !ImpostorPicturesInList(false, false));
+  // A list given by hand (review of Tasks 10 to 14, Minor 3): the pictures are in guest memory when the list, read
+  // by the SDK's rule, forces each of the fourteen bases; the header's reading of the rule against this file's copy.
+  {
+    const std::string hand[] = {
+        "",
+        fourteen,
+        "0x1A385000, 0x1A34F000 ," + fourteen + ",0x1ECFF000",                          // more entries, blanks around them
+        fourteen.substr(0, fourteen.size() - 11),                                       // thirteen: the last is missing
+        fourteen.substr(11),                                                            // the first is missing
+        "0x12704000",
+        "309346304,0x1272F000,0x1275A000,0x12785000,0x127B0000,0x127DB000,0x12806000,"  // the first in decimal
+        "0x12831000,0x1285C000,0x12887000,0x128B2000,0x128DD000,0x12908000,0x12933000",
+        "0x12700000,0x1272F000,0x1275A000,0x12785000,0x127B0000,0x127DB000,0x12806000," // an entry 0x4000 below the first base: its window holds it
+        "0x12831000,0x1285C000,0x12887000,0x128B2000,0x128DD000,0x12908000,0x12933000",
+        "0x126F4000,0x1272F000,0x1275A000,0x12785000,0x127B0000,0x127DB000,0x12806000," // an entry a whole window below: it does not
+        "0x12831000,0x1285C000,0x12887000,0x128B2000,0x128DD000,0x12908000,0x12933000",
+        "junk," + fourteen,                                                             // a malformed entry is address 0 and harms nothing
+        "0x12704000;0x1272F000",                                                        // not divided by commas: one entry, read to the semicolon
+        ",,," + fourteen + ",,",
+        "   , \t ," + fourteen,                                                         // entries of blanks alone are no entries (not address 0)
+    };
+    const bool want[] = {false, true, true, false, false, false, true, true, false, true, false, true, true};
+    static_assert(sizeof(hand) / sizeof(hand[0]) == sizeof(want) / sizeof(want[0]));
+    for (size_t i = 0; i < sizeof(want) / sizeof(want[0]); ++i) {
+      if (ForceListHasImpostorPictures(hand[i]) != want[i]) { std::cerr << "hand list " << i << "\n"; return 148; }
+      for (uint32_t n = 0; n < kImpostorPictures; ++n) {
+        for (uint32_t base : {ImpostorPictureBase(n), ImpostorPictureBase(n) + 0xFFFFu, ImpostorPictureBase(n) + 0x10000u, ImpostorPictureBase(n) - 1}) {
+          if (ForceListForces(hand[i], base) != (SdkMatch(hand[i], base) != 0)) { std::cerr << "hand list " << i << " base " << std::hex << base << "\n"; return 149; }
+        }
+      }
+      for (uint32_t base : {0u, 0xFFFFu, 0x10000u, 0x1A385000u, 0x1ECFF000u, 0xFFFFFFFFu}) {
+        // (SdkMatch gives the matching entry, which is 0 for a malformed one: asked for a base no entry here names but address 0's)
+        const bool sdk = hand[i].find("junk") != std::string::npos && base < 0x10000u ? true : SdkMatch(hand[i], base) != 0;
+        if (ForceListForces(hand[i], base) != sdk) return 150;
+      }
+    }
+  }
   // Every combination under the SDK's rule: the entries read whole, the hero's and the exposure's resolves forced
   // exactly as without the pictures (plus the hero's base as impostor 0's), each picture's base forced by its own
   // entry, and no picture's stored levels (base + 0x20000), the byte before a base or the first byte after a window.
@@ -148,6 +206,7 @@ int main() {
       if (SdkMatch(list, other) != 0) return 139;
   }
 
-  std::cout << "PASS: forced read-back list (hero and dog, exposure, the impostors' pictures: eight lists under the SDK's rule)\n";
+  std::cout << "PASS: forced read-back list (hero and dog, exposure, the impostors' pictures: eight lists under the SDK's rule; the pictures "
+               "only with the switch on and the native renderer on, sixteen combinations; a list given by hand)\n";
   return 0;
 }

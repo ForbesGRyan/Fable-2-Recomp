@@ -11,9 +11,12 @@
 
 #pragma once
 
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
+#include <exception>
 #include <string>
+#include <string_view>
 
 namespace fable2 {
 
@@ -54,8 +57,14 @@ static_assert(kImpostorPictureStep >= kForceReadbackWindow);     // no window re
 static_assert(kImpostorLevelOffset >= kForceReadbackWindow && kImpostorLevelOffset < kImpostorPictureStep);   // no level address lies in a window
 static_assert(kLuminanceResolveBases[1] - ImpostorPictureBase(kImpostorPictures - 1) >= kForceReadbackWindow);
 
+// Whether the pictures' bases go into the list (ledger ruling 47): the switch at `on` AND the native renderer
+// on (--fable2_native_render). The pictures' only reader is the native view; with the renderer off the list
+// would cost about 1.8 ms a frame for nothing (the emulated view samples the host's texture). The exposure's
+// entries are different: the game itself reads them, renderer or not.
+constexpr bool ImpostorPicturesInList(bool native_render, bool impostors_on) { return native_render && impostors_on; }
+
 // The list for the things the application wants read back: the hero and dog texture fix, the game's
-// exposure (--fable2_exposure_readback) and the impostors' pictures (--fable2_native_impostors=on). Each
+// exposure (--fable2_exposure_readback) and the impostors' pictures (ImpostorPicturesInList). Each
 // leaves the others' entries as they are. `impostors`: the fourteen picture bases as well (the first is
 // the hero's entry: not listed twice). Without the third input, and with it false, the lists of before.
 inline std::string ForceReadbackList(bool hero_dog, bool exposure, bool impostors = false) {
@@ -74,8 +83,53 @@ inline std::string ForceReadbackList(bool hero_dog, bool exposure, bool impostor
   return list;
 }
 
-// What the seeding's log lines gain inside their parentheses: nothing without the pictures (the lines of
-// before, byte for byte), else the switch that asked for them.
-constexpr const char* ForceReadbackSeedSuffix(bool impostors) { return impostors ? ", fable2_native_impostors=on" : ""; }
+// What the seeded line gains inside its parentheses: nothing with the impostors' switch off or flat (the line
+// of before, byte for byte, whatever the renderer); with it on, whether the bases were listed and why not.
+constexpr const char* ForceReadbackSeedSuffix(bool impostors_on, bool native_render) {
+  return !impostors_on ? ""
+         : native_render ? ", fable2_native_impostors=on with fable2_native_render=true: the fourteen picture bases listed"
+                         : ", fable2_native_impostors=on without fable2_native_render: the picture bases NOT listed";
+}
+// And the line of a list given by hand, which is never seeded: nothing with the switch off or flat.
+constexpr const char* ForceReadbackHandSuffix(bool impostors_on) {
+  return impostors_on ? ", fable2_native_impostors=on: the pictures are read back only if this list holds their fourteen bases" : "";
+}
+
+// The SDK's rule for one base, as this file's head states it (a reading of ShouldForceReadbackResolve's list
+// part; tests/native/test_readback_force_list.cpp holds it to that test's own copy): entries divided by commas,
+// blanks around an entry dropped, each read by std::stoull with base 0 (a malformed entry is address 0), an
+// entry matching [entry, entry + 64 KiB).
+inline bool ForceListForces(std::string_view spec, uint32_t base) {
+  size_t start = 0;
+  while (start < spec.size()) {
+    size_t end = spec.find(',', start);
+    if (end == std::string_view::npos) end = spec.size();
+    std::string_view token = spec.substr(start, end - start);
+    while (!token.empty() && std::isspace(static_cast<unsigned char>(token.front()))) token.remove_prefix(1);
+    while (!token.empty() && std::isspace(static_cast<unsigned char>(token.back()))) token.remove_suffix(1);
+    if (!token.empty()) {
+      unsigned long long addr = 0;
+      try {
+        size_t pos = 0;
+        addr = std::stoull(std::string(token), &pos, 0);
+      } catch (const std::exception&) {
+        addr = 0;
+      }
+      const uint32_t a = static_cast<uint32_t>(addr);
+      if (base >= a && base - a < kForceReadbackWindow) return true;
+    }
+    start = end + 1;
+  }
+  return false;
+}
+// Whether a list, however it came about (seeded or given by hand), brings all fourteen pictures to guest
+// memory: each base forced by some entry. A hand-given list of the fourteen bases has the pictures as a seeded
+// one has (the cost sessions' `fourteen` runs were such lists).
+inline bool ForceListHasImpostorPictures(std::string_view spec) {
+  for (uint32_t n = 0; n < kImpostorPictures; ++n) {
+    if (!ForceListForces(spec, ImpostorPictureBase(n))) return false;
+  }
+  return true;
+}
 
 }  // namespace fable2

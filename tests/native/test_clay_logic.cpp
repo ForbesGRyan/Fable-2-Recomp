@@ -2451,6 +2451,19 @@ static void ImpostorTests() {
       flat14 = all;
       flat14.impostor_mode = capture::ImpostorMode::kFlat;
       CHECK(837, FormatImpostorText(flat14) == "Impostors: flat, drawn 14 of 14 (928 quads) | not drawn {} | impostor-record {}");
+      // A feed run is marked (ledger ruling 47): the pictures are a file's, not the running game's. The mark is
+      // part of the form (a change line where it changes), and flat and off never carry it.
+      {
+        std::vector<ClayStats> fed(1, all);
+        fed[0].impostor_feed = true;
+        CHECK(837, FormatImpostorText(fed[0]) ==
+                       "Impostors: on (feed), drawn 14 of 14 (928 quads), pictures 14 (refreshed 14) | not drawn {} | impostor-record {}");
+        CHECK(837, ImpostorStepForm(fed[0]) != ImpostorStepForm(all));
+        fed[0].impostor_mode = capture::ImpostorMode::kFlat;
+        CHECK(837, FormatImpostorText(fed[0]) == "Impostors: flat, drawn 14 of 14 (928 quads) | not drawn {} | impostor-record {}");
+        fed[0].impostor_mode = capture::ImpostorMode::kOff;
+        CHECK(837, FormatImpostorText(fed[0]) == "Impostors: off");
+      }
       // Which of the fourteen a base is (the read-back list's bases; anything else is "picture: base").
       CHECK(837, ImpostorPictureSlot(0x12704000u, 0x12704000u, 0x2B000u, 14) == 0 && ImpostorPictureSlot(0x12933000u, 0x12704000u, 0x2B000u, 14) == 13);
       CHECK(837, ImpostorPictureSlot(0x1272F000u, 0x12704000u, 0x2B000u, 14) == 1 && ImpostorPictureSlot(0x1295E000u, 0x12704000u, 0x2B000u, 14) == -1);

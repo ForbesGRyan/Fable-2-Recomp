@@ -53,12 +53,16 @@ void SetGammaRampReader(bool (*reader)(void* user, uint32_t out_rgb10[256][3], u
 // (src/core/readback_force_list.h).
 bool ExposureReadbackWanted();
 
-// --fable2_native_impostors is `on` (the far woods' pictures; frame-map section 19, "The read-back
-// list"). Like the exposure's: independent of Install; the application asks once, in OnPostSetup, and
-// seeds the fourteen picture bases into the SDK's forced read-back list. NoteImpostorPicturesSeeded:
-// the application says that it did (never when the list was given by hand or refused).
-// ImpostorPicturesAvailable: the list was seeded with the pictures, or --readback_resolve is full;
-// decided at its first call and kept (the pass asks; otherwise a record is "picture: base").
+// The far woods' pictures (frame-map section 19, "The read-back list"). ImpostorSwitchOn:
+// --fable2_native_impostors is `on`, the renderer installed or not. ImpostorReadbackWanted: that AND
+// --fable2_native_render (ledger ruling 47: the native view is the pictures' only reader); the
+// application asks both once, in OnPostSetup, and seeds the fourteen picture bases into the SDK's
+// forced read-back list when the second holds. NoteImpostorPicturesSeeded: the application says that
+// it did (never when the list was given by hand or refused). ImpostorPicturesAvailable: the list, seeded
+// or given by hand, forces each of the fourteen bases (ForceListHasImpostorPictures), or
+// --readback_resolve is full; decided at its first call and kept (the pass asks; otherwise a record is
+// "picture: base").
+bool ImpostorSwitchOn();
 bool ImpostorReadbackWanted();
 void NoteImpostorPicturesSeeded();
 bool ImpostorPicturesAvailable();

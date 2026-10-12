@@ -205,13 +205,14 @@ class ClayPass {
   // false in every other call, and for a dump of a frame drawn without the pictures.
   bool TakeImpostorPictures(std::vector<uint8_t>* file);
   // Whether the run has the pictures in guest memory (fable2::native::ImpostorPicturesAvailable: the read-back
-  // list was seeded with the fourteen bases, or the read-back is full). The caller says so before a Render in
+  // list, seeded or given by hand, forces the fourteen bases, or the read-back is full). The caller says so before a Render in
   // `on`; without it every record is "picture: base".
   void SetImpostorPicturesAvailable(bool available) { impostor_pictures_available_ = available; }
   // The diagnostic feed (fable2_native_impostor_feed; impostor_picture.h): with one, a base the feed holds is read
   // from the feed's set of this Render (the sets in turn, a Render each) IN PLACE OF GUEST MEMORY, whatever the
   // run's read-back; everything after the read is the product's path. Null (the default): no feed. The caller
-  // keeps the feed and its file alive.
+  // keeps the feed and its file alive. A Render with a feed is marked (ClayStats::impostor_feed: the Impostors
+  // line, the first upload's log line, the pictures file's flag).
   void SetImpostorPictureFeed(const ImpostorFeed* feed) { impostor_feed_ = feed; }
   // The file's head of the dump last taken, and the counts, for the caller's log line.
   const SceneDumpHeader& scene_dump_head() const { return scene_dump_head_; }
@@ -417,8 +418,8 @@ class ClayPass {
   // The impostors' pictures (`on` alone; frame-map section 19, "The pictures in the pass"). What is known of
   // the picture a record samples, this Render: its tf0 is one of the read-back list's fourteen bases in a run
   // that has them (else kBase); the base level's 131,072 bytes read whole from guest memory and COPIED before
-  // anything is judged (else kUnread); the copy's SampleHash against the one the picture's texture was made
-  // from: equal means the texture is used as it is; else decoded (DecodeImpostorBase, or Decode1555Level for
+  // anything is judged (else kUnread); the copy's ImpostorPictureHash (every byte) against the one the picture's
+  // texture was made from: equal means the texture is used as it is; else decoded (DecodeImpostorBase, or Decode1555Level for
   // another layout; false: kUnread), held to the content rule (ImpostorPictureUsable; false: kContent), its
   // three levels made (MakeImpostorLevels) and the four levels staged for upload in this frame's staging buffer
   // (a texture, its view or the buffer missing: kUpload). A base is judged once a Render, however many records
@@ -801,7 +802,7 @@ class ClayPass {
   // The pictures (`on`): one texture a base of the read-back list, 256 x 256 R8G8B8A8_UNORM with four levels,
   // owned by the pass and outside the texture cache (whose dynamic rule would refuse a texture that changes
   // every frame); made on the first frame that has a usable picture for it, never in `off` or `flat`. `view`:
-  // with the swizzle of the fetch it was made for (`swizzle`: the fetch's field). `hash`: SampleHash of the guest
+  // with the swizzle of the fetch it was made for (`swizzle`: the fetch's field). `hash`: ImpostorPictureHash of the guest
   // bytes the texture holds (`filled`). `base`: the base level as uploaded, kept for the pictures' dump.
   // `judged`, `state`: the Render that last judged it (impostor_picture_serial_) and what it found.
   struct ImpostorPictureTexture {

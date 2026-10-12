@@ -158,13 +158,16 @@ class Fable2App : public rex::ReXApp {
     // is on (its two addresses; readback_force_list.h), so that the game's own exposure
     // adapts in a normal run. Either input leaves the other's entries alone. The SDK
     // reads the list at every resolve; it is seeded once, here, and a list given by hand
-    // (any source but the default) is left as it is. With --fable2_native_impostors=on the
-    // list also carries the far woods' fourteen picture bases (sub-project 12; the first is
-    // the hero's entry); it is never rewritten while the game runs. With that switch off or
-    // flat the list and both log lines are those of before, byte for byte.
+    // (any source but the default) is left as it is. With --fable2_native_impostors=on AND
+    // the native renderer on (--fable2_native_render: the pictures' only reader) the list
+    // also carries the far woods' fourteen picture bases (sub-project 12; the first is the
+    // hero's entry); with the switch on and the renderer off it does not, and the line says
+    // so. It is never rewritten while the game runs. With that switch off or flat the list
+    // and both log lines are those of before, byte for byte.
     {
       const fable2::config::Values& cfg = fable2::config::Get();
       const bool exposure = fable2::native::ExposureReadbackWanted();
+      const bool impostors_on = fable2::native::ImpostorSwitchOn();
       const bool impostors = fable2::native::ImpostorReadbackWanted();
       const std::string force_addr =
           fable2::ForceReadbackList(cfg.hero_dog_texture_readback, exposure, impostors);
@@ -175,7 +178,7 @@ class Fable2App : public rex::ReXApp {
                       "(fable2_config.toml hero_dog_texture_readback={}, "
                       "fable2_exposure_readback={}{})",
                       force_addr, cfg.hero_dog_texture_readback, exposure,
-                      fable2::ForceReadbackSeedSuffix(impostors));
+                      fable2::ForceReadbackSeedSuffix(impostors_on, impostors));
           if (impostors) fable2::native::NoteImpostorPicturesSeeded();
         } else {
           REXSYS_WARN("[fable2-config] cvar readback_resolve_force_addresses "
@@ -187,7 +190,7 @@ class Fable2App : public rex::ReXApp {
         REXSYS_INFO("[fable2-config] readback_resolve_force_addresses was given by hand; "
                     "not seeded (hero_dog_texture_readback={}, fable2_exposure_readback={}{})",
                     cfg.hero_dog_texture_readback, exposure,
-                    fable2::ForceReadbackSeedSuffix(impostors));
+                    fable2::ForceReadbackHandSuffix(impostors_on));
       }
     }
 

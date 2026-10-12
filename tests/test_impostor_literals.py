@@ -274,7 +274,10 @@ class ImpostorPassText(unittest.TestCase):
     def test_nothing_of_the_step_without_the_mode(self):
         s = self.pass_
         head = ("  const capture::ImpostorMode impostor_mode = ClayImpostorMode(impostors, scene.impostor_mode);\n"
-                "  st.impostor_mode = impostor_mode;\n  impostor_step_slots_ = 0;\n  bool impostor_step = false;\n"
+                "  st.impostor_mode = impostor_mode;\n"
+                "  st.impostor_feed = impostor_mode == capture::ImpostorMode::kOn && impostor_feed_ && impostor_feed_->sets;"
+                "   // (a feed run is marked wherever its pictures are named)\n"
+                "  impostor_step_slots_ = 0;\n  bool impostor_step = false;\n"
                 "  if (impostor_mode != capture::ImpostorMode::kOff) {\n")
         self.assertEqual(s.count(head), 1)
         # the one place that makes the step's objects and takes its slots lies inside that test, behind the picture's verdict
@@ -308,8 +311,14 @@ class ImpostorPassText(unittest.TestCase):
         copy = reader.index("  std::memcpy(impostor_guest_.data(), guest, kImpostorBaseBytes);\n")
         import re
         self.assertEqual(re.findall(r"(?<![A-Za-z_])guest[,;)\[]", reader[copy + 40:]), [])      # the guest's pointer is not read again
-        for later in ("SampleHash(", "DecodeImpostorBase(", "Decode1555Level(", "ImpostorPictureUsable(", "MakeImpostorLevels("):
+        for later in ("ImpostorPictureHash(", "DecodeImpostorBase(", "Decode1555Level(", "ImpostorPictureUsable(", "MakeImpostorLevels("):
             self.assertGreater(reader.index(later), copy, later)
+        # the picture's hash is of every byte of the copy (review of Tasks 10 to 14, Minor 5): never the sampled one
+        self.assertNotIn("SampleHash(", reader)
+        self.assertIn("  hash = ImpostorPictureHash(impostor_guest_.data(), kImpostorBaseBytes);\n", reader)
+        # the first refusal's line names the content rule's bounds as they are (ledger ruling 45): no upper cover bound
+        self.assertNotIn("kImpostorCoverMax", s)
+        self.assertIn("(ring clear {} of {}, bound at least {}; covered {}, bound at least {} and no upper bound; hash 0x{:016X}; pictures {}, feed {})", reader)
         self.assertLess(reader.index("ImpostorPictureUsable(stats)"), reader.index("MakeImpostorLevels("))      # the content rule before any level
         self.assertLess(reader.index("ImpostorPictureUsable(stats)"), reader.index("impostor_uploads_[impostor_upload_count_++]"))
         # everything else of the step asks `impostor_step` or the draws it prepared
@@ -365,11 +374,33 @@ class ImpostorPassText(unittest.TestCase):
                      "  pipe.depth.write_enable = true;\n", "  pipe.depth.func = nrhi::CompareFunc::kLessEqual;\n"):
             self.assertEqual(made.count(line), 1, line)
 
+    def test_a_feed_run_is_marked(self):
+        """Ledger ruling 47: the first-upload line, the Impostors line (ClayStats::impostor_feed) and the pictures file
+        say that the pictures were the diagnostic feed's, not the running game's."""
+        s = self.pass_
+        self.assertEqual(s.count("impostor_feed_ && impostor_feed_->sets"), 2)        # the reader's source and the frame's mark
+        self.assertEqual(s.count("  st.impostor_feed = impostor_mode == capture::ImpostorMode::kOn && impostor_feed_ && impostor_feed_->sets;"), 1)
+        self.assertEqual(s.count("st.impostor_feed ="), 1)
+        self.assertNotIn("pictures decoded from guest memory and uploaded", s)
+        self.assertIn('st.impostor_feed ? "from the feed\'s file (fable2_native_impostor_feed: NOT the running game\'s)" : "decoded from guest memory"', s)
+        self.assertIn("PackImpostorPictures(scene.frame, impostor_dump_entries, impostor_dump_count, &impostor_dump_file_, st.impostor_feed);", s)
+        self.assertEqual(s.count("PackImpostorPictures("), 1)
+
     def test_the_front_end_hands_the_switch_on_and_writes_the_line(self):
         # its definition, the Render's argument, the install line, the capture's; and (plan Tasks 12 and 14) the
         # read-back list's question at start-up and the pictures' availability before a Render in `on`
         self.assertEqual(self.front.count("CurrentImpostors()"), 7)       # (and the diagnostic feed's loader, which reads its file only in `on`)
-        self.assertIn("bool ImpostorReadbackWanted() { return CurrentImpostors() == capture::ImpostorMode::kOn; }", self.front)
+        # (ledger ruling 47) the list is asked for the pictures only with the switch at `on` AND the native renderer on
+        self.assertIn("bool ImpostorSwitchOn() { return CurrentImpostors() == capture::ImpostorMode::kOn; }", self.front)
+        self.assertIn("bool ImpostorReadbackWanted() { return fable2::ImpostorPicturesInList(REXCVAR_GET(fable2_native_render), ImpostorSwitchOn()); }", self.front)
+        app = (ROOT / "src" / "core" / "fable_2_app.h").read_text(encoding="utf-8")
+        self.assertIn("      const bool impostors_on = fable2::native::ImpostorSwitchOn();\n"
+                      "      const bool impostors = fable2::native::ImpostorReadbackWanted();\n", app)
+        self.assertEqual(app.count("fable2::ForceReadbackSeedSuffix(impostors_on, impostors)"), 1)
+        self.assertEqual(app.count("fable2::ForceReadbackHandSuffix(impostors_on)"), 1)
+        self.assertEqual(app.count("fable2::ForceReadbackList(cfg.hero_dog_texture_readback, exposure, impostors)"), 1)
+        # a list given by hand that holds the fourteen bases has the pictures (review Minor 3)
+        self.assertIn('fable2::ForceListHasImpostorPictures(rex::cvar::GetFlagByName("readback_resolve_force_addresses"))', self.front)
         self.assertIn("  if (CurrentImpostors() == capture::ImpostorMode::kOn) g_clay->SetImpostorPicturesAvailable(ImpostorPicturesAvailable());\n", self.front)
         self.assertIn('render::FormatCoverageText(st) + "\\n" + render::FormatImpostorText(st));', self.front)
         # the log's line: with the pictures their CPU time beside it, otherwise the line of before; none with the mode off

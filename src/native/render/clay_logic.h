@@ -618,6 +618,9 @@ struct ClayStats {
   // the content rule, in a texture); impostor_refreshed: those of them decoded and uploaded this frame (the
   // others' sampled bytes were the ones their texture was made from).
   uint32_t impostor_pictures = 0, impostor_refreshed = 0;
+  // (`on` alone) the frame's pictures were taken from the diagnostic feed's file (fable2_native_impostor_feed),
+  // not from the running game's guest memory: the Impostors line says "on (feed)" (ledger ruling 47).
+  bool impostor_feed = false;
   // (the CPU time of reading, hashing, decoding and staging them this frame, for the log)
   double impostor_picture_ms = 0.0;
   uint32_t impostor_capture[size_t(capture::ImpostorReason::kCount)] = {};
@@ -7415,7 +7418,9 @@ constexpr void ImpostorFlatTexel(uint8_t texel[4]) {
 inline std::string FormatImpostorText(const ClayStats& st) {
   if (st.impostor_mode == capture::ImpostorMode::kOff) return "Impostors: off";
   char buf[160];
-  std::snprintf(buf, sizeof(buf), "Impostors: %s, drawn %u of %u (%u quads)", capture::ImpostorModeName(st.impostor_mode),
+  // (a feed run is marked: its pictures are a file's, not the running game's; `on` alone can have a feed)
+  const bool feed = st.impostor_mode == capture::ImpostorMode::kOn && st.impostor_feed;
+  std::snprintf(buf, sizeof(buf), "Impostors: %s%s, drawn %u of %u (%u quads)", capture::ImpostorModeName(st.impostor_mode), feed ? " (feed)" : "",
                 st.impostors_drawn, st.impostors_seen, st.impostor_quads);
   std::string text = buf;
   // (the pictures in `on` alone: `flat` has the line of before)
@@ -7451,6 +7456,7 @@ constexpr uint64_t ImpostorStepForm(const ClayStats& st) {
     for (int i = 0; i < 4; ++i) h = (h ^ ((v >> (8 * i)) & 0xFFu)) * 0x100000001B3ull;
   };
   mix(uint32_t(st.impostor_mode));
+  mix(st.impostor_mode == capture::ImpostorMode::kOn && st.impostor_feed ? 1u : 0u);
   mix(st.impostors_seen);
   mix(st.impostors_drawn);
   mix(st.impostor_quads);

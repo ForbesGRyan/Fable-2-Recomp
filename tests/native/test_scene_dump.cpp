@@ -228,11 +228,11 @@ int main() {
     std::vector<ImpostorPictureHead> heads;
     std::vector<const uint8_t*> pictures;
     if (!ParseImpostorPictures(file.data(), file.size(), &head, &heads, &pictures)) return 83;
-    if (head.magic != kImpostorPicturesMagic || head.version != 1 || head.scene_frame != 4711 || head.count != 2 || head.reserved != 0) return 84;
+    if (head.magic != kImpostorPicturesMagic || head.version != 1 || head.scene_frame != 4711 || head.count != 2 || head.flags != 0) return 84;
     if (heads.size() != 2 || pictures.size() != 2 || heads[0].base != 0x12704000u || heads[0].place != 422 || heads[0].hash != 0x1122334455667788ull ||
         heads[1].base != 0x1272F000u || heads[1].place != 423 || heads[1].hash != 0x99AABBCCDDEEFF00ull) return 85;
     if (std::memcmp(pictures[0], a.data(), n) != 0 || std::memcmp(pictures[1], b.data(), n) != 0) return 86;
-    // Refused: one byte short, one byte long, a count of 33, a wrong magic, a wrong version, a reserved word.
+    // Refused: one byte short, one byte long, a count of 33, a wrong magic, a wrong version, a flag that has no meaning.
     if (ParseImpostorPictures(file.data(), file.size() - 1, &head, &heads, &pictures) || !heads.empty() || !pictures.empty()) return 87;
     std::vector<uint8_t> longer = file;
     longer.push_back(0);
@@ -248,8 +248,24 @@ int main() {
     bad[4] = 2;
     if (ParseImpostorPictures(bad.data(), bad.size(), &head, &heads, &pictures)) return 91;
     bad = file;
-    bad[20] = 1;
+    bad[20] = 2;
     if (ParseImpostorPictures(bad.data(), bad.size(), &head, &heads, &pictures)) return 92;
+    bad = file;
+    bad[23] = 0x80;
+    if (ParseImpostorPictures(bad.data(), bad.size(), &head, &heads, &pictures)) return 92;
+    // A feed run's file says so (ledger ruling 47): bit 0 of the head's flags, the pictures as before; a file
+    // packed without the word, and with it false, is the file of before byte for byte.
+    {
+      std::vector<uint8_t> fed, plain;
+      if (kImpostorPicturesFromFeed != 1u || !PackImpostorPictures(4711, two, 2, &fed, true) || !PackImpostorPictures(4711, two, 2, &plain, false)) return 98;
+      if (plain != file || fed.size() != file.size() || fed[20] != 1 || fed[21] != 0 || fed[22] != 0 || fed[23] != 0) return 99;
+      fed[20] = 0;
+      if (fed != file) return 100;
+      fed[20] = 1;
+      ImpostorPicturesHeader fh{};
+      if (!ParseImpostorPictures(fed.data(), fed.size(), &fh, &heads, &pictures) || fh.flags != kImpostorPicturesFromFeed || fh.count != 2 ||
+          heads.size() != 2 || std::memcmp(pictures[1], b.data(), n) != 0) return 101;
+    }
     if (ParseImpostorPictures(nullptr, file.size(), &head, &heads, &pictures)) return 93;
     // Packing: no picture's bytes, more than 32, no file: nothing written. A file of no picture is a file.
     const ImpostorPictureEntry none[1] = {{{0x12704000u, 1u, 2ull}, nullptr}};

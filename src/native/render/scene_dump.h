@@ -222,15 +222,20 @@ inline bool SceneDumpNewRequest(uint64_t first_scene_frame, uint64_t last_asked)
 // its head and the picture's base level as it was uploaded: 256 x 256 RGBA8, the TEXTURE's channels as
 // Decode1555Level gives them (the fetch's swizzle is the view's, not in these bytes). `base`: the picture's
 // address (the record's tf0 base); `place`: the record's place in the frame (ImpostorRecord::place); `hash`:
-// SampleHash of the guest bytes the picture was decoded from. tools/xdk_sigmatch/impostor_pictures.py `used`
-// holds each against the paired capture's dump of the same base.
+// ImpostorPictureHash of the bytes the picture was decoded from (every byte of the base). The file's head has a
+// flags word: bit 0 (kImpostorPicturesFromFeed) says the bytes came from the diagnostic feed's file
+// (fable2_native_impostor_feed), NOT from the running game's guest memory (ledger ruling 47: such a file reads
+// 100% against the feed's own capture and must not be taken for the game's pictures); no other bit has a
+// meaning, and a file with one is refused. tools/xdk_sigmatch/impostor_pictures.py `used` holds each picture
+// against the paired capture's dump of the same base and prints the flag.
 inline constexpr uint32_t kImpostorPicturesMagic = 0x504E3246u, kImpostorPicturesVersion = 1;   // "F2NP"
+inline constexpr uint32_t kImpostorPicturesFromFeed = 1u;                                       // ImpostorPicturesHeader::flags
 inline constexpr uint32_t kImpostorPicturesMax = 32;                                            // capture::kMaxImpostorRecords
 inline constexpr size_t kImpostorPictureBytes = size_t(256) * 256 * 4;
 struct ImpostorPicturesHeader {
   uint32_t magic, version;
   uint64_t scene_frame;
-  uint32_t count, reserved;
+  uint32_t count, flags;
 };
 static_assert(sizeof(ImpostorPicturesHeader) == 24);
 struct ImpostorPictureHead {
@@ -243,8 +248,10 @@ struct ImpostorPictureEntry {
   const uint8_t* rgba = nullptr;   // kImpostorPictureBytes bytes
 };
 // The file. False, with `file` empty, for more than kImpostorPicturesMax pictures or one without bytes: a
-// file is whole or not written. No picture at all is a file (a frame whose step drew none).
-inline bool PackImpostorPictures(uint64_t scene_frame, const ImpostorPictureEntry* entries, uint32_t count, std::vector<uint8_t>* file) {
+// file is whole or not written. No picture at all is a file (a frame whose step drew none). `from_feed`: the
+// pictures' bytes were the diagnostic feed's (the head's flag); without it the file of before.
+inline bool PackImpostorPictures(uint64_t scene_frame, const ImpostorPictureEntry* entries, uint32_t count, std::vector<uint8_t>* file,
+                                 bool from_feed = false) {
   if (!file) return false;
   file->clear();
   if (count > kImpostorPicturesMax || (count && !entries)) return false;
@@ -252,7 +259,7 @@ inline bool PackImpostorPictures(uint64_t scene_frame, const ImpostorPictureEntr
     if (!entries[i].rgba) return false;
   }
   file->resize(sizeof(ImpostorPicturesHeader) + size_t(count) * (sizeof(ImpostorPictureHead) + kImpostorPictureBytes));
-  const ImpostorPicturesHeader head{kImpostorPicturesMagic, kImpostorPicturesVersion, scene_frame, count, 0};
+  const ImpostorPicturesHeader head{kImpostorPicturesMagic, kImpostorPicturesVersion, scene_frame, count, from_feed ? kImpostorPicturesFromFeed : 0u};
   uint8_t* out = file->data();
   std::memcpy(out, &head, sizeof(head));
   out += sizeof(head);
@@ -265,8 +272,8 @@ inline bool PackImpostorPictures(uint64_t scene_frame, const ImpostorPictureEntr
   return true;
 }
 // A file's head, its pictures' heads and where each picture's bytes lie in `file`. False, with both lists
-// empty, unless the magic, the version, a count of at most kImpostorPicturesMax, the reserved word 0 and
-// exactly the bytes the count asks for.
+// empty, unless the magic, the version, a count of at most kImpostorPicturesMax, no flag but
+// kImpostorPicturesFromFeed and exactly the bytes the count asks for.
 inline bool ParseImpostorPictures(const uint8_t* file, size_t bytes, ImpostorPicturesHeader* head, std::vector<ImpostorPictureHead>* heads,
                                   std::vector<const uint8_t*>* pictures) {
   if (heads) heads->clear();
@@ -274,7 +281,7 @@ inline bool ParseImpostorPictures(const uint8_t* file, size_t bytes, ImpostorPic
   if (!file || !head || !heads || !pictures || bytes < sizeof(ImpostorPicturesHeader)) return false;
   ImpostorPicturesHeader h;
   std::memcpy(&h, file, sizeof(h));
-  if (h.magic != kImpostorPicturesMagic || h.version != kImpostorPicturesVersion || h.reserved != 0 || h.count > kImpostorPicturesMax) return false;
+  if (h.magic != kImpostorPicturesMagic || h.version != kImpostorPicturesVersion || (h.flags & ~kImpostorPicturesFromFeed) != 0 || h.count > kImpostorPicturesMax) return false;
   if (bytes != sizeof(ImpostorPicturesHeader) + size_t(h.count) * (sizeof(ImpostorPictureHead) + kImpostorPictureBytes)) return false;
   const uint8_t* at = file + sizeof(ImpostorPicturesHeader);
   for (uint32_t i = 0; i < h.count; ++i) {

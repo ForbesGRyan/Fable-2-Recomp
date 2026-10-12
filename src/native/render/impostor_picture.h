@@ -15,12 +15,16 @@
 // game's alpha bit on every texel of every level of every picture, and its colour within 2 of 31 on every texel
 // the game's level covers (spec criterion 5: 97% and 95%).
 //
-// The content rule (spec ruling 7), fitted to 374 whole bases of eighteen captures (t13_content.txt): 296 trees
-// read back (ring clear 1,017 to 1,020 of 1,020; covered 4,356 to 18,613 texels of 65,536), 36 noise pictures of
-// runs that did not ask for them (ring clear 478 to 868; five of the six kinds covered 32,995 to 35,535, the
-// sixth 9,924: the ring is what refuses it) and 42 empty ones. It says "this is not a tree's picture"; it cannot
-// say "this picture is old": a whole, earlier picture of the same tree passes (a limit; the captures show a
-// picture differing from the frame before on about 1.2% of its texels at 55 frames a second).
+// The content rule (spec ruling 7; ledger ruling 45), held to 374 whole bases of eighteen captures
+// (t13_content.txt): 296 trees read back (ring clear 1,017 to 1,020 of 1,020; covered 4,356 to 18,613 texels of
+// 65,536), 36 noise pictures of runs that did not ask for them (ring clear 478 to 868) and 42 empty ones. It
+// refuses only what is provably no picture: a ring that is not clear (what refuses every noise picture seen) and
+// a base without one covered texel. The cover has no other bound: the 296 trees are fourteen models at one place
+// in the world, and a tree elsewhere may fill most of its picture or be a bare trunk (the bounds of before, 1,024
+// to 25,800 covered, refused nothing in the survey that the ring does not, and would have left such a model's
+// trees missing). It says "this is not a picture"; it cannot say "this picture is old" or "this is another
+// kind of 256 x 256 texture with a clear ring": a whole, earlier picture of the same tree passes (a limit; the
+// captures show a picture differing from the frame before on about 1.2% of its texels at 55 frames a second).
 
 #pragma once
 
@@ -38,7 +42,7 @@ inline constexpr uint32_t kImpostorPictureSize = 256, kImpostorPictureLevels = 4
 inline constexpr uint32_t kImpostorRingTexels = 1020;            // the base level's outermost ring: 4 * 255
 inline constexpr uint32_t kImpostorLevelAlphaCount = 3;          // a texel is covered when this many of its four parents are
 inline constexpr uint32_t kImpostorRingClearMin = 944;           // of the ring's texels, at least this many have alpha 0 (midway 868 | 1,017)
-inline constexpr uint32_t kImpostorCoverMin = 1024, kImpostorCoverMax = 25800;   // covered texels of the base level (0 | 4,356 and 18,613 | 32,995)
+inline constexpr uint32_t kImpostorCoverMin = 1;                 // covered texels of the base level: at least one (an empty base is no picture); no upper bound
 
 // A decoded channel back to its five bits ((v * 255 + 15) / 31 is the decoder's way out; its 32 bytes are 8 v and
 // up to 7 more, so the upper five bits invert it; another byte is taken by its upper five bits too).
@@ -178,9 +182,41 @@ inline uint32_t ImpostorRingClear(const uint8_t* base_rgba, size_t bytes) {
   }
   return clear;
 }
-// A clear ring and a covered middle of a tree's size: what every tree read back has and no noise or empty picture.
+// A clear ring and something inside it: what every tree read back has and no noise or empty picture. Nothing is
+// refused for how much of the picture it covers (ledger ruling 45).
 constexpr bool ImpostorPictureUsable(const ImpostorPictureStats& s) {
-  return s.ring_clear >= kImpostorRingClearMin && s.covered >= kImpostorCoverMin && s.covered <= kImpostorCoverMax;
+  return s.ring_clear >= kImpostorRingClearMin && s.covered >= kImpostorCoverMin;
+}
+
+// A hash of EVERY byte of a picture's base as it lies in guest memory (the pass asks it whether the picture
+// changed since its texture was made; the texture cache's SampleHash reads 4,096 of these 131,072 bytes, and a
+// change between its ranges would leave a picture stale). Eight bytes at a time through the round of XXH64, as
+// SampleHash mixes its words: a change of any one byte changes the hash, and one bit changed in two words does
+// not cancel. A last partial word is padded with zeros; the size is part of the hash. No bytes: the seed.
+inline uint64_t ImpostorPictureHash(const uint8_t* data, size_t size) {
+  constexpr uint64_t kP1 = 0x9E3779B185EBCA87ull, kP2 = 0xC2B2AE3D27D4EB4Full, kP4 = 0x85EBCA77C2B2AE63ull;
+  uint64_t h = 1469598103934665603ull;
+  if (!data) return h;
+  h ^= uint64_t(size);
+  auto word = [&](uint64_t w) {
+    w *= kP2;
+    w = (w << 31) | (w >> 33);
+    w *= kP1;
+    h ^= w;
+    h = ((h << 27) | (h >> 37)) * kP1 + kP4;
+  };
+  size_t i = 0;
+  for (; i + 8 <= size; i += 8) {
+    uint64_t w;
+    std::memcpy(&w, data + i, 8);
+    word(w);
+  }
+  if (i < size) {
+    uint64_t w = 0;
+    std::memcpy(&w, data + i, size - i);
+    word(w);
+  }
+  return h;
 }
 
 // The pass's decoder of a picture's base level: what render::Decode1555Level gives for a 256 x 256 tiled

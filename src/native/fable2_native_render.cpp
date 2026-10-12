@@ -121,12 +121,20 @@ REXCVAR_DEFINE_STRING(fable2_native_impostors, "off", "Fable2",
                       "state words and the quads' words) into a bounded block of the frame, at most 32 draws and 4,096 "
                       "quads, a draw whole or missing with a counted reason (the capture log's impostors line); they "
                       "are drawn as quads of one flat colour. on (or true, 1) = the game's own picture of each tree "
-                      "model on its quads: from start-up the emulator is asked to read the fourteen pictures back to "
-                      "guest memory every frame (the seeded readback_resolve_force_addresses gains their bases), and "
-                      "the native view decodes and uploads each picture that changed; a record without a usable "
+                      "model on its quads: from start-up, with fable2_native_render on, the emulator is asked to read "
+                      "the fourteen pictures back to guest memory every frame (the seeded "
+                      "readback_resolve_force_addresses gains their bases, 0x12704000 and thirteen more 0x2B000 apart; "
+                      "the first is the hero and dog entry and is listed even with hero_dog_texture_readback=false), "
+                      "and the native view decodes and uploads each picture that changed; a record without a usable "
                       "picture is not drawn (counted \"picture: base, unread, content or upload\"), never a flat "
-                      "quad. off (or false, 0; the default) = none of it is read, made or drawn, and the log has "
-                      "the one line \"impostors: off\".");
+                      "quad. Cost of on, measured at one place: about 2.3 ms a frame over off (the forced read-backs "
+                      "about 1.8 ms, in the emulated view too; decode and upload about 1 ms of CPU time). The fourteen "
+                      "addresses were measured in one save at two places: elsewhere the game may keep its pictures at "
+                      "other addresses, and then no far tree is drawn. A --readback_resolve_force_addresses given by "
+                      "hand is not seeded: the pictures are then used only if that list holds all fourteen bases (or "
+                      "--readback_resolve=full); otherwise every record is \"picture: base\". With fable2_native_render "
+                      "off the list is not seeded with them. off (or false, 0; the default) = none of it is read, made "
+                      "or drawn, and the log has the one line \"impostors: off\".");
 REXCVAR_DEFINE_STRING(fable2_native_impostor_feed, "", "Fable2",
                       "Diagnostic of the native impostors' pictures (frame map section 19, \"The pictures' feed\"): a file. "
                       "Empty (the default): nothing. Set, with fable2_native_impostors=on: the file (written by "
@@ -134,8 +142,10 @@ REXCVAR_DEFINE_STRING(fable2_native_impostor_feed, "", "Fable2",
                       "pictures' bases as that capture dumped them) is read once at startup; if it is valid, the native "
                       "view takes each picture the file holds from the file, the sets in turn a frame each, IN PLACE OF "
                       "GUEST MEMORY: the far trees then show that capture's pictures, not the running game's. For the "
-                      "software adapter, whose forced read-back leaves the pictures empty. A file that is missing or "
-                      "refused: one log line, and nothing changes.");
+                      "software adapter, whose forced read-back leaves the pictures empty. A feed run is marked: the "
+                      "Impostors line says \"on (feed)\", the first-upload log line \"from the feed's file\", and a "
+                      "pictures file (.f2np) written beside a scene dump carries a flag that impostor_pictures.py used "
+                      "prints. A file that is missing or refused: one log line, and nothing changes.");
 REXCVAR_DEFINE_STRING(fable2_native_coverage, "off", "Fable2",
                       "Native coverage (sub-project 11, phase 11b; default off until the user's checks: frame map section "
                       "18, \"Validation (11b)\"): on (or true, 1) = the native view "
@@ -1066,9 +1076,12 @@ bool ExposureReadbackWanted() {
   return on;
 }
 
-// fable2_native_impostors is `on`: the application seeds the pictures' bases from it once (OnPostSetup), with
-// the renderer installed or not. The list is the SDK's and is not touched again while the game runs.
-bool ImpostorReadbackWanted() { return CurrentImpostors() == capture::ImpostorMode::kOn; }
+// fable2_native_impostors is `on` (ImpostorSwitchOn) and the native renderer is on (ledger ruling 47: with the
+// renderer off nothing reads the pictures, and the list would cost its forced resolves for no consumer): the
+// application seeds the pictures' bases from it once (OnPostSetup, before or after Install: both read cvars
+// alone). The list is the SDK's and is not touched again while the game runs.
+bool ImpostorSwitchOn() { return CurrentImpostors() == capture::ImpostorMode::kOn; }
+bool ImpostorReadbackWanted() { return fable2::ImpostorPicturesInList(REXCVAR_GET(fable2_native_render), ImpostorSwitchOn()); }
 
 namespace {
 std::atomic<bool> g_impostor_pictures_seeded{false};
@@ -1080,11 +1093,16 @@ bool ImpostorPicturesAvailable() {
   static std::atomic<int> decided{-1};
   int v = decided.load(std::memory_order_acquire);
   if (v < 0) {
-    v = g_impostor_pictures_seeded.load(std::memory_order_acquire) || rex::cvar::GetFlagByName("readback_resolve") == "full" ? 1 : 0;
+    // (a list given by hand that forces each of the fourteen bases has the pictures as a seeded one has)
+    const bool seeded = g_impostor_pictures_seeded.load(std::memory_order_acquire);
+    const bool by_hand = !seeded && fable2::ForceListHasImpostorPictures(rex::cvar::GetFlagByName("readback_resolve_force_addresses"));
+    v = seeded || by_hand || rex::cvar::GetFlagByName("readback_resolve") == "full" ? 1 : 0;
     decided.store(v, std::memory_order_release);
-    REXLOG_INFO("[native] impostor pictures: {} (the read-back list {} seeded with the fourteen bases; readback_resolve {})",
+    REXLOG_INFO("[native] impostor pictures: {} (the read-back list {}; readback_resolve {})",
                 v ? "available" : "not available: every record is \"picture: base\"",
-                g_impostor_pictures_seeded.load(std::memory_order_acquire) ? "was" : "was not", rex::cvar::GetFlagByName("readback_resolve"));
+                seeded ? "was seeded with the fourteen bases" : by_hand ? "was given by hand and holds the fourteen bases"
+                                                                         : "was not seeded with the fourteen bases and does not hold them",
+                rex::cvar::GetFlagByName("readback_resolve"));
   }
   return v == 1;
 }

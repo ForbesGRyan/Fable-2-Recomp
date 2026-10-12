@@ -2191,10 +2191,11 @@ ImpostorPicture ClayPass::ReadImpostorPicture(nrhi::Device* dev, const capture::
     const uint32_t bit = 1u << uint32_t(state);
     if (impostor_refusals_logged_ & bit) return;
     impostor_refusals_logged_ |= bit;
-    REXLOG_INFO("[native] clay: impostor pictures: first \"{}\": base 0x{:08X}: {} (ring clear {} of {}, bound at least {}; covered {}, bound {} to "
-                "{}; hash 0x{:016X}; pictures {}, feed {}); logged once a kind",
+    REXLOG_INFO("[native] clay: impostor pictures: first \"{}\": base 0x{:08X}: {} "
+                "(ring clear {} of {}, bound at least {}; covered {}, bound at least {} and no upper bound; hash 0x{:016X}; pictures {}, feed {})"
+                "; logged once a kind",
                 ClayImpostorSkipName(DecideImpostorPicture(capture::ImpostorMode::kOn, state)), base, what, ring, kImpostorRingTexels,
-                kImpostorRingClearMin, covered, kImpostorCoverMin, kImpostorCoverMax, hash,
+                kImpostorRingClearMin, covered, kImpostorCoverMin, hash,
                 impostor_pictures_available_ ? "available" : "not available", impostor_feed_ ? "on" : "off");
   };
   TextureFetch t;
@@ -2211,7 +2212,7 @@ ImpostorPicture ClayPass::ReadImpostorPicture(nrhi::Device* dev, const capture::
   // (the diagnostic feed's bytes for this base, this Render: in place of guest memory)
   const uint8_t* fed = impostor_feed_ && impostor_feed_->sets ? impostor_feed_->bytes[impostor_picture_serial_ % impostor_feed_->sets][n] : nullptr;
   if (!fed && !impostor_pictures_available_) {
-    refusal(ImpostorPicture::kBase, t.base_phys, "the run does not read the pictures back (the list was not seeded with them and the read-back is not full)", 0, 0, 0);
+    refusal(ImpostorPicture::kBase, t.base_phys, "the run does not read the pictures back (the read-back list does not hold their fourteen bases and the read-back is not full)", 0, 0, 0);
     return ImpostorPicture::kBase;
   }
   *picture = uint32_t(n);
@@ -2237,7 +2238,8 @@ ImpostorPicture ClayPass::ReadImpostorPicture(nrhi::Device* dev, const capture::
   // Copied before it is judged: the bytes are the guest's, and what is hashed, decoded and uploaded is this copy.
   impostor_guest_.resize(kImpostorBaseBytes);
   std::memcpy(impostor_guest_.data(), guest, kImpostorBaseBytes);
-  hash = SampleHash(impostor_guest_.data(), uint32_t(kImpostorBaseBytes));
+  // (every byte: a change anywhere in the base is a change of the picture)
+  hash = ImpostorPictureHash(impostor_guest_.data(), kImpostorBaseBytes);
   if (p.filled && p.texture && p.view && p.hash == hash && p.swizzle == swizzle) {
     ++st.impostor_pictures;
     return verdict(ImpostorPicture::kUsable);
@@ -2260,7 +2262,7 @@ ImpostorPicture ClayPass::ReadImpostorPicture(nrhi::Device* dev, const capture::
   stats.ring_clear = ring = ImpostorRingClear(impostor_decoded_.data(), rgba_bytes);
   stats.covered = covered;
   if (!ImpostorPictureUsable(stats)) {
-    return verdict(ImpostorPicture::kContent, covered == 0 ? "the base is empty: no texel has the alpha bit" : "not a tree's picture by the content rule");
+    return verdict(ImpostorPicture::kContent, covered == 0 ? "the base is empty: no texel has the alpha bit" : "no picture by the content rule: its ring is not clear");
   }
   if (!MakeImpostorLevels(impostor_decoded_.data(), rgba_bytes, impostor_levels_)) return verdict(ImpostorPicture::kUnread, "no levels");
   // The texture and its view (once a base; the view again for another swizzle), and this frame's staging buffer.
@@ -3195,6 +3197,7 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   uint32_t impostor_usable_count = 0;
   const capture::ImpostorMode impostor_mode = ClayImpostorMode(impostors, scene.impostor_mode);
   st.impostor_mode = impostor_mode;
+  st.impostor_feed = impostor_mode == capture::ImpostorMode::kOn && impostor_feed_ && impostor_feed_->sets;   // (a feed run is marked wherever its pictures are named)
   impostor_step_slots_ = 0;
   bool impostor_step = false;
   if (impostor_mode != capture::ImpostorMode::kOff) {
@@ -4100,10 +4103,12 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       cmd->FlushBarriers();
       if (!impostor_first_upload_logged_) {
         impostor_first_upload_logged_ = true;
-        REXLOG_INFO("[native] clay: impostor pictures: first upload at scene frame {}: {} pictures decoded from guest memory and uploaded "
+        REXLOG_INFO("[native] clay: impostor pictures: first upload at scene frame {}: {} pictures {} and uploaded "
                     "(256 x 256 R8G8B8A8, four levels each, {} bytes a picture in a staging buffer of {} bytes), {} of {} records with a "
                     "usable picture",
-                    scene.frame, impostor_upload_count_, kImpostorStageBytes, kImpostorStagingBytes, impostor_usable_count, scene.impostors.size());
+                    scene.frame, impostor_upload_count_,
+                    st.impostor_feed ? "from the feed's file (fable2_native_impostor_feed: NOT the running game's)" : "decoded from guest memory",
+                    kImpostorStageBytes, kImpostorStagingBytes, impostor_usable_count, scene.impostors.size());
       }
     }
     impostor_staging_destroy_.clear();
@@ -4756,9 +4761,10 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   if (scene_dumping && impostor_pictures_on && scene_dump_state_ == SceneDumpState::kPending && scene_dump_head_.scene_frame == scene.frame &&
       impostor_dump_frame_ != scene.frame) {
     impostor_dump_frame_ = scene.frame;
-    impostor_dump_ready_ = PackImpostorPictures(scene.frame, impostor_dump_entries, impostor_dump_count, &impostor_dump_file_);
-    REXLOG_INFO("[native] clay: impostor pictures: scene frame {}: {} pictures of {} drawn records kept for the dump's pictures file{}",
-                scene.frame, impostor_dump_count, st.impostors_drawn, impostor_dump_ready_ ? "" : " (refused: no file)");
+    impostor_dump_ready_ = PackImpostorPictures(scene.frame, impostor_dump_entries, impostor_dump_count, &impostor_dump_file_, st.impostor_feed);
+    REXLOG_INFO("[native] clay: impostor pictures: scene frame {}: {} pictures of {} drawn records kept for the dump's pictures file{}{}",
+                scene.frame, impostor_dump_count, st.impostors_drawn, st.impostor_feed ? ", marked: from the feed's file" : "",
+                impostor_dump_ready_ ? "" : " (refused: no file)");
   }
   if (post_frame) {
     // A post frame (DecideClayPost: with the steps' objects and the frame's constant buffer, whose post

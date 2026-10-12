@@ -377,12 +377,16 @@ class Levels(unittest.TestCase):
         import re
         text = (ROOT / "src" / "native" / "render" / "impostor_picture.h").read_text(encoding="utf-8")
         got = {}
-        for name in ("kImpostorLevelAlphaCount", "kImpostorRingClearMin", "kImpostorCoverMin", "kImpostorCoverMax"):
+        for name in ("kImpostorLevelAlphaCount", "kImpostorRingClearMin", "kImpostorCoverMin"):
             m = re.search(name + r" = (\d+)[;,]", text)
             self.assertIsNotNone(m, name)
             got[name] = int(m.group(1))
         self.assertEqual(got, {"kImpostorLevelAlphaCount": ip.LEVEL_RULE[2], "kImpostorRingClearMin": ip.RING_CLEAR_MIN,
-                               "kImpostorCoverMin": ip.COVER_MIN, "kImpostorCoverMax": ip.COVER_MAX})
+                               "kImpostorCoverMin": ip.COVER_MIN})
+        # the cover has no upper bound on either side (ledger ruling 45)
+        self.assertNotIn("kImpostorCoverMax", text)
+        self.assertFalse(hasattr(ip, "COVER_MAX"))
+        self.assertEqual(ip.COVER_MIN, 1)
 
 
 class Content(unittest.TestCase):
@@ -401,12 +405,53 @@ class Content(unittest.TestCase):
     def test_usable(self):
         self.assertFalse(ip.picture_usable(1020, 0))                                   # empty
         self.assertFalse(ip.picture_usable(0, 65536))                                  # covered to its edge
-        self.assertTrue(ip.picture_usable(1020, (ip.COVER_MIN + ip.COVER_MAX) // 2))
-        self.assertFalse(ip.picture_usable(1020, ip.COVER_MAX + 1))
-        self.assertFalse(ip.picture_usable(1020, ip.COVER_MIN - 1))
-        self.assertFalse(ip.picture_usable(ip.RING_CLEAR_MIN - 1, ip.COVER_MIN))
-        self.assertTrue(ip.picture_usable(ip.RING_CLEAR_MIN, ip.COVER_MIN))
-        self.assertTrue(ip.picture_usable(ip.RING_CLEAR_MIN, ip.COVER_MAX))
+        self.assertTrue(ip.picture_usable(1020, 10381))
+        # no bound on the cover but "not empty" (ledger ruling 45): one texel, the bounds of before and beyond them
+        for covered in (1, 100, 1023, 1024, 25800, 25801, 39400, 65536 - 1020):
+            self.assertTrue(ip.picture_usable(1020, covered), covered)
+            self.assertTrue(ip.picture_usable(ip.RING_CLEAR_MIN, covered), covered)
+            self.assertFalse(ip.picture_usable(ip.RING_CLEAR_MIN - 1, covered), covered)
+
+    def test_made_pictures(self):
+        """An honest picture covering 60% and one covering 100 texels are used; noise and an empty base are not."""
+        def block(w, h):
+            f = np.zeros((256, 256, 4), dtype=np.uint8)
+            f[(256 - h) // 2:(256 - h) // 2 + h, (256 - w) // 2:(256 - w) // 2 + w] = (5, 12, 2, 1)
+            return f
+        self.assertEqual(ip.content_stats(block(200, 197)), (1020, 39400))             # 60.1%
+        self.assertGreaterEqual(39400 / 65536.0, 0.60)
+        self.assertTrue(ip.picture_usable(*ip.content_stats(block(200, 197))))
+        self.assertEqual(ip.content_stats(block(10, 10)), (1020, 100))
+        self.assertTrue(ip.picture_usable(*ip.content_stats(block(10, 10))))
+        noise = np.zeros((256, 256, 4), dtype=np.uint8)
+        noise[..., 3] = np.random.default_rng(12).integers(0, 2, size=(256, 256))
+        ring, covered = ip.content_stats(noise)
+        self.assertTrue(400 <= ring <= 620 and 30000 <= covered <= 35536, (ring, covered))
+        self.assertFalse(ip.picture_usable(ring, covered))
+        self.assertFalse(ip.picture_usable(*ip.content_stats(np.zeros((256, 256, 4), dtype=np.uint8))))
+        self.assertFalse(ip.picture_usable(*ip.content_stats(block(256, 256))))        # covered to its edge
+
+    def test_the_survey_keeps_its_verdicts(self):
+        """The 374 surveyed bases (the table of tests/native/test_impostor_picture.cpp, which holds the native rule
+        to it): each keeps the verdict of the rule before ruling 45; 296 usable, 78 refused."""
+        import re
+        text = (ROOT / "tests" / "native" / "test_impostor_picture.cpp").read_text(encoding="utf-8")
+        table = text[text.index("// survey-begin"):text.index("// survey-end")]
+        rows = [(int(a), int(b)) for a, b in re.findall(r"\{(\d+), (\d+)\}", table)]
+        self.assertEqual(len(rows), 374)
+        before = [ring >= 944 and 1024 <= covered <= 25800 for ring, covered in rows]
+        now = [ip.picture_usable(ring, covered) for ring, covered in rows]
+        self.assertEqual(now, before)
+        self.assertEqual((sum(now), len(now) - sum(now)), (296, 78))
+        # what refuses the 78: the ring (36 noise) or an empty base (42); none for its size
+        self.assertEqual(sum(1 for ring, covered in rows if ring < ip.RING_CLEAR_MIN), 36)
+        self.assertEqual(sum(1 for ring, covered in rows if covered == 0), 42)
+
+    def test_the_content_command_names_the_rule(self):
+        import io
+        out = io.StringIO()
+        self.assertEqual(ip.content_cli([], out=out), 0)
+        self.assertEqual(out.getvalue(), "usable 0, refused 0; the rule: ring clear >= 944 and covered >= 1 (no upper bound)\n")
 
 
 class RealLevels(unittest.TestCase):
@@ -504,6 +549,36 @@ class Used(unittest.TestCase):
             result = ip.used(d / "p.f2np", d / "c.jsonl")
             self.assertIsNone(result["paired_frame"])
             self.assertEqual(result["pictures"][0]["equal"], {1: 1.0, 2: 65535 / 65536})
+
+    def test_a_feed_run_s_file_says_so(self):
+        """The head's flags word (render::kImpostorPicturesFromFeed, bit 0; ledger ruling 47): the pictures came from
+        the diagnostic feed's file, not from the running game. `used` reads it and prints it; any other bit is no file."""
+        import io
+        with tempfile.TemporaryDirectory() as d:
+            d = self.make(d, base2=0x12704000)
+            head, _ = ip.read_used(d / "p.f2np")
+            self.assertIs(head["feed"], False)
+            self.assertIs(ip.used(d / "p.f2np", d / "c.jsonl")["feed"], False)
+            out = io.StringIO()
+            self.assertEqual(ip.used_cli(d / "p.f2np", d / "c.jsonl", out=out), 0)
+            self.assertIn("the pictures' source: guest memory (the running game's)\n", out.getvalue())
+            self.assertNotIn("FEED", out.getvalue())
+            data = bytearray((d / "p.f2np").read_bytes())
+            data[20:24] = (1).to_bytes(4, "little")
+            (d / "p.f2np").write_bytes(bytes(data))
+            head, pictures = ip.read_used(d / "p.f2np")
+            self.assertIs(head["feed"], True)
+            self.assertEqual(len(pictures), 2)
+            self.assertIs(ip.used(d / "p.f2np", d / "c.jsonl")["feed"], True)
+            out = io.StringIO()
+            self.assertEqual(ip.used_cli(d / "p.f2np", d / "c.jsonl", out=out), 0)
+            self.assertIn("the pictures' source: THE DIAGNOSTIC FEED's file (--fable2_native_impostor_feed), NOT the running game's: "
+                          "what follows holds the pass's decoder and the dump, and says nothing of the game's pictures\n", out.getvalue())
+            for flags in (2, 3, 0x80000000):
+                data[20:24] = flags.to_bytes(4, "little")
+                (d / "bad.f2np").write_bytes(bytes(data))
+                with self.assertRaises(ValueError):
+                    ip.read_used(d / "bad.f2np")
 
 
 class Feed(unittest.TestCase):

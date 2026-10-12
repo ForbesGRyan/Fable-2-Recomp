@@ -371,9 +371,10 @@ LEVEL_SOURCES, LEVEL_COLOURS = ("above", "base"), ("all", "covered")
 LEVEL_RULE = ("above", "all", 3)      # as fitted to D1 and D2 (`levels`); kImpostorLevelAlphaCount is its count
 PICTURE_SIZE = 256
 RING_TEXELS = 4 * (PICTURE_SIZE - 1)
-# The content rule (`content`): of the base's outermost ring at least RING_CLEAR_MIN texels are clear, and the
-# covered texels lie in [COVER_MIN, COVER_MAX]. The native kImpostorRingClearMin, kImpostorCoverMin, kImpostorCoverMax.
-RING_CLEAR_MIN, COVER_MIN, COVER_MAX = 944, 1024, 25800
+# The content rule (`content`): of the base's outermost ring at least RING_CLEAR_MIN texels are clear, and at least
+# COVER_MIN texels are covered (one: an empty base is no picture). No upper bound on the cover (ledger ruling 45:
+# the rule refuses only what is provably no picture). The native kImpostorRingClearMin, kImpostorCoverMin.
+RING_CLEAR_MIN, COVER_MIN = 944, 1
 
 
 def _reduce(fields, factor, colour, count):
@@ -424,8 +425,8 @@ def content_stats(base_fields):
 
 
 def picture_usable(ring_clear, covered):
-    """render::ImpostorPictureUsable: a clear ring and a covered middle of a tree's size."""
-    return ring_clear >= RING_CLEAR_MIN and COVER_MIN <= covered <= COVER_MAX
+    """render::ImpostorPictureUsable: a clear ring and something inside it, whatever its size."""
+    return ring_clear >= RING_CLEAR_MIN and covered >= COVER_MIN
 
 
 def _frame_bases(capture, frames=None):
@@ -507,38 +508,42 @@ def content_cli(captures, out=sys.stdout):
             refused += not ok
             print("%s %-48s ring clear %4d of %d, covered %5d (%.3f): %s" % (
                 capture.stem[-6:], t["file"].split("/")[-1], ring, RING_TEXELS, covered, covered / 65536.0, "usable" if ok else "REFUSED"), file=out)
-    print("usable %d, refused %d; the rule: ring clear >= %d and %d <= covered <= %d" % (used, refused, RING_CLEAR_MIN, COVER_MIN, COVER_MAX), file=out)
+    print("usable %d, refused %d; the rule: ring clear >= %d and covered >= %d (no upper bound)" % (used, refused, RING_CLEAR_MIN, COVER_MIN), file=out)
     return 0
 
 
 # --- The pictures the pass used (plan Task 14; spec criterion 6) ---
 USED_MAGIC, USED_MAX, USED_BOUND = 0x504E3246, 32, 0.98      # "F2NP"; render::kImpostorPicturesMax; criterion 6's share
+USED_FROM_FEED = 1                                           # render::kImpostorPicturesFromFeed (the head's flags word)
 
 
 def read_used(path):
-    """(head, pictures) of a native_scene_<stamp>.f2np (render::PackImpostorPictures): head {"scene_frame", "count"};
-    pictures [{"base", "place", "hash", "rgba": uint8 [256, 256, 4], the texture's channels as uploaded}].
-    ValueError for anything render::ParseImpostorPictures refuses."""
+    """(head, pictures) of a native_scene_<stamp>.f2np (render::PackImpostorPictures): head {"scene_frame", "count",
+    "feed": the pictures' bytes came from the diagnostic feed's file, not the running game (the flags word's bit 0,
+    render::kImpostorPicturesFromFeed)}; pictures [{"base", "place", "hash", "rgba": uint8 [256, 256, 4], the
+    texture's channels as uploaded}]. ValueError for anything render::ParseImpostorPictures refuses."""
     data = Path(path).read_bytes()
     if len(data) < 24:
         raise ValueError("%s: shorter than a head" % path)
-    magic, version, scene_frame, count, reserved = struct.unpack_from("<IIQII", data, 0)
+    magic, version, scene_frame, count, flags = struct.unpack_from("<IIQII", data, 0)
     one = 16 + PICTURE_SIZE * PICTURE_SIZE * 4
-    if magic != USED_MAGIC or version != 1 or reserved != 0 or count > USED_MAX or len(data) != 24 + count * one:
-        raise ValueError("%s: not a pictures file (magic 0x%08X, version %d, count %d, %d bytes)" % (path, magic, version, count, len(data)))
+    if magic != USED_MAGIC or version != 1 or flags & ~USED_FROM_FEED or count > USED_MAX or len(data) != 24 + count * one:
+        raise ValueError("%s: not a pictures file (magic 0x%08X, version %d, flags 0x%X, count %d, %d bytes)" % (
+            path, magic, version, flags, count, len(data)))
     pictures = []
     for i in range(count):
         at = 24 + i * one
         base, place, content = struct.unpack_from("<IIQ", data, at)
         rgba = np.frombuffer(data, dtype=np.uint8, count=one - 16, offset=at + 16).reshape(PICTURE_SIZE, PICTURE_SIZE, 4)
         pictures.append({"base": base, "place": place, "hash": content, "rgba": rgba})
-    return {"scene_frame": scene_frame, "count": count}, pictures
+    return {"scene_frame": scene_frame, "count": count, "feed": bool(flags & USED_FROM_FEED)}, pictures
 
 
 def used(f2np, capture):
     """Each picture of the file against the capture's dump of the same base in every frame of the capture: the
     share of texels equal in all four channels. {"scene_frame", "paired_frame" (the capture frame whose row names
-    the file's scene frame, or None), "pictures": [{"base", "place", "hash", "equal": {frame: share}, "best_frame"}]}."""
+    the file's scene frame, or None), "feed" (the file's flag: the pictures were the diagnostic feed's),
+    "pictures": [{"base", "place", "hash", "equal": {frame: share}, "best_frame"}]}."""
     head, pictures = read_used(f2np)
     capture = Path(capture)
     rows = read_rows(capture)
@@ -558,13 +563,18 @@ def used(f2np, capture):
         equal = {n: float((rgba == pic["rgba"]).all(axis=-1).mean()) for n, rgba in sorted(dumps.get(pic["base"], {}).items())}
         best = max(equal, key=lambda n: (equal[n], -abs(n - (paired or n)))) if equal else None
         out.append({"base": pic["base"], "place": pic["place"], "hash": pic["hash"], "equal": equal, "best_frame": best})
-    return {"scene_frame": head["scene_frame"], "paired_frame": paired, "pictures": out}
+    return {"scene_frame": head["scene_frame"], "paired_frame": paired, "feed": head["feed"], "pictures": out}
 
 
 def used_cli(f2np, capture, out=sys.stdout):
     result = used(f2np, capture)
     print("%s: scene frame %d, %d pictures; the capture's frame of that scene: %s" % (
         Path(f2np).name, result["scene_frame"], len(result["pictures"]), result["paired_frame"]), file=out)
+    if result["feed"]:
+        print("the pictures' source: THE DIAGNOSTIC FEED's file (--fable2_native_impostor_feed), NOT the running game's: "
+              "what follows holds the pass's decoder and the dump, and says nothing of the game's pictures", file=out)
+    else:
+        print("the pictures' source: guest memory (the running game's)", file=out)
     held = 0
     for pic in result["pictures"]:
         shares = ", ".join("frame %d %.4f" % (n, s) for n, s in pic["equal"].items()) or "no dump of this base in the capture"

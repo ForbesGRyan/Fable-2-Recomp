@@ -508,6 +508,41 @@ inline bool Decode1555Level(const uint8_t* src, size_t src_size, uint32_t width,
   return true;
 }
 
+// The lake's two undecoded formats (frame-map section 20, "The water's textures"): k_8 (the shore masks, slot 1
+// of a water draw and slot 16 of its vertex shader) and k_DXN (the normal map, slot 2). NEITHER is entered in
+// TexFormatFromXenos (spec Design 6; sub-project 12's ruling 14): no record's material and no Resolve of the
+// cache changes, and DecodeTextureFetch still answers kFormat for both. Their one reader is WaterTextureFetch.
+inline constexpr uint32_t kXenosK8 = 2, kXenosDxn = 49;
+// k_8 (Xenos format 2: the lake's shore masks) -> R8, width * height bytes row-major: one byte a texel at
+// TiledOffset2D(x, y, pitch_texels, 0), or linear at y * ((pitch_texels + 31) & ~31) + x (the SDK's base level
+// rule). One byte: the fetch constant's endian swaps nothing (the SDK's 8-bits-per-block load copies the bytes).
+// The byte is the texture's one channel; the SDK presents the format as R8 with the host swizzle RRRR
+// (thirdparty/rexglue-sdk/src/graphics/d3d12/texture_cache.cpp, the k_8 row), so every channel the fetch
+// constant's swizzle names is this byte. False, with out_r8 left empty, for a null source or output, an empty
+// image, a side above 8,192, a pitch below the width or a texel outside src_size (nothing is read past it). One
+// level: a caller gives a lower level's own bytes, size and pitch.
+inline bool DecodeK8Level(const uint8_t* src, size_t src_size, uint32_t width, uint32_t height, uint32_t pitch_texels,
+                          bool tiled, std::vector<uint8_t>* out_r8) {
+  if (!out_r8) return false;
+  out_r8->clear();
+  if (!src || width == 0 || height == 0 || width > 8192 || height > 8192 || pitch_texels < width) return false;
+  const uint64_t row_pitch_bytes = uint64_t((pitch_texels + 31) & ~31u);
+  // Before anything is allocated (as Decode1555Level): the texels are that many distinct places of the source in
+  // either layout. The exact bound is each texel's own, below.
+  if (uint64_t(width) * height > src_size) return false;
+  std::vector<uint8_t> out(size_t(width) * height);
+  for (uint32_t y = 0; y < height; ++y) {
+    for (uint32_t x = 0; x < width; ++x) {
+      const uint64_t o = tiled ? uint64_t(uint32_t(capture::TiledOffset2D(int32_t(x), int32_t(y), pitch_texels, 0)))
+                               : uint64_t(y) * row_pitch_bytes + uint64_t(x);
+      if (o + 1 > src_size) return false;
+      out[size_t(y) * width + x] = src[o];
+    }
+  }
+  *out_r8 = std::move(out);
+  return true;
+}
+
 // The value (0..255, not rounded) of texel i (row-major, 0..15) of an 8-byte BC4 block as the GPU reads it: two
 // end values a0 and a1, then sixteen 3-bit indices from the low end of the following 48 bits. Index 0 is a0 and 1
 // is a1; with a0 > a1 the indices 2 to 7 are the six steps of a seventh from a0 to a1, else 2 to 5 are the four
@@ -569,6 +604,67 @@ inline bool DecodeDxnLevel(const uint8_t* src, size_t src_size, uint32_t width, 
   }
   *out_xy = std::move(out);
   return true;
+}
+
+// A k_DXN level as two 8-bit channels (spec ruling 20; the lake's normal map): DecodeDxnLevel's pairs, each value
+// v in 0..1 written as uint8(v * 255 + 0.5), the palette entry rounded to NEAREST. width * height * 2 bytes
+// row-major, x then y. (The emulated picture samples the host's BC5, whose palette entries are not rounded to
+// 8 bits; the SDK's own decompression to R8G8, used where BC5 cannot be, divides in whole numbers and so rounds
+// DOWN: texture_load_dxn_rg8_cs, `udiv ... l(7)` and `l(5)`. Nearest is at most half a step of 255 from the
+// first and at most one step from the second.) False, with out_rg8 left empty, as DecodeDxnLevel, and besides
+// for a null output, a side above 8,192 and a source smaller than the level's blocks (before anything is
+// allocated). One level: for a stored level inside a packed tail a caller lifts the level's blocks out with
+// UntileLevel (its block origin, tiling and endian) and gives the rows here as linear, endian 0, with the
+// level's width in blocks as the pitch.
+inline bool DecodeDxnLevelRg8(const uint8_t* src, size_t src_size, uint32_t width, uint32_t height, uint32_t pitch_blocks,
+                              bool tiled, uint32_t endian, std::vector<uint8_t>* out_rg8) {
+  if (!out_rg8) return false;
+  out_rg8->clear();
+  if (!src || width == 0 || height == 0 || width > 8192 || height > 8192) return false;
+  if (uint64_t((width + 3) / 4) * ((height + 3) / 4) * 16 > src_size) return false;
+  std::vector<float> xy;
+  if (!DecodeDxnLevel(src, src_size, width, height, pitch_blocks, tiled, endian, &xy)) return false;
+  std::vector<uint8_t> out(xy.size());
+  for (size_t i = 0; i < xy.size(); ++i) out[i] = uint8_t(xy[i] * 255.0f + 0.5f);
+  *out_rg8 = std::move(out);
+  return true;
+}
+
+enum class WaterDecode : uint8_t { kK8, kDxn };
+// A 2D fetch constant of the kind's format, as DecodeTextureFetch reads one (the same fields from the same
+// bits); out->format stays kUnsupported and out->xenos_format is the kind's. kFormat for any other format,
+// kNotTexture / kNot2D / kSize as DecodeTextureFetch; and kSize for a mask above 256 x 256 or a normal map
+// above 1,024 x 1,024 (the capture's `fetch` rule again: the lake's masks are at most 64 x 64 and its normal
+// map 256 x 256 in every capture so far). `out` is untouched unless the answer is kNone.
+inline FetchError WaterTextureFetch(const uint32_t fc[6], WaterDecode kind, TextureFetch* out) {
+  if ((fc[0] & 3) != 2) return FetchError::kNotTexture;
+  if (((fc[5] >> 9) & 3) != 1) return FetchError::kNot2D;
+  TextureFetch t;
+  t.xenos_format = fc[1] & 0x3F;
+  if (t.xenos_format != (kind == WaterDecode::kK8 ? kXenosK8 : kXenosDxn)) return FetchError::kFormat;
+  t.format = TexFormat::kUnsupported;
+  t.endian = (fc[1] >> 6) & 3;
+  t.base_phys = fc[1] & 0xFFFFF000u;
+  t.mip_phys = fc[5] & 0xFFFFF000u;
+  t.width = (fc[2] & 0x1FFF) + 1;
+  t.height = ((fc[2] >> 13) & 0x1FFF) + 1;
+  t.pitch_texels = ((fc[0] >> 22) & 0x1FF) << 5;
+  t.tiled = (fc[0] >> 31) != 0;
+  t.packed_mips = ((fc[5] >> 11) & 1) != 0;
+  t.mip_min = (fc[4] >> 2) & 0xF;
+  t.mip_max = (fc[4] >> 6) & 0xF;
+  for (int i = 0; i < 4; ++i) {
+    const uint8_t sw = uint8_t((fc[3] >> (1 + 3 * i)) & 7);
+    t.swizzle[i] = sw <= 5 ? sw : 4;
+  }
+  t.clamp_x = uint8_t((fc[0] >> 10) & 7);
+  t.clamp_y = uint8_t((fc[0] >> 13) & 7);
+  t.linear_filter = ((fc[3] >> 19) & 3) == 1;
+  if (t.base_phys == 0 || t.pitch_texels < t.width) return FetchError::kSize;
+  const uint32_t limit = kind == WaterDecode::kK8 ? 256u : 1024u;
+  if (t.width > limit || t.height > limit) return FetchError::kSize;
+  *out = t;
+  return FetchError::kNone;
 }
 
 inline bool IsMirror(uint8_t clamp) { return clamp == 1 || clamp == 3 || clamp == 5 || clamp == 7; }

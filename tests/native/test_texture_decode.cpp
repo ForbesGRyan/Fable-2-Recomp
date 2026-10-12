@@ -1,5 +1,6 @@
 // Synthetic standalone test; no game or GPU.
 #include "../../src/native/render/texture_decode.h"
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -664,6 +665,219 @@ int main() {
         DumpKeyedByContentAt(cap128, true, 13) || DumpKeyedByContentAt(cap2, true, 2)) return 209;
     if (!DumpMipsAt(cap2, false, true, 2) || DumpMipsAt(cap13, false, true, 13)) return 209;
   }
+  // --- DecodeK8Level, DecodeDxnLevelRg8, WaterTextureFetch (plan Task 5) ---
+  {
+    if (TexFormatFromXenos(kXenosK8) != TexFormat::kUnsupported) return 220;      // (Review Focus 4: no record's material changes)
+    if (TexFormatFromXenos(kXenosDxn) != TexFormat::kUnsupported) return 221;
+    if (kXenosK8 != 2 || kXenosDxn != 49) return 221;
+    const uint32_t w = 64, h = 64, pitch = 64;
+    std::vector<uint8_t> src(16384, 0);                                           // more than the level spans in any tiling
+    auto at = [&](uint32_t x, uint32_t y) { return size_t(uint32_t(fable2::native::capture::TiledOffset2D(int32_t(x), int32_t(y), pitch, 0))); };
+    if (at(0, 0) != 0 || at(1, 0) != 1) return 222;                               // the two places that need no rule
+    src[at(0, 0)] = 7; src[at(1, 0)] = 255; src[at(0, 1)] = 31; src[at(33, 2)] = 99; src[at(63, 63)] = 200;
+    std::vector<uint8_t> out;
+    if (!DecodeK8Level(src.data(), src.size(), w, h, pitch, true, &out) || out.size() != size_t(w) * h) return 223;
+    if (out[0] != 7 || out[1] != 255 || out[w] != 31 || out[2 * w + 33] != 99 || out[63 * w + 63] != 200 || out[2] != 0) return 224;
+    // every texel at its own place: a source that holds each tiled place's low byte and one marker beside it
+    {
+      std::vector<uint8_t> all(16384, 0);
+      size_t top = 0;
+      for (uint32_t y = 0; y < h; ++y) {
+        for (uint32_t x = 0; x < w; ++x) {
+          if (at(x, y) >= all.size() || all[at(x, y)] != 0) return 224;           // inside the source; no two texels at one place
+          all[at(x, y)] = uint8_t(1 + (x * 7 + y * 13) % 255);
+          top = std::max(top, at(x, y));
+        }
+      }
+      if (!DecodeK8Level(all.data(), all.size(), w, h, pitch, true, &out)) return 224;
+      for (uint32_t y = 0; y < h; ++y) {
+        for (uint32_t x = 0; x < w; ++x) {
+          if (out[size_t(y) * w + x] != uint8_t(1 + (x * 7 + y * 13) % 255)) return 224;
+        }
+      }
+      // the source cut at the highest place fails, one byte more holds (at this pitch the 4,096 texels fill
+      // bytes 0 to 4,095 exactly)
+      if (top + 1 != size_t(w) * h) return 225;
+      if (DecodeK8Level(all.data(), top, w, h, pitch, true, &out) || !out.empty()) return 225;
+      if (!DecodeK8Level(all.data(), top + 1, w, h, pitch, true, &out) || out.size() != size_t(w) * h) return 225;
+      // a wider pitch moves the second row of tiles (the pitch is the addressing's, not only a bound), and there
+      // the bound is each texel's own: a source that holds the texels' number of bytes and not their places fails
+      std::vector<uint8_t> wide;
+      if (!DecodeK8Level(all.data(), all.size(), w, h, 128, true, &wide) || wide == out) return 225;
+      size_t top_wide = 0;
+      for (uint32_t y = 0; y < h; ++y) {
+        for (uint32_t x = 0; x < w; ++x) {
+          top_wide = std::max(top_wide, size_t(uint32_t(fable2::native::capture::TiledOffset2D(int32_t(x), int32_t(y), 128, 0))));
+        }
+      }
+      if (top_wide < size_t(w) * h || top_wide >= all.size()) return 225;
+      if (DecodeK8Level(all.data(), top_wide, w, h, 128, true, &wide) || !wide.empty()) return 225;
+      if (!DecodeK8Level(all.data(), top_wide + 1, w, h, 128, true, &wide)) return 225;
+    }
+    if (DecodeK8Level(src.data(), at(63, 63), w, h, pitch, true, &out) || !out.empty()) return 225;       // the last texel outside: nothing
+    if (DecodeK8Level(nullptr, src.size(), w, h, pitch, true, &out) || DecodeK8Level(src.data(), src.size(), 0, h, pitch, true, &out) ||
+        DecodeK8Level(src.data(), src.size(), w, h, 32, true, &out) || DecodeK8Level(src.data(), src.size(), 8193, 1, 8224, false, &out)) return 226;
+    if (DecodeK8Level(src.data(), src.size(), w, 0, pitch, true, &out) || DecodeK8Level(src.data(), src.size(), 1, 8193, 32, false, &out) ||
+        DecodeK8Level(src.data(), src.size(), w, h, pitch, true, nullptr)) return 226;
+    // linear: rows of the pitch aligned to 32 texels, one byte a texel (the masks of 8 x 16 are such, if their constant says so)
+    std::vector<uint8_t> lin(32 * 16, 0);
+    lin[32 * 3 + 5] = 77;
+    if (!DecodeK8Level(lin.data(), lin.size(), 8, 16, 8, false, &out) || out.size() != 128 || out[3 * 8 + 5] != 77 || out[0] != 0) return 227;
+    lin[32 * 15 + 7] = 5;                                                         // the last texel: 32 * 15 + 8 bytes are enough, one fewer is not
+    if (!DecodeK8Level(lin.data(), 32 * 15 + 8, 8, 16, 8, false, &out) || out[15 * 8 + 7] != 5) return 227;
+    if (DecodeK8Level(lin.data(), 32 * 15 + 7, 8, 16, 8, false, &out) || !out.empty()) return 227;
+    // the normal map's level as two bytes a texel: DecodeDxnLevel's values, rounded to nearest.
+    // The block is packed here from the format's definition (two end values, then sixteen 3-bit indices from the
+    // low end of the next 48 bits, texel i at bit 3 * i) and held to the plan's literal bytes: index 1 everywhere
+    // is the bit pattern 001 repeated, 0x49, 0x92, 0x24 twice.
+    auto bc4 = [](uint8_t a0, uint8_t a1, uint32_t (*index)(uint32_t), uint8_t o[8]) {
+      uint64_t bits = 0;
+      for (uint32_t i = 0; i < 16; ++i) bits |= uint64_t(index(i) & 7) << (3 * i);
+      o[0] = a0;
+      o[1] = a1;
+      for (int b = 0; b < 6; ++b) o[2 + b] = uint8_t(bits >> (8 * b));
+    };
+    uint8_t blk[16];
+    bc4(255, 0, [](uint32_t) { return 0u; }, blk);                                // x: all a0 = 255
+    bc4(0, 128, [](uint32_t) { return 1u; }, blk + 8);                            // y: all a1 = 128
+    const uint8_t plan_blk[16] = {255, 0, 0, 0, 0, 0, 0, 0, 0, 128, 0x49, 0x92, 0x24, 0x49, 0x92, 0x24};
+    if (std::memcmp(blk, plan_blk, 16) != 0) return 228;
+    std::vector<float> xy;
+    std::vector<uint8_t> rg;
+    if (!DecodeDxnLevel(blk, sizeof(blk), 4, 4, 1, false, 0, &xy) || !DecodeDxnLevelRg8(blk, sizeof(blk), 4, 4, 1, false, 0, &rg)) return 228;
+    if (rg.size() != 32) return 229;
+    for (size_t i = 0; i < 32; ++i) {
+      if (rg[i] != uint8_t(xy[i] * 255.0f + 0.5f)) return 230;
+    }
+    if (rg[0] != 255 || rg[1] != 128) return 231;
+    if (DecodeDxnLevelRg8(blk, 15, 4, 4, 1, false, 0, &rg) || !rg.empty()) return 232;
+    if (DecodeDxnLevelRg8(blk, sizeof(blk), 4, 4, 1, false, 0, nullptr) || DecodeDxnLevelRg8(nullptr, 16, 4, 4, 1, false, 0, &rg) ||
+        DecodeDxnLevelRg8(blk, sizeof(blk), 0, 4, 1, false, 0, &rg)) return 232;
+    // rounded to NEAREST, both palettes, every index, by whole-number arithmetic that shares nothing with the
+    // decoder's floats: eight values 200 > 61 (sevenths), six values 10 <= 251 (fifths), then 0 and 255.
+    {
+      uint8_t two[16];
+      bc4(200, 61, [](uint32_t i) { return i % 8; }, two);
+      bc4(10, 251, [](uint32_t i) { return i % 8; }, two + 8);
+      if (!DecodeDxnLevelRg8(two, sizeof(two), 4, 4, 1, false, 0, &rg) || rg.size() != 32) return 240;
+      bool down = false, up = false;
+      for (uint32_t i = 0; i < 16; ++i) {
+        const uint32_t k = i % 8;
+        // (2 * n + d) / (2 * d): n / d rounded to nearest; no value here is an exact half (7 and 5 are odd)
+        const uint32_t nx = k == 0 ? 200u * 7 : k == 1 ? 61u * 7 : (8 - k) * 200 + (k - 1) * 61;
+        const uint32_t ny = k == 0 ? 10u * 5 : k == 1 ? 251u * 5 : k < 6 ? (6 - k) * 10 + (k - 1) * 251 : k == 6 ? 0u : 255u * 5;
+        if (rg[2 * i] != (2 * nx + 7) / 14 || rg[2 * i + 1] != (2 * ny + 5) / 10) return 240;
+        down = down || (nx % 7 != 0 && nx % 7 < 4);                               // a value rounded down and one rounded up are both met:
+        up = up || nx % 7 >= 4;                                                   // truncation (the SDK's decompress path) would fail here
+      }
+      if (!down || !up) return 240;
+      // (the texels are row-major inside the block: texel (1, 0) is index 1, texel (0, 1) index 4)
+      if (rg[2 * 1] != 61 || rg[2 * 4] != (2 * (4u * 200 + 3 * 61) + 7) / 14) return 240;
+    }
+    // A stored level inside a packed tail, as a cache reads one: UntileLevel lifts the level's blocks out of the
+    // tail (tiled, endian swapped, at its block origin) into linear rows, and the decoder reads those rows with
+    // the level's own width as the pitch, linear, endian 0.
+    {
+      const TexFormatInfo fi = {4, 16, 4};
+      LevelLayout l;
+      l.pitch_blocks = 32; l.width_blocks = 2; l.height_blocks = 2; l.x_blocks = 4; l.y_blocks = 1;
+      std::vector<uint8_t> tail(TiledUpperBound2D(8, 4, 32, 4), 0);
+      for (uint32_t by = 0; by < 2; ++by) {
+        for (uint32_t bx = 0; bx < 2; ++bx) {
+          uint8_t b[16];
+          const uint8_t vx = uint8_t(10 + 20 * bx + 40 * by), vy = uint8_t(200 - 3 * bx - 5 * by);
+          b[0] = vx; b[1] = vx; b[8] = vy; b[9] = vy;
+          std::memset(b + 2, 0, 6);
+          std::memset(b + 10, 0, 6);
+          CopySwapped(tail.data() + size_t(uint32_t(fable2::native::capture::TiledOffset2D(int32_t(4 + bx), int32_t(1 + by), 32, 4))), b, 16, 1);
+        }
+      }
+      const uint32_t row = ((l.width_blocks + 31) & ~31u) * 16;
+      std::vector<uint8_t> rows(size_t(row) * l.height_blocks, 0);
+      if (!UntileLevel(tail.data(), tail.size(), l, fi, true, 1, rows.data(), row)) return 241;
+      if (!DecodeDxnLevelRg8(rows.data(), rows.size(), 8, 8, l.width_blocks, false, 0, &rg) || rg.size() != 128) return 241;
+      for (uint32_t y = 0; y < 8; ++y) {
+        for (uint32_t x = 0; x < 8; ++x) {
+          if (rg[2 * (y * 8 + x)] != 10 + 20 * (x / 4) + 40 * (y / 4) || rg[2 * (y * 8 + x) + 1] != 200 - 3 * (x / 4) - 5 * (y / 4)) return 241;
+        }
+      }
+    }
+    // the fetch: the kind's format alone, the cache's own reader still refusing both
+    FcArgs a;
+    a.format = kXenosK8; a.w = 64; a.h = 64; a.pitch = 64; a.endian = 0; a.base = 0x1BD03000; a.mip = 0; a.mip_max = 0;
+    a.packed = false; a.clamp_x = 2; a.clamp_y = 2;
+    uint32_t p[6];
+    MakeFc(a, p);
+    TextureFetch t;
+    if (DecodeTextureFetch(p, &t) != FetchError::kFormat) return 233;
+    if (WaterTextureFetch(p, WaterDecode::kK8, &t) != FetchError::kNone || t.width != 64 || t.height != 64 || t.base_phys != 0x1BD03000u ||
+        t.format != TexFormat::kUnsupported || t.xenos_format != kXenosK8 || t.clamp_x != 2) return 234;
+    if (WaterTextureFetch(p, WaterDecode::kDxn, &t) != FetchError::kFormat) return 235;
+    a.w = 512; a.h = 512; a.pitch = 512;
+    MakeFc(a, p);
+    if (WaterTextureFetch(p, WaterDecode::kK8, &t) != FetchError::kSize) return 236;        // above 256 x 256
+    a.w = 256; a.h = 256; a.pitch = 256;                                                    // (the limit itself holds; one side over does not)
+    MakeFc(a, p);
+    if (WaterTextureFetch(p, WaterDecode::kK8, &t) != FetchError::kNone) return 236;
+    a.w = 8; a.h = 257; a.pitch = 32;
+    MakeFc(a, p);
+    if (WaterTextureFetch(p, WaterDecode::kK8, &t) != FetchError::kSize) return 236;
+    a.format = kXenosDxn; a.w = 256; a.h = 256; a.pitch = 256; a.base = 0x14D40000; a.mip = 0x14D50000; a.mip_max = 8;
+    MakeFc(a, p);
+    if (WaterTextureFetch(p, WaterDecode::kDxn, &t) != FetchError::kNone || t.mip_max != 8 || t.mip_phys != 0x14D50000u || LevelCount(t) != 9) return 237;
+    if (t.format != TexFormat::kUnsupported || t.xenos_format != kXenosDxn || DecodeTextureFetch(p, &t) != FetchError::kFormat ||
+        WaterTextureFetch(p, WaterDecode::kK8, &t) != FetchError::kFormat) return 237;
+    a.w = 2048; a.h = 2048; a.pitch = 2048;
+    MakeFc(a, p);
+    if (WaterTextureFetch(p, WaterDecode::kDxn, &t) != FetchError::kSize) return 238;
+    a.w = 1024; a.h = 1024; a.pitch = 1024;
+    MakeFc(a, p);
+    if (WaterTextureFetch(p, WaterDecode::kDxn, &t) != FetchError::kNone) return 238;
+    a.pitch = 512;                                                                          // (a pitch below the width; no base)
+    MakeFc(a, p);
+    if (WaterTextureFetch(p, WaterDecode::kDxn, &t) != FetchError::kSize) return 238;
+    a.pitch = 1024; a.base = 0;
+    MakeFc(a, p);
+    if (WaterTextureFetch(p, WaterDecode::kDxn, &t) != FetchError::kSize) return 238;
+    a.base = 0x14D40000; a.dim = 0; a.w = 256; a.h = 256; a.pitch = 256;
+    MakeFc(a, p);
+    if (WaterTextureFetch(p, WaterDecode::kDxn, &t) != FetchError::kNot2D) return 239;
+    a.dim = 1; a.type = 0;
+    MakeFc(a, p);
+    if (WaterTextureFetch(p, WaterDecode::kDxn, &t) != FetchError::kNotTexture) return 239;
+    // every field as DecodeTextureFetch reads it: one constant of a decoded format, its format bits exchanged for
+    // the kind's, gives the same fetch but for the two format members
+    {
+      FcArgs d;                                                                             // the defaults: DXT1, 256 x 128, mips, swizzle, filter, clamps
+      d.w = 256; d.h = 128;
+      uint32_t q[6];
+      MakeFc(d, q);
+      TextureFetch ref, got;
+      if (DecodeTextureFetch(q, &ref) != FetchError::kNone) return 242;
+      q[1] = (q[1] & ~0x3Fu) | kXenosDxn;
+      if (WaterTextureFetch(q, WaterDecode::kDxn, &got) != FetchError::kNone) return 242;
+      if (got.base_phys != ref.base_phys || got.mip_phys != ref.mip_phys || got.width != ref.width || got.height != ref.height ||
+          got.pitch_texels != ref.pitch_texels || got.endian != ref.endian || got.tiled != ref.tiled || got.packed_mips != ref.packed_mips ||
+          got.mip_min != ref.mip_min || got.mip_max != ref.mip_max || std::memcmp(got.swizzle, ref.swizzle, 4) != 0 || got.clamp_x != ref.clamp_x ||
+          got.clamp_y != ref.clamp_y || got.linear_filter != ref.linear_filter) return 242;
+      // a refusal leaves the output as it was
+      TextureFetch keep;
+      keep.width = 77;
+      q[1] = (q[1] & ~0x3Fu) | 18;
+      if (WaterTextureFetch(q, WaterDecode::kDxn, &keep) != FetchError::kFormat || keep.width != 77) return 242;
+    }
+    // The captured constants (CAP 155547, a water row's slots 1 and 2): what the two readers make of them
+    const uint32_t cap1[6] = {0x80804802u, 0x1BD03002u, 0x0007E03Fu, 0x00A81400u, 0x00000003u, 0x00000218u};
+    const uint32_t cap1s[6] = {0x80404802u, 0x1B6D0002u, 0x0001E007u, 0x00A81400u, 0x00000003u, 0x00000218u};
+    const uint32_t cap2[6] = {0x82000002u, 0x14D40071u, 0x001FE0FFu, 0x00A80D10u, 0x00000203u, 0x14D50A18u};
+    if (WaterTextureFetch(cap1, WaterDecode::kK8, &t) != FetchError::kNone || t.width != 64 || t.height != 64 || t.pitch_texels != 64 || !t.tiled ||
+        t.endian != 0 || t.clamp_x != 2 || t.clamp_y != 2 || t.mip_phys != 0 || LevelCount(t) != 1) return 243;
+    if (t.swizzle[0] != 0 || t.swizzle[1] != 0 || t.swizzle[2] != 0 || t.swizzle[3] != 5 || !t.linear_filter) return 243;   // the mask: (x, x, x, one)
+    if (WaterTextureFetch(cap1s, WaterDecode::kK8, &t) != FetchError::kNone || t.width != 8 || t.height != 16 || t.pitch_texels != 32 || !t.tiled) return 243;
+    if (WaterTextureFetch(cap2, WaterDecode::kDxn, &t) != FetchError::kNone || t.width != 256 || t.height != 256 || t.pitch_texels != 256 || !t.tiled ||
+        t.endian != 1 || t.clamp_x != 0 || t.clamp_y != 0 || t.mip_phys != 0x14D50000u || t.mip_max != 8 || !t.packed_mips || LevelCount(t) != 9) return 243;
+    if (t.swizzle[0] != 0 || t.swizzle[1] != 1 || t.swizzle[2] != 2 || t.swizzle[3] != 3 || !t.linear_filter) return 243;   // the map: x the first block, y the second
+  }
   // --- k_DXN (format 49): two BC4 blocks per 4 x 4 block, the terrain's normal map (tf17) ---
   // The same blocks and numbers as test_decode_dxn of tests/test_terrain_replay.py.
   {
@@ -928,6 +1142,39 @@ int main() {
       std::fclose(o);
       std::printf("format-3 dump decoded: %ux%u, wrote %s\n", pt.width, pt.height, outp.c_str());
     }
+  }
+  // FABLE2_K8_BIN / FABLE2_K8_FC and FABLE2_WDXN_BIN / FABLE2_WDXN_FC: a dumped mask and the dumped normal map's
+  // base level through the two decoders (plan Task 5), written to <bin>.cpp.r8 and <bin>.cpp.rg8 for
+  // tools/xdk_sigmatch/water_textures.py compare and tests/test_water_textures.py (as FABLE2_TF17_BIN above).
+  // Unset: one SKIPPED line each.
+  for (const WaterDecode kind : {WaterDecode::kK8, WaterDecode::kDxn}) {
+    const bool k8 = kind == WaterDecode::kK8;
+    const char* bin = std::getenv(k8 ? "FABLE2_K8_BIN" : "FABLE2_WDXN_BIN");
+    const char* fcs = std::getenv(k8 ? "FABLE2_K8_FC" : "FABLE2_WDXN_FC");
+    if (!bin || !fcs) {
+      std::printf("SKIPPED: real %s dump test (set %s and %s after a discovery capture)\n", k8 ? "shore mask" : "water normal map",
+                  k8 ? "FABLE2_K8_BIN" : "FABLE2_WDXN_BIN", k8 ? "FABLE2_K8_FC" : "FABLE2_WDXN_FC");
+      continue;
+    }
+    uint32_t rfc[6] = {};
+    if (std::sscanf(fcs, "%x,%x,%x,%x,%x,%x", &rfc[0], &rfc[1], &rfc[2], &rfc[3], &rfc[4], &rfc[5]) != 6) return 244;
+    TextureFetch wt;
+    if (WaterTextureFetch(rfc, kind, &wt) != FetchError::kNone) return 245;
+    std::FILE* f = std::fopen(bin, "rb");
+    if (!f) return 246;
+    std::vector<uint8_t> bytes;
+    uint8_t chunk[65536];
+    for (size_t n; (n = std::fread(chunk, 1, sizeof(chunk), f)) > 0;) bytes.insert(bytes.end(), chunk, chunk + n);
+    std::fclose(f);
+    std::vector<uint8_t> decoded;
+    const bool ok = k8 ? DecodeK8Level(bytes.data(), bytes.size(), wt.width, wt.height, wt.pitch_texels, wt.tiled, &decoded)
+                       : DecodeDxnLevelRg8(bytes.data(), bytes.size(), wt.width, wt.height, wt.pitch_texels / 4, wt.tiled, wt.endian, &decoded);
+    if (!ok || decoded.size() != size_t(wt.width) * wt.height * (k8 ? 1 : 2)) return 247;
+    const std::string outp = std::string(bin) + (k8 ? ".cpp.r8" : ".cpp.rg8");
+    std::FILE* o = std::fopen(outp.c_str(), "wb");
+    if (!o || std::fwrite(decoded.data(), 1, decoded.size(), o) != decoded.size()) return 248;
+    std::fclose(o);
+    std::printf("%s dump decoded: %ux%u, wrote %s\n", k8 ? "shore mask" : "water normal map", wt.width, wt.height, outp.c_str());
   }
   return 0;
 }

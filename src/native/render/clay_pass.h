@@ -50,6 +50,7 @@
 #include "clay_logic.h"
 #include "frame_scene.h"
 #include "geometry_cache.h"
+#include "impostor_picture.h"
 #include "post_oracle.h"
 #include "scene_dump.h"
 #include "texture_cache.h"
@@ -125,9 +126,11 @@ class ClayPass {
   // step"): with `flat`, in a scene captured with the switch, the frame's impostor records are drawn by one
   // step of its own layout and programs in the colour pass, at the records' place (PlanImpostorPlace): six
   // vertices a quad, the position by the game's formula, one flat colour, the game's dissolve, light scalars
-  // and per-tree fog, depth-tested and depth-written. No pre-pass draw, no shadow-map draw. With `on` nothing
-  // is drawn (this build has no pictures: every record is counted "picture: unread"). With `off` nothing of
-  // the step is made, bound, reserved or drawn, and the frame's slot plan is the one of before.
+  // and per-tree fog, depth-tested and depth-written. No pre-pass draw, no shadow-map draw. With `on` (frame-map,
+  // "The pictures in the pass") each record is drawn with the game's own picture of its tree model, read from
+  // guest memory this frame (SetImpostorPicturesAvailable; ReadImpostorPicture), and a record without a usable
+  // picture is not drawn and counted by its reason: never a flat quad in a picture's place. With `off` nothing
+  // of the step is made, bound, reserved or drawn, and the frame's slot plan is the one of before.
   void Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene, ClayColor color,
               bool textured, ClayLight light, bool shadows, bool fog, bool wind, bool coverage, capture::ImpostorMode impostors,
               const ClayPostRequest& post, ClayStats& st, TextureStats& tst);
@@ -197,6 +200,14 @@ class ClayPass {
   // submission has completed; false in every other call. Command-processor thread, outside Render.
   void RequestSceneDump(uint64_t frame);
   bool TakeSceneDump(nrhi::Device* dev, std::vector<uint8_t>* file);
+  // The pictures the impostor step used in the frame of the dump last started (PackImpostorPictures; only
+  // from a Render whose mode was `on`): true once a dump, with `file` the bytes of native_scene_<stamp>.f2np;
+  // false in every other call, and for a dump of a frame drawn without the pictures.
+  bool TakeImpostorPictures(std::vector<uint8_t>* file);
+  // Whether the run has the pictures in guest memory (fable2::native::ImpostorPicturesAvailable: the read-back
+  // list was seeded with the fourteen bases, or the read-back is full). The caller says so before a Render in
+  // `on`; without it every record is "picture: base".
+  void SetImpostorPicturesAvailable(bool available) { impostor_pictures_available_ = available; }
   // The file's head of the dump last taken, and the counts, for the caller's log line.
   const SceneDumpHeader& scene_dump_head() const { return scene_dump_head_; }
   const SceneDumpCounts& scene_dump_counts() const { return scene_dump_counts_; }
@@ -398,6 +409,18 @@ class ClayPass {
   bool EnsureImpostorObjects(nrhi::Device* dev);
   void DestroyImpostorObjects();
   void ForgetImpostorObjects();
+  // The impostors' pictures (`on` alone; frame-map section 19, "The pictures in the pass"). What is known of
+  // the picture a record samples, this Render: its tf0 is one of the read-back list's fourteen bases in a run
+  // that has them (else kBase); the base level's 131,072 bytes read whole from guest memory and COPIED before
+  // anything is judged (else kUnread); the copy's SampleHash against the one the picture's texture was made
+  // from: equal means the texture is used as it is; else decoded (DecodeImpostorBase, or Decode1555Level for
+  // another layout; false: kUnread), held to the content rule (ImpostorPictureUsable; false: kContent), its
+  // three levels made (MakeImpostorLevels) and the four levels staged for upload in this frame's staging buffer
+  // (a texture, its view or the buffer missing: kUpload). A base is judged once a Render, however many records
+  // name it. `*picture`: which of the fourteen; `*sampler`: the static sampler of the record's fetch.
+  ImpostorPicture ReadImpostorPicture(nrhi::Device* dev, const capture::ImpostorRecord& r, uint32_t* picture, uint32_t* sampler, ClayStats& st);
+  void DestroyImpostorPictures();
+  void ForgetImpostorPictures();
   // What the scene's clouds alone need (clay_logic.h, "Native clouds"): two programs and one pipeline under
   // the quad step's layout. EnsureCloudObjects makes them on the first frame that draws clouds (the quad
   // step's objects exist then); false when they could not be made, now or before: then no frame has clouds
@@ -770,6 +793,41 @@ class ClayPass {
   uint32_t impostor_step_slots_ = 0, impostor_slot0_ = 0, impostor_words_slot_ = 0;
   uint64_t impostor_logged_ = 0;
   uint32_t impostor_log_lines_ = 0;
+  // The pictures (`on`): one texture a base of the read-back list, 256 x 256 R8G8B8A8_UNORM with four levels,
+  // owned by the pass and outside the texture cache (whose dynamic rule would refuse a texture that changes
+  // every frame); made on the first frame that has a usable picture for it, never in `off` or `flat`. `view`:
+  // with the swizzle of the fetch it was made for (`swizzle`: the fetch's field). `hash`: SampleHash of the guest
+  // bytes the texture holds (`filled`). `base`: the base level as uploaded, kept for the pictures' dump.
+  // `judged`, `state`: the Render that last judged it (impostor_picture_serial_) and what it found.
+  struct ImpostorPictureTexture {
+    nrhi::Texture* texture = nullptr;
+    nrhi::TextureView* view = nullptr;
+    uint32_t swizzle = 0;
+    uint64_t hash = 0;
+    bool filled = false, shader_state = false;
+    uint64_t judged = 0;
+    ImpostorPicture state = ImpostorPicture::kNone;
+    std::vector<uint8_t> base;
+  };
+  ImpostorPictureTexture impostor_pictures_[14];
+  bool impostor_pictures_available_ = false;
+  uint64_t impostor_picture_serial_ = 0;
+  // This frame's uploads: the staging buffer (one of a fixed size, pooled by submission like the frame's
+  // constant buffer: written here, read by the copies of this Render's command list), mapped while the
+  // pictures are staged; which pictures were staged, in the buffer's order.
+  static constexpr uint64_t kImpostorStagingPoolBytes = 24ull << 20;
+  RetirePool<nrhi::Buffer*> impostor_staging_pool_{kImpostorStagingPoolBytes};
+  std::vector<nrhi::Buffer*> impostor_staging_destroy_;
+  nrhi::Buffer* impostor_staging_ = nullptr;
+  uint8_t* impostor_staging_mapped_ = nullptr;
+  uint32_t impostor_uploads_[14] = {};
+  uint32_t impostor_upload_count_ = 0;
+  bool impostor_first_upload_logged_ = false;
+  std::vector<uint8_t> impostor_guest_, impostor_decoded_, impostor_levels_[3];   // (scratch)
+  // The pictures' file of the dump last started in `on` (TakeImpostorPictures), and the frame it is of.
+  std::vector<uint8_t> impostor_dump_file_;
+  uint64_t impostor_dump_frame_ = 0;
+  bool impostor_dump_ready_ = false;
   std::vector<uint32_t> impostor_seqs_, impostor_place_seqs_;  // (scratch: the drawn records' and the prepared records' seq)
   nrhi::BindingLayout* quad_layout_ = nullptr;  // the RHI has no layout destruction
   nrhi::Shader* quad_vs_ = nullptr;

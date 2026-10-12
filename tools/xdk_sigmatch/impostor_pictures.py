@@ -23,6 +23,9 @@ channel 2.
       against every picture of the captures' impostor draws (captures made under --readback_resolve=full)
   impostor_pictures.py content <capture.jsonl>...
       the content rule's two counts (content_stats) for every whole format-3 base of the captures, and its verdict
+  impostor_pictures.py used <native_scene_<stamp>.f2np> <capture.jsonl>
+      the pictures the native pass used in a dumped frame against the capture's dumps of the same bases: the share
+      of equal texels against each frame of the capture, and which frame each picture is (spec criterion 6)
   impostor_pictures.py compare <bin> <fc>
       a dumped base level through decode_1555 against the C++ test's <bin>.cpp.rgba (FABLE2_1555_BIN /
       FABLE2_1555_FC of tests/native/test_texture_decode.cpp); <fc>: the six dwords as hex, comma-separated
@@ -505,6 +508,73 @@ def content_cli(captures, out=sys.stdout):
     return 0
 
 
+# --- The pictures the pass used (plan Task 14; spec criterion 6) ---
+USED_MAGIC, USED_MAX, USED_BOUND = 0x504E3246, 32, 0.98      # "F2NP"; render::kImpostorPicturesMax; criterion 6's share
+
+
+def read_used(path):
+    """(head, pictures) of a native_scene_<stamp>.f2np (render::PackImpostorPictures): head {"scene_frame", "count"};
+    pictures [{"base", "place", "hash", "rgba": uint8 [256, 256, 4], the texture's channels as uploaded}].
+    ValueError for anything render::ParseImpostorPictures refuses."""
+    data = Path(path).read_bytes()
+    if len(data) < 24:
+        raise ValueError("%s: shorter than a head" % path)
+    magic, version, scene_frame, count, reserved = struct.unpack_from("<IIQII", data, 0)
+    one = 16 + PICTURE_SIZE * PICTURE_SIZE * 4
+    if magic != USED_MAGIC or version != 1 or reserved != 0 or count > USED_MAX or len(data) != 24 + count * one:
+        raise ValueError("%s: not a pictures file (magic 0x%08X, version %d, count %d, %d bytes)" % (path, magic, version, count, len(data)))
+    pictures = []
+    for i in range(count):
+        at = 24 + i * one
+        base, place, content = struct.unpack_from("<IIQ", data, at)
+        rgba = np.frombuffer(data, dtype=np.uint8, count=one - 16, offset=at + 16).reshape(PICTURE_SIZE, PICTURE_SIZE, 4)
+        pictures.append({"base": base, "place": place, "hash": content, "rgba": rgba})
+    return {"scene_frame": scene_frame, "count": count}, pictures
+
+
+def used(f2np, capture):
+    """Each picture of the file against the capture's dump of the same base in every frame of the capture: the
+    share of texels equal in all four channels. {"scene_frame", "paired_frame" (the capture frame whose row names
+    the file's scene frame, or None), "pictures": [{"base", "place", "hash", "equal": {frame: share}, "best_frame"}]}."""
+    head, pictures = read_used(f2np)
+    capture = Path(capture)
+    rows = read_rows(capture)
+    frames = sorted({r["frame"] for r in rows if r.get("kind") == "frame" and "frame" in r})
+    paired = next((r["frame"] for r in rows if r.get("kind") == "frame" and r.get("scene_frame") == head["scene_frame"]), None)
+    dumps = {}
+    for n in frames:
+        for _, tex in frame_pictures(rows, n):
+            if tex is None:
+                continue
+            try:
+                dumps.setdefault(fetch(tex["fc"])["base"], {})[n] = picture(capture.parent, tex, 0)
+            except ValueError:
+                pass
+    out = []
+    for pic in pictures:
+        equal = {n: float((rgba == pic["rgba"]).all(axis=-1).mean()) for n, rgba in sorted(dumps.get(pic["base"], {}).items())}
+        best = max(equal, key=lambda n: (equal[n], -abs(n - (paired or n)))) if equal else None
+        out.append({"base": pic["base"], "place": pic["place"], "hash": pic["hash"], "equal": equal, "best_frame": best})
+    return {"scene_frame": head["scene_frame"], "paired_frame": paired, "pictures": out}
+
+
+def used_cli(f2np, capture, out=sys.stdout):
+    result = used(f2np, capture)
+    print("%s: scene frame %d, %d pictures; the capture's frame of that scene: %s" % (
+        Path(f2np).name, result["scene_frame"], len(result["pictures"]), result["paired_frame"]), file=out)
+    held = 0
+    for pic in result["pictures"]:
+        shares = ", ".join("frame %d %.4f" % (n, s) for n, s in pic["equal"].items()) or "no dump of this base in the capture"
+        ok = bool(pic["equal"]) and max(pic["equal"].values()) >= USED_BOUND
+        held += ok
+        age = "" if pic["best_frame"] is None or result["paired_frame"] is None else " (the paired frame%+d)" % (pic["best_frame"] - result["paired_frame"])
+        print("  base 0x%08X place %d hash 0x%016X: texels equal to the capture's dump: %s; nearest frame %s%s: %s" % (
+            pic["base"], pic["place"], pic["hash"], shares, pic["best_frame"], age, "held" if ok else "NOT HELD"), file=out)
+    print("criterion 6 (each picture equal on at least %.0f%% of its texels to a dump of the capture): %d of %d held" % (
+        100 * USED_BOUND, held, len(result["pictures"])), file=out)
+    return 0 if result["pictures"] and held == len(result["pictures"]) else 1
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -522,7 +592,12 @@ def main(argv=None):
     lv.add_argument("captures", nargs="+")
     ct = sub.add_parser("content")
     ct.add_argument("captures", nargs="+")
+    u = sub.add_parser("used")
+    u.add_argument("f2np")
+    u.add_argument("capture")
     a = ap.parse_args(argv)
+    if a.cmd == "used":
+        return used_cli(a.f2np, a.capture)
     if a.cmd == "levels":
         return levels_cli(a.captures)
     if a.cmd == "content":

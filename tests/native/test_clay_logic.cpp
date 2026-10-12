@@ -2412,7 +2412,52 @@ static void ImpostorTests() {
     on.impostor_mode = capture::ImpostorMode::kOn;
     on.impostors_seen = 14;
     on.impostor_skip[size_t(ClayImpostorSkip::kPictureUnread)] = 14;
-    CHECK(834, FormatImpostorText(on) == "Impostors: on, drawn 0 of 14 (0 quads) | not drawn {picture: unread: 14} | impostor-record {}");
+    CHECK(834, FormatImpostorText(on) ==
+                   "Impostors: on, drawn 0 of 14 (0 quads), pictures 0 (refreshed 0) | not drawn {picture: unread: 14} | impostor-record {}");
+    // The pictures (plan Task 14; the plan's CHECK 819 is 837 here: 819 was taken). `on` names the pictures the
+    // frame's records could use and those decoded and uploaded this frame; `flat` and `off` have the text of before.
+    {
+      // (on the heap: this function's frame is near the test's stack already, and a ClayStats is large)
+      std::vector<ClayStats> made(5);
+      ClayStats& p14 = made[0];
+      p14.impostor_mode = capture::ImpostorMode::kOn;
+      p14.impostors_seen = 14;
+      p14.impostors_drawn = 13;
+      p14.impostor_quads = 900;
+      p14.impostor_pictures = 13;
+      p14.impostor_refreshed = 13;
+      p14.impostor_skip[size_t(ClayImpostorSkip::kPictureContent)] = 1;
+      CHECK(837, FormatImpostorText(p14) ==
+                     "Impostors: on, drawn 13 of 14 (900 quads), pictures 13 (refreshed 13) | not drawn {picture: content: 1} | impostor-record {}");
+      ClayStats& all = made[1];
+      all = p14;
+      all.impostors_drawn = 14;
+      all.impostor_quads = 928;
+      all.impostor_pictures = 14;
+      all.impostor_refreshed = 14;
+      all.impostor_skip[size_t(ClayImpostorSkip::kPictureContent)] = 0;
+      CHECK(837, FormatImpostorText(all) == "Impostors: on, drawn 14 of 14 (928 quads), pictures 14 (refreshed 14) | not drawn {} | impostor-record {}");
+      // A change line for another number of usable pictures; none for another number refreshed (a picture whose
+      // sampled bytes did not change is not uploaded again: that count may flicker).
+      ClayStats& fewer = made[2];
+      fewer = all;
+      fewer.impostor_pictures = 13;
+      CHECK(837, ImpostorStepForm(fewer) != ImpostorStepForm(all));
+      ClayStats& kept = made[3];
+      kept = all;
+      kept.impostor_refreshed = 3;
+      CHECK(837, ImpostorStepForm(kept) == ImpostorStepForm(all));
+      ClayStats& flat14 = made[4];
+      flat14 = all;
+      flat14.impostor_mode = capture::ImpostorMode::kFlat;
+      CHECK(837, FormatImpostorText(flat14) == "Impostors: flat, drawn 14 of 14 (928 quads) | not drawn {} | impostor-record {}");
+      // Which of the fourteen a base is (the read-back list's bases; anything else is "picture: base").
+      CHECK(837, ImpostorPictureSlot(0x12704000u, 0x12704000u, 0x2B000u, 14) == 0 && ImpostorPictureSlot(0x12933000u, 0x12704000u, 0x2B000u, 14) == 13);
+      CHECK(837, ImpostorPictureSlot(0x1272F000u, 0x12704000u, 0x2B000u, 14) == 1 && ImpostorPictureSlot(0x1295E000u, 0x12704000u, 0x2B000u, 14) == -1);
+      CHECK(837, ImpostorPictureSlot(0x12703000u, 0x12704000u, 0x2B000u, 14) == -1 && ImpostorPictureSlot(0x12705000u, 0x12704000u, 0x2B000u, 14) == -1);
+      CHECK(837, ImpostorPictureSlot(0x12724000u, 0x12704000u, 0x2B000u, 14) == -1 && ImpostorPictureSlot(0, 0x12704000u, 0x2B000u, 14) == -1);
+      CHECK(837, ImpostorPictureSlot(0x12704000u, 0x12704000u, 0, 14) == -1 && ImpostorPictureSlot(0xFFFF0000u, 0xFFFE0000u, 0x10000u, 14) == 1);
+    }
     // (the form the pass logs a change of: the mode, the drawn count, the quads and every reason's count)
     CHECK(834, ImpostorStepForm(s) != ImpostorStepForm(on) && ImpostorStepForm(s) == ImpostorStepForm(s));
     ClayStats t = s;

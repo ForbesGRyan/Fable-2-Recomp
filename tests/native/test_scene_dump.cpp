@@ -214,6 +214,52 @@ int main() {
     if (SceneDumpNewRequest(0, 0) || SceneDumpNewRequest(0, 7) || SceneDumpNewRequest(7, 7) || !SceneDumpNewRequest(7, 0) ||
         !SceneDumpNewRequest(9, 7)) return 69;
   }
+  // The impostors' pictures beside a dump (sub-project 12, plan Task 14; criterion 6): native_scene_<stamp>.f2np.
+  {
+    const size_t n = kImpostorPictureBytes;
+    if (n != 256u * 256u * 4u || sizeof(ImpostorPicturesHeader) != 24 || sizeof(ImpostorPictureHead) != 16) return 80;
+    std::vector<uint8_t> a(n), b(n);
+    for (size_t i = 0; i < n; ++i) { a[i] = uint8_t(i * 7 + 1); b[i] = uint8_t(i * 13 + 5); }
+    const ImpostorPictureEntry two[2] = {{{0x12704000u, 422u, 0x1122334455667788ull}, a.data()}, {{0x1272F000u, 423u, 0x99AABBCCDDEEFF00ull}, b.data()}};
+    std::vector<uint8_t> file;
+    if (!PackImpostorPictures(4711, two, 2, &file) || file.size() != 24 + 2 * (16 + n)) return 81;
+    if (file[0] != 'F' || file[1] != '2' || file[2] != 'N' || file[3] != 'P') return 82;
+    ImpostorPicturesHeader head{};
+    std::vector<ImpostorPictureHead> heads;
+    std::vector<const uint8_t*> pictures;
+    if (!ParseImpostorPictures(file.data(), file.size(), &head, &heads, &pictures)) return 83;
+    if (head.magic != kImpostorPicturesMagic || head.version != 1 || head.scene_frame != 4711 || head.count != 2 || head.reserved != 0) return 84;
+    if (heads.size() != 2 || pictures.size() != 2 || heads[0].base != 0x12704000u || heads[0].place != 422 || heads[0].hash != 0x1122334455667788ull ||
+        heads[1].base != 0x1272F000u || heads[1].place != 423 || heads[1].hash != 0x99AABBCCDDEEFF00ull) return 85;
+    if (std::memcmp(pictures[0], a.data(), n) != 0 || std::memcmp(pictures[1], b.data(), n) != 0) return 86;
+    // Refused: one byte short, one byte long, a count of 33, a wrong magic, a wrong version, a reserved word.
+    if (ParseImpostorPictures(file.data(), file.size() - 1, &head, &heads, &pictures) || !heads.empty() || !pictures.empty()) return 87;
+    std::vector<uint8_t> longer = file;
+    longer.push_back(0);
+    if (ParseImpostorPictures(longer.data(), longer.size(), &head, &heads, &pictures)) return 88;
+    std::vector<uint8_t> bad = file;
+    const uint32_t thirty_three = 33;
+    std::memcpy(bad.data() + 16, &thirty_three, 4);
+    if (ParseImpostorPictures(bad.data(), bad.size(), &head, &heads, &pictures)) return 89;
+    bad = file;
+    bad[3] = 'S';
+    if (ParseImpostorPictures(bad.data(), bad.size(), &head, &heads, &pictures)) return 90;
+    bad = file;
+    bad[4] = 2;
+    if (ParseImpostorPictures(bad.data(), bad.size(), &head, &heads, &pictures)) return 91;
+    bad = file;
+    bad[20] = 1;
+    if (ParseImpostorPictures(bad.data(), bad.size(), &head, &heads, &pictures)) return 92;
+    if (ParseImpostorPictures(nullptr, file.size(), &head, &heads, &pictures)) return 93;
+    // Packing: no picture's bytes, more than 32, no file: nothing written. A file of no picture is a file.
+    const ImpostorPictureEntry none[1] = {{{0x12704000u, 1u, 2ull}, nullptr}};
+    if (PackImpostorPictures(1, none, 1, &file) || !file.empty()) return 94;
+    std::vector<ImpostorPictureEntry> many(33, two[0]);
+    if (PackImpostorPictures(1, many.data(), 33, &file) || !file.empty() || PackImpostorPictures(1, two, 2, nullptr)) return 95;
+    if (!PackImpostorPictures(9, many.data(), 32, &file) || file.size() != 24 + 32 * (16 + n)) return 96;
+    if (!PackImpostorPictures(9, nullptr, 0, &file) || file.size() != 24 || !ParseImpostorPictures(file.data(), file.size(), &head, &heads, &pictures) ||
+        head.count != 0 || head.scene_frame != 9 || !heads.empty()) return 97;
+  }
   std::cout << "PASS: scene dump\n";
   return 0;
 }

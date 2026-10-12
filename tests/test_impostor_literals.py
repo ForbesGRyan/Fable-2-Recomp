@@ -285,9 +285,33 @@ class ImpostorPassText(unittest.TestCase):
         self.assertEqual(block.count("impostor_step_slots_ = kClayImpostorStepSlots;"), 1)
         self.assertEqual(s.count("impostor_step = true;"), 1)
         self.assertEqual(block.count("impostor_step = true;"), 1)
-        self.assertIn("      const ClayImpostorSkip picture = DecideImpostorPicture(impostor_mode, ImpostorPicture::kNone);\n"
-                      "      if (picture != ClayImpostorSkip::kNone) {\n", block)
-        self.assertLess(block.index("DecideImpostorPicture("), block.index("EnsureImpostorObjects(dev)"))     # `on`: no object is made
+        self.assertIn("        const ClayImpostorSkip picture = DecideImpostorPicture(impostor_mode, ImpostorPicture::kNone);\n"
+                      "        if (picture != ClayImpostorSkip::kNone) {\n", block)
+        self.assertLess(block.index("DecideImpostorPicture("), block.index("EnsureImpostorObjects(dev)"))     # the picture's verdict first
+        # `on` (plan Task 14): each record's picture is read and judged inside the same test, before any object is
+        # asked; a record whose picture is not usable is counted there and is not among the drawable ones; the
+        # objects are asked only for a frame with something to draw
+        self.assertEqual(s.count("ReadImpostorPicture(dev, scene.impostors[i], &which, &sampler, st)"), 1)
+        self.assertEqual(block.count("ReadImpostorPicture(dev, scene.impostors[i], &which, &sampler, st)"), 1)
+        self.assertLess(block.index("ReadImpostorPicture("), block.index("EnsureImpostorObjects(dev)"))
+        self.assertIn("          const ClayImpostorSkip picture = DecideImpostorPicture(impostor_mode, state);\n"
+                      "          if (picture != ClayImpostorSkip::kNone) {\n            ++st.impostor_skip[size_t(picture)];\n"
+                      "            continue;\n          }\n          impostor_usable[i] = true;\n", block)
+        self.assertIn("      if (drawable && !EnsureImpostorObjects(dev)) {\n", block)
+        self.assertIn("      if (impostor_mode == capture::ImpostorMode::kOn) {\n", block)
+        # no picture object without the mode `on`: the reader is called from that one place, and it alone makes them
+        reader = s[s.index("ImpostorPicture ClayPass::ReadImpostorPicture("):s.index("void ClayPass::ForgetImpostorObjects()")]
+        for made in ("p.texture = dev->CreateTexture(td);", "p.view = dev->CreateTextureView(p.texture, vd);", "impostor_staging_pool_.Take("):
+            self.assertEqual(s.count(made), 1, made)
+            self.assertEqual(reader.count(made), 1, made)
+        # the guest's bytes are copied before anything is judged, and only the copy is read after that
+        copy = reader.index("  std::memcpy(impostor_guest_.data(), guest, kImpostorBaseBytes);\n")
+        import re
+        self.assertEqual(re.findall(r"(?<![A-Za-z_])guest[,;)\[]", reader[copy + 40:]), [])      # the guest's pointer is not read again
+        for later in ("SampleHash(", "DecodeImpostorBase(", "Decode1555Level(", "ImpostorPictureUsable(", "MakeImpostorLevels("):
+            self.assertGreater(reader.index(later), copy, later)
+        self.assertLess(reader.index("ImpostorPictureUsable(stats)"), reader.index("MakeImpostorLevels("))      # the content rule before any level
+        self.assertLess(reader.index("ImpostorPictureUsable(stats)"), reader.index("impostor_uploads_[impostor_upload_count_++]"))
         # everything else of the step asks `impostor_step` or the draws it prepared
         self.assertEqual(s.count("  if (impostor_step && impostor_flat_staging_) {\n"), 1)
         self.assertEqual(s.count("  if (impostor_step) {\n"), 1)
@@ -320,8 +344,17 @@ class ImpostorPassText(unittest.TestCase):
         self.assertIn("    bind_scene();\n    bound = nullptr;", lam)
         # `flat` keeps the first sample's set, the picture is the flat one, and a record is whole or not drawn
         self.assertEqual(s.count("MakeClayImpostorConstants("), 1)
-        self.assertIn("MakeClayImpostorConstants(r, out_scale, post_frame, fog_on, kImpostorKeepFirst, 0, &constants)", s)
-        self.assertEqual(s.count("cmd->SetTexture(kImpostorParamPicture, impostor_flat_view_);"), 1)
+        self.assertIn("MakeClayImpostorConstants(r, out_scale, post_frame, fog_on, kImpostorKeepFirst, with_picture ? impostor_sampler[i] : 0u, &constants)", s)
+        # (plan Task 14) the picture bound is the draw's own: in `on` the record's, and a record without a usable
+        # picture is passed over before anything of it is made: no flat quad stands in for a picture
+        self.assertEqual(s.count("cmd->SetTexture(kImpostorParamPicture, "), 1)
+        self.assertIn("        cmd->SetTexture(kImpostorParamPicture, d.view);\n", lam)
+        self.assertIn("        const bool with_picture = impostor_pictures_on && i < records && impostor_usable[i];\n"
+                      "        if (impostor_pictures_on && !with_picture) continue;\n", s)
+        self.assertEqual(s.count("impostor_flat_view_;"), 1)
+        self.assertIn("        nrhi::TextureView* view = with_picture ? impostor_pictures_[impostor_picture[i]].view : impostor_flat_view_;\n", s)
+        self.assertLess(s.index("if (impostor_pictures_on && !with_picture) continue;"), s.index("MakeClayImpostorConstants("))
+        self.assertEqual(s.count("kImpostorKeepFull") + s.count("kImpostorKeepHalf"), 0)       # the first sample's set alone (rulings 13 and 35)
         self.assertIn("    } else if (!ImpostorPlacesOneRun(impostor_seqs_.data(), impostor_seqs_.size(), first_place, last_place)) {\n"
                       "      all = ClayImpostorSkip::kPlace;\n", s)
         self.assertIn("        if (i >= records || !ImpostorWordsHeld(r, word_floats)) {\n", s)
@@ -333,9 +366,18 @@ class ImpostorPassText(unittest.TestCase):
             self.assertEqual(made.count(line), 1, line)
 
     def test_the_front_end_hands_the_switch_on_and_writes_the_line(self):
-        self.assertEqual(self.front.count("CurrentImpostors()"), 4)     # its definition, the Render's argument, the install line, the capture's
+        # its definition, the Render's argument, the install line, the capture's; and (plan Tasks 12 and 14) the
+        # read-back list's question at start-up and the pictures' availability before a Render in `on`
+        self.assertEqual(self.front.count("CurrentImpostors()"), 6)
+        self.assertIn("bool ImpostorReadbackWanted() { return CurrentImpostors() == capture::ImpostorMode::kOn; }", self.front)
+        self.assertIn("  if (CurrentImpostors() == capture::ImpostorMode::kOn) g_clay->SetImpostorPicturesAvailable(ImpostorPicturesAvailable());\n", self.front)
         self.assertIn('render::FormatCoverageText(st) + "\\n" + render::FormatImpostorText(st));', self.front)
-        self.assertIn('if (st.impostor_mode != capture::ImpostorMode::kOff) REXLOG_INFO("[native] clay: {}", render::FormatImpostorText(st));', self.front)
+        # the log's line: with the pictures their CPU time beside it, otherwise the line of before; none with the mode off
+        self.assertIn('    } else if (st.impostor_mode != capture::ImpostorMode::kOff) {\n      REXLOG_INFO("[native] clay: {}", render::FormatImpostorText(st));\n', self.front)
+        self.assertIn('    if (st.impostor_mode == capture::ImpostorMode::kOn) {\n      REXLOG_INFO("[native] clay: {} | the pictures\' CPU time this frame {:.3f} ms", '
+                      'render::FormatImpostorText(st), st.impostor_picture_ms);\n', self.front)
+        # the list is asked for once, at start-up, and never written by the renderer
+        self.assertNotIn("SetFlagByName(\"readback_resolve", self.front)
 
 
 if __name__ == "__main__":

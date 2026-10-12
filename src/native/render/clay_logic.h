@@ -614,6 +614,12 @@ struct ClayStats {
   capture::ImpostorMode impostor_mode = capture::ImpostorMode::kOff;
   uint32_t impostors_seen = 0, impostors_drawn = 0, impostor_quads = 0;
   uint32_t impostor_skip[16] = {};
+  // (`on` alone) impostor_pictures: the game's pictures the frame's records could use (read whole, a tree's by
+  // the content rule, in a texture); impostor_refreshed: those of them decoded and uploaded this frame (the
+  // others' sampled bytes were the ones their texture was made from).
+  uint32_t impostor_pictures = 0, impostor_refreshed = 0;
+  // (the CPU time of reading, hashing, decoding and staging them this frame, for the log)
+  double impostor_picture_ms = 0.0;
   uint32_t impostor_capture[size_t(capture::ImpostorReason::kCount)] = {};
   uint32_t light_rotation[size_t(RotationKind::kCount)] = {};
   capture::ShaderTally<32> light_rotation_by_vs;
@@ -7096,8 +7102,15 @@ constexpr const char* ClayImpostorSkipName(ClayImpostorSkip s) {
 enum class ImpostorPicture : uint8_t { kNone, kUsable, kBase, kUnread, kContent, kUpload };
 // flat: drawn with the flat texture whatever the picture's state. on: drawn only with a usable picture; anything
 // else is its reason, and no picture at all is "picture: unread": never a flat quad in a picture's place, which
-// would put depth and colour where the game has neither. (This build reads no picture: with the switch at `on`
-// every record is kNone here and nothing is drawn: ledger rulings 23 and 31.) off: never asked; "pipeline".
+// would put depth and colour where the game has neither. off: never asked; "pipeline".
+// Which of the read-back list's pictures an address is: n where base == first + n * step and n < count, else -1
+// (the pass gives fable2::kImpostorPictureBase, kImpostorPictureStep, kImpostorPictures: a record whose tf0 base
+// is none of the seeded fourteen has no picture in guest memory, "picture: base").
+constexpr int ImpostorPictureSlot(uint32_t base, uint32_t first, uint32_t step, uint32_t count) {
+  if (step == 0 || base < first) return -1;
+  const uint32_t d = base - first;
+  return d % step == 0 && d / step < count ? int(d / step) : -1;
+}
 constexpr ClayImpostorSkip DecideImpostorPicture(capture::ImpostorMode mode, ImpostorPicture picture) {
   if (mode == capture::ImpostorMode::kFlat) return ClayImpostorSkip::kNone;
   if (mode != capture::ImpostorMode::kOn) return ClayImpostorSkip::kPipeline;
@@ -7402,9 +7415,15 @@ constexpr void ImpostorFlatTexel(uint8_t texel[4]) {
 inline std::string FormatImpostorText(const ClayStats& st) {
   if (st.impostor_mode == capture::ImpostorMode::kOff) return "Impostors: off";
   char buf[160];
-  std::snprintf(buf, sizeof(buf), "Impostors: %s, drawn %u of %u (%u quads) | not drawn {", capture::ImpostorModeName(st.impostor_mode),
+  std::snprintf(buf, sizeof(buf), "Impostors: %s, drawn %u of %u (%u quads)", capture::ImpostorModeName(st.impostor_mode),
                 st.impostors_drawn, st.impostors_seen, st.impostor_quads);
   std::string text = buf;
+  // (the pictures in `on` alone: `flat` has the line of before)
+  if (st.impostor_mode == capture::ImpostorMode::kOn) {
+    std::snprintf(buf, sizeof(buf), ", pictures %u (refreshed %u)", st.impostor_pictures, st.impostor_refreshed);
+    text += buf;
+  }
+  text += " | not drawn {";
   bool first = true;
   auto add = [&](const char* name, uint32_t n) {
     if (!n) return;
@@ -7435,6 +7454,7 @@ constexpr uint64_t ImpostorStepForm(const ClayStats& st) {
   mix(st.impostors_seen);
   mix(st.impostors_drawn);
   mix(st.impostor_quads);
+  mix(st.impostor_pictures);   // (not impostor_refreshed: it may change from frame to frame with nothing else changing)
   for (uint32_t n : st.impostor_skip) mix(n);
   for (uint32_t n : st.impostor_capture) mix(n);
   return h;

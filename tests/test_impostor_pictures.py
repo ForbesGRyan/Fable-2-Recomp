@@ -428,5 +428,83 @@ class RealLevels(unittest.TestCase):
         self.assertEqual(Path(bin_path + ".cpp.stats").read_text().split(), [str(ring), str(covered), "1" if ip.picture_usable(ring, covered) else "0"])
 
 
+class Used(unittest.TestCase):
+    """`used` (plan Task 14, criterion 6): the pictures the pass wrote beside a scene dump (native_scene_<stamp>.f2np)
+    against the paired capture's dumps of the same bases."""
+
+    def make(self, d, change=None, base2=0x1272F000):
+        d = Path(d)
+        (d / "native_tex_x").mkdir()
+        one = bytearray(131072)
+        put(one, 0, 0x8000 | 31)
+        put(one, 130942, 0x8000 | (31 << 10))
+        two = bytearray(one)
+        put(two, 2, 0x8000 | (31 << 5))            # frame 2's picture of the same base: one more texel
+        (d / "native_tex_x" / "12704000_AA.bin").write_bytes(one)
+        (d / "native_tex_x" / "12704000_AA_EE.bin").write_bytes(two)
+        fc = ["0x%08X" % v for v in FC]
+        rows = [
+            {"kind": "texture", "file": "native_tex_x/12704000_AA.bin", "bytes": 131072, "frame": 1, "content": "0x00000000000000BB", "fc": fc},
+            {"kind": "texture", "file": "native_tex_x/12704000_AA_EE.bin", "bytes": 131072, "frame": 2, "content": "0x00000000000000EE", "fc": fc},
+            {"kind": "verts", "frame": 1, "in_scene": True, "n": 1, "vs": {"hash": "0x129F7F2793DA9084"}, "tf": {"0": fc}, "tfc": {"0": "0x00000000000000BB"}},
+            {"kind": "frame", "frame": 1, "scene_frame": 413},
+            {"kind": "verts", "frame": 2, "in_scene": True, "n": 2, "vs": {"hash": "0x129F7F2793DA9084"}, "tf": {"0": fc}, "tfc": {"0": "0x00000000000000EE"}},
+            {"kind": "frame", "frame": 2, "scene_frame": 414},
+        ]
+        (d / "c.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        rgba = bytearray(ip.decode_1555(bytes(one), 256, 256, 256, True, 1).tobytes())
+        if change:
+            change(rgba)
+        import struct
+        body = struct.pack("<IIQII", 0x504E3246, 1, 413, 2, 0)
+        body += struct.pack("<IIQ", 0x12704000, 422, 0x1122334455667788) + bytes(rgba)
+        body += struct.pack("<IIQ", base2, 423, 7) + bytes(rgba)
+        (d / "p.f2np").write_bytes(body)
+        return d
+
+    def test_parse(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = self.make(d)
+            head, pictures = ip.read_used(d / "p.f2np")
+            self.assertEqual((head["scene_frame"], head["count"]), (413, 2))
+            self.assertEqual([(p["base"], p["place"], p["hash"]) for p in pictures], [(0x12704000, 422, 0x1122334455667788), (0x1272F000, 423, 7)])
+            self.assertEqual(pictures[0]["rgba"].shape, (256, 256, 4))
+            data = (d / "p.f2np").read_bytes()
+            for bad in (data[:-1], data + b"\0", b"F2NS" + data[4:], data[:16] + b"\x21\0\0\0" + data[20:]):
+                (d / "bad.f2np").write_bytes(bad)
+                with self.assertRaises(ValueError):
+                    ip.read_used(d / "bad.f2np")
+
+    def test_equal_one_texel_off_and_a_missing_base(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = self.make(d)
+            result = ip.used(d / "p.f2np", d / "c.jsonl")
+            self.assertEqual(result["paired_frame"], 1)
+            first, second = result["pictures"]
+            # the picture is frame 1's dump texel for texel, and frame 2's but for one texel
+            self.assertEqual(first["equal"], {1: 1.0, 2: 65535 / 65536})
+            self.assertEqual(first["best_frame"], 1)
+            self.assertEqual(second["equal"], {})               # the capture has no dump of the second base
+            self.assertIsNone(second["best_frame"])
+            self.assertEqual(ip.main(["used", str(d / "p.f2np"), str(d / "c.jsonl")]), 1)      # a picture without a dump: not held
+        with tempfile.TemporaryDirectory() as d:
+            def one_off(rgba):
+                rgba[4 * (5 * 256 + 9) + 1] ^= 0xFF
+            d = self.make(d, change=one_off, base2=0x12704000)
+            result = ip.used(d / "p.f2np", d / "c.jsonl")
+            self.assertEqual(result["pictures"][0]["equal"], {1: 65535 / 65536, 2: 65534 / 65536})
+            self.assertEqual(ip.main(["used", str(d / "p.f2np"), str(d / "c.jsonl")]), 0)      # both within the bound of 98%
+
+    def test_a_scene_frame_the_capture_does_not_have(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = self.make(d)
+            data = bytearray((d / "p.f2np").read_bytes())
+            data[8:16] = (999).to_bytes(8, "little")
+            (d / "p.f2np").write_bytes(bytes(data))
+            result = ip.used(d / "p.f2np", d / "c.jsonl")
+            self.assertIsNone(result["paired_frame"])
+            self.assertEqual(result["pictures"][0]["equal"], {1: 1.0, 2: 65535 / 65536})
+
+
 if __name__ == "__main__":
     unittest.main()

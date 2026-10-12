@@ -6,6 +6,8 @@
 
 #include <rex/logging.h>
 
+#include "../../core/readback_force_list.h"
+#include "../capture/guest_read.h"
 #include "../capture/xdk_hook_ids.h"
 #include "../fable2_native_shaders.h"
 
@@ -45,6 +47,31 @@ constexpr uint32_t kQuadParamConstants = 0, kQuadParamFrame = 1, kQuadParamTextu
 // address; the picture at t0 of the pixel stage; the four static samplers.
 constexpr uint32_t kImpostorParamConstants = 0, kImpostorParamFrame = 1, kImpostorParamWords = 2, kImpostorParamPicture = 3;
 static_assert(sizeof(ClayImpostorConstants) == shaders::kClayImpostorSize && kClayImpostorWordBytes == 4 * sizeof(float));
+// A picture's four levels in the frame's staging buffer (ReadImpostorPicture): where each lies from the picture's
+// start, and its rows' pitch (a copy's row pitch is a multiple of nrhi::kRowPitchAlignment: the 32-texel level's
+// rows are padded to it). kImpostorStageBytes a picture, fourteen pictures a buffer.
+constexpr uint32_t kImpostorStageOffset[kImpostorPictureLevels] = {0, 262144, 327680, 344064};
+constexpr uint32_t kImpostorStagePitch[kImpostorPictureLevels] = {1024, 512, 256, 256};
+constexpr uint32_t kImpostorStageBytes = 352256;
+constexpr uint64_t kImpostorStagingBytes = uint64_t(kImpostorStageBytes) * fable2::kImpostorPictures;
+static_assert(kImpostorStagePitch[0] % nrhi::kRowPitchAlignment == 0 && kImpostorStagePitch[1] % nrhi::kRowPitchAlignment == 0 &&
+              kImpostorStagePitch[2] % nrhi::kRowPitchAlignment == 0 && kImpostorStagePitch[3] % nrhi::kRowPitchAlignment == 0);
+static_assert(kImpostorStageOffset[1] == 256 * kImpostorStagePitch[0] && kImpostorStageOffset[2] == kImpostorStageOffset[1] + 128 * kImpostorStagePitch[1] &&
+              kImpostorStageOffset[3] == kImpostorStageOffset[2] + 64 * kImpostorStagePitch[2] &&
+              kImpostorStageBytes == kImpostorStageOffset[3] + 32 * kImpostorStagePitch[3] && kImpostorStageBytes % 512 == 0);
+static_assert(fable2::kImpostorPictures == 14 && kImpostorPictureSize == 256 && kImpostorPictureLevels == 4 &&
+              kImpostorPicturesMax == capture::kMaxImpostorRecords);
+// The view's component for a fetch swizzle's selector (0 to 3 a channel, 4 zero, 5 one), as the texture cache's.
+nrhi::Swizzle ImpostorViewSwizzle(uint8_t s) {
+  switch (s) {
+    case 0: return nrhi::Swizzle::kX;
+    case 1: return nrhi::Swizzle::kY;
+    case 2: return nrhi::Swizzle::kZ;
+    case 3: return nrhi::Swizzle::kW;
+    case 5: return nrhi::Swizzle::kOne;
+    default: return nrhi::Swizzle::kZero;
+  }
+}
 static_assert(kQuadTableSize <= nrhi::kMaxTextureTableSize && kClayQuadSlots * kClayTerrainSlotBytes >= sizeof(ClayQuadConstants) &&
               std::size(capture::kQuadIndices) == 6);
 // The oracle feed (post_oracle.h): its scene is the pass's logical size, as a texture of four halves a
@@ -2120,7 +2147,152 @@ bool ClayPass::EnsureQuadObjects(nrhi::Device* dev) {
   return true;
 }
 
+void ClayPass::ForgetImpostorPictures() {
+  for (ImpostorPictureTexture& p : impostor_pictures_) {
+    p.texture = nullptr;
+    p.view = nullptr;
+    p.filled = p.shader_state = false;
+    p.hash = 0;
+    p.judged = 0;
+    p.state = ImpostorPicture::kNone;
+  }
+  impostor_staging_destroy_.clear();
+  impostor_staging_pool_.Drain(&impostor_staging_destroy_);
+  impostor_staging_destroy_.clear();
+  impostor_staging_ = nullptr;
+  impostor_staging_mapped_ = nullptr;
+  impostor_upload_count_ = 0;
+}
+
+void ClayPass::DestroyImpostorPictures() {
+  if (device_) {
+    for (ImpostorPictureTexture& p : impostor_pictures_) {
+      device_->DestroyDeferred(p.view);
+      device_->DestroyDeferred(p.texture);
+    }
+    impostor_staging_destroy_.clear();
+    impostor_staging_pool_.Drain(&impostor_staging_destroy_);
+    for (nrhi::Buffer* b : impostor_staging_destroy_) device_->DestroyDeferred(b);
+    impostor_staging_destroy_.clear();
+    if (impostor_staging_) {
+      if (impostor_staging_mapped_) device_->Unmap(impostor_staging_);
+      device_->DestroyDeferred(impostor_staging_);
+    }
+  }
+  ForgetImpostorPictures();
+}
+
+ImpostorPicture ClayPass::ReadImpostorPicture(nrhi::Device* dev, const capture::ImpostorRecord& r, uint32_t* picture, uint32_t* sampler,
+                                              ClayStats& st) {
+  *picture = 0;
+  *sampler = 0;
+  if (!impostor_pictures_available_) return ImpostorPicture::kBase;
+  TextureFetch t;
+  TexFormatInfo fi;
+  if (!DumpFetch(r.fetch, &t, &fi)) return ImpostorPicture::kBase;
+  const int n = ImpostorPictureSlot(t.base_phys, fable2::kImpostorPictureBase, fable2::kImpostorPictureStep, fable2::kImpostorPictures);
+  if (n < 0) return ImpostorPicture::kBase;
+  *picture = uint32_t(n);
+  *sampler = SamplerIndex(t);
+  ImpostorPictureTexture& p = impostor_pictures_[n];
+  const uint32_t swizzle = (r.fetch[3] >> 1) & 0xFFFu;
+  // (a base is judged once a Render; a second record of the same base takes the first's verdict, and is refused
+  // if its fetch names another swizzle than the view was made with: the capture holds every record to one)
+  if (p.judged == impostor_picture_serial_) return p.state == ImpostorPicture::kUsable && p.swizzle != swizzle ? ImpostorPicture::kUpload : p.state;
+  p.judged = impostor_picture_serial_;
+  auto verdict = [&](ImpostorPicture state) {
+    p.state = state;
+    return state;
+  };
+  if (t.xenos_format != 3 || t.width != kImpostorPictureSize || t.height != kImpostorPictureSize) return verdict(ImpostorPicture::kUnread);
+  const uint8_t* guest = capture::ReadPhysical(t.base_phys, uint32_t(kImpostorBaseBytes));
+  if (!guest) return verdict(ImpostorPicture::kUnread);
+  // Copied before it is judged: the bytes are the guest's, and what is hashed, decoded and uploaded is this copy.
+  impostor_guest_.resize(kImpostorBaseBytes);
+  std::memcpy(impostor_guest_.data(), guest, kImpostorBaseBytes);
+  const uint64_t hash = SampleHash(impostor_guest_.data(), uint32_t(kImpostorBaseBytes));
+  if (p.filled && p.texture && p.view && p.hash == hash && p.swizzle == swizzle) {
+    ++st.impostor_pictures;
+    return verdict(ImpostorPicture::kUsable);
+  }
+  const size_t rgba_bytes = size_t(kImpostorPictureSize) * kImpostorPictureSize * 4;
+  uint32_t covered = 0;
+  if (t.tiled && t.endian == 1 && t.pitch_texels == kImpostorPictureSize) {
+    impostor_decoded_.resize(rgba_bytes);
+    if (!DecodeImpostorBase(impostor_guest_.data(), kImpostorBaseBytes, impostor_decoded_.data(), &covered)) return verdict(ImpostorPicture::kUnread);
+  } else {
+    // (another layout than every captured picture's: the reference decoder, a texel at a time)
+    if (!Decode1555Level(impostor_guest_.data(), kImpostorBaseBytes, t.width, t.height, t.pitch_texels, t.tiled, t.endian, &impostor_decoded_) ||
+        impostor_decoded_.size() != rgba_bytes) {
+      return verdict(ImpostorPicture::kUnread);
+    }
+    covered = MeasureImpostorPicture(impostor_decoded_.data(), rgba_bytes).covered;
+  }
+  ImpostorPictureStats stats;
+  stats.ring_clear = ImpostorRingClear(impostor_decoded_.data(), rgba_bytes);
+  stats.covered = covered;
+  if (!ImpostorPictureUsable(stats)) return verdict(ImpostorPicture::kContent);
+  if (!MakeImpostorLevels(impostor_decoded_.data(), rgba_bytes, impostor_levels_)) return verdict(ImpostorPicture::kUnread);
+  // The texture and its view (once a base; the view again for another swizzle), and this frame's staging buffer.
+  if (!p.texture) {
+    nrhi::TextureDesc td;
+    td.kind = nrhi::TextureKind::k2D;
+    td.width = td.height = kImpostorPictureSize;
+    td.mip_levels = kImpostorPictureLevels;
+    td.format = nrhi::Format::kR8G8B8A8_UNORM;
+    td.initial_state = nrhi::ResourceState::kCopyDest;
+    p.texture = dev->CreateTexture(td);
+    p.shader_state = false;
+    p.filled = false;
+    if (!p.texture) return verdict(ImpostorPicture::kUpload);
+  }
+  if (!p.view || p.swizzle != swizzle) {
+    if (p.view) dev->DestroyDeferred(p.view);
+    nrhi::TextureViewDesc vd;
+    vd.dimension = nrhi::ViewDimension::k2D;
+    vd.format = nrhi::Format::kUnknown;
+    vd.base_mip = 0;
+    vd.mip_levels = ~0u;
+    for (int i = 0; i < 4; ++i) vd.swizzle[i] = ImpostorViewSwizzle(t.swizzle[i]);
+    p.view = dev->CreateTextureView(p.texture, vd);
+    p.swizzle = swizzle;
+    if (!p.view) return verdict(ImpostorPicture::kUpload);
+  }
+  if (!impostor_staging_) {
+    if (auto reused = impostor_staging_pool_.Take(kImpostorStagingBytes, dev->CompletedSubmission())) {
+      impostor_staging_ = *reused;
+    } else {
+      nrhi::BufferDesc bd;
+      bd.size = kImpostorStagingBytes;
+      bd.heap = nrhi::HeapKind::kUpload;
+      bd.bind_class = nrhi::BufferBindClass::kCopySrc;
+      impostor_staging_ = dev->CreateBuffer(bd);
+    }
+    impostor_staging_mapped_ = impostor_staging_ ? static_cast<uint8_t*>(dev->Map(impostor_staging_)) : nullptr;
+    if (!impostor_staging_mapped_) {
+      dev->DestroyDeferred(impostor_staging_);
+      impostor_staging_ = nullptr;
+    }
+  }
+  if (!impostor_staging_mapped_ || impostor_upload_count_ >= fable2::kImpostorPictures) return verdict(ImpostorPicture::kUpload);
+  uint8_t* stage = impostor_staging_mapped_ + size_t(impostor_upload_count_) * kImpostorStageBytes;
+  std::memcpy(stage + kImpostorStageOffset[0], impostor_decoded_.data(), rgba_bytes);
+  std::memcpy(stage + kImpostorStageOffset[1], impostor_levels_[0].data(), impostor_levels_[0].size());
+  std::memcpy(stage + kImpostorStageOffset[2], impostor_levels_[1].data(), impostor_levels_[1].size());
+  for (uint32_t y = 0; y < 32; ++y) {   // (rows of 128 bytes at a pitch of 256)
+    std::memcpy(stage + kImpostorStageOffset[3] + size_t(y) * kImpostorStagePitch[3], impostor_levels_[2].data() + size_t(y) * 128, 128);
+  }
+  impostor_uploads_[impostor_upload_count_++] = uint32_t(n);
+  p.base.swap(impostor_decoded_);
+  p.hash = hash;
+  p.filled = true;
+  ++st.impostor_pictures;
+  ++st.impostor_refreshed;
+  return verdict(ImpostorPicture::kUsable);
+}
+
 void ClayPass::ForgetImpostorObjects() {
+  ForgetImpostorPictures();
   impostor_vs_ = impostor_ps_ = nullptr;
   impostor_pipeline_ = nullptr;
   impostor_flat_ = nullptr;
@@ -2130,6 +2302,7 @@ void ClayPass::ForgetImpostorObjects() {
 }
 
 void ClayPass::DestroyImpostorObjects() {
+  DestroyImpostorPictures();
   if (device_) {
     device_->DestroyDeferred(impostor_pipeline_);
     device_->DestroyDeferred(impostor_vs_);
@@ -2926,6 +3099,14 @@ void ClayPass::DumpLayerPlane(nrhi::Cmd* cmd, nrhi::Device* dev, size_t index) {
   scene_dump_submission_ = dev->CurrentSubmission();
 }
 
+bool ClayPass::TakeImpostorPictures(std::vector<uint8_t>* file) {
+  if (!file || !impostor_dump_ready_) return false;
+  impostor_dump_ready_ = false;
+  file->swap(impostor_dump_file_);
+  impostor_dump_file_ = {};
+  return !file->empty();
+}
+
 bool ClayPass::TakeSceneDump(nrhi::Device* dev, std::vector<uint8_t>* file) {
   if (scene_dump_state_ != SceneDumpState::kPending || !file || dev != device_) return false;
   if (dev->CompletedSubmission() < scene_dump_submission_) return false;  // (the copies have not run yet)
@@ -2972,9 +3153,14 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   if (!ready_ || dev != device_) return;
   // The frame's impostors: the switch as it is now, in a scene captured with it (ClayImpostorMode). Off: nothing
   // below makes an object, reserves a slot, binds or draws anything of the step, and the frame's slot plan is
-  // the one of before. `on`: this build has no pictures; nothing is drawn and every record is counted
-  // "picture: unread" (ledger rulings 23 and 31). `flat`: the step's objects are asked here, on the first frame
-  // that has a record, before FinishTerrain sizes the frame's buffer with the step's slots.
+  // the one of before. `flat`: the step's objects are asked here, on the first frame that has a record, before
+  // FinishTerrain sizes the frame's buffer with the step's slots. `on`: each record's picture is read and judged
+  // here first (ReadImpostorPicture); a record without a usable picture is counted by its reason and is not
+  // drawn, and the step's objects are asked only in a frame with at least one usable picture.
+  // (per record, `on` alone: whether its picture is usable, which of the fourteen it is, its fetch's sampler)
+  bool impostor_usable[capture::kMaxImpostorRecords] = {};
+  uint8_t impostor_picture[capture::kMaxImpostorRecords] = {}, impostor_sampler[capture::kMaxImpostorRecords] = {};
+  uint32_t impostor_usable_count = 0;
   const capture::ImpostorMode impostor_mode = ClayImpostorMode(impostors, scene.impostor_mode);
   st.impostor_mode = impostor_mode;
   impostor_step_slots_ = 0;
@@ -2983,17 +3169,47 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     st.impostors_seen = scene.impostor_seen;
     for (size_t i = 0; i < size_t(capture::ImpostorReason::kCount); ++i) st.impostor_capture[i] = scene.impostor_refused[i];
     if (!scene.impostors.empty()) {
-      const ClayImpostorSkip picture = DecideImpostorPicture(impostor_mode, ImpostorPicture::kNone);
-      if (picture != ClayImpostorSkip::kNone) {
-        st.impostor_skip[size_t(picture)] += uint32_t(scene.impostors.size());
-      } else if (!EnsureImpostorObjects(dev)) {
-        st.impostor_skip[size_t(ClayImpostorSkip::kPipeline)] += uint32_t(scene.impostors.size());
+      // The records the step may draw: in `flat` all of them; in `on` those whose picture is usable, each of the
+      // others counted by its picture's reason here and never drawn.
+      uint32_t drawable = 0;
+      if (impostor_mode == capture::ImpostorMode::kOn) {
+        const auto pictures_begin = std::chrono::steady_clock::now();
+        ++impostor_picture_serial_;
+        for (size_t i = 0; i < scene.impostors.size(); ++i) {
+          ImpostorPicture state = ImpostorPicture::kNone;   // (a record past the bound: no picture is read for it)
+          uint32_t which = 0, sampler = 0;
+          if (i < capture::kMaxImpostorRecords) state = ReadImpostorPicture(dev, scene.impostors[i], &which, &sampler, st);
+          const ClayImpostorSkip picture = DecideImpostorPicture(impostor_mode, state);
+          if (picture != ClayImpostorSkip::kNone) {
+            ++st.impostor_skip[size_t(picture)];
+            continue;
+          }
+          impostor_usable[i] = true;
+          impostor_picture[i] = uint8_t(which);
+          impostor_sampler[i] = uint8_t(sampler);
+          ++impostor_usable_count;
+        }
+        st.impostor_picture_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - pictures_begin).count();
+        drawable = impostor_usable_count;
       } else {
+        const ClayImpostorSkip picture = DecideImpostorPicture(impostor_mode, ImpostorPicture::kNone);
+        if (picture != ClayImpostorSkip::kNone) {
+          st.impostor_skip[size_t(picture)] += uint32_t(scene.impostors.size());
+        } else {
+          drawable = uint32_t(scene.impostors.size());
+        }
+      }
+      if (drawable && !EnsureImpostorObjects(dev)) {
+        st.impostor_skip[size_t(ClayImpostorSkip::kPipeline)] += drawable;
+        impostor_usable_count = 0;
+        for (bool& usable : impostor_usable) usable = false;
+      } else if (drawable) {
         impostor_step = true;
         impostor_step_slots_ = kClayImpostorStepSlots;
       }
     }
   }
+  const bool impostor_pictures_on = impostor_mode == capture::ImpostorMode::kOn;
   // The frame's coverage: the switch as it is now. Without it nothing below asks for the half
   // program or a half key, and the colour pass's order is SkyPlace's.
   st.coverage_switch = coverage;
@@ -3829,6 +4045,42 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     dev->DestroyDeferred(impostor_flat_staging_);
     impostor_flat_staging_ = nullptr;
   }
+  // (and this frame's pictures, staged by ReadImpostorPicture at the head of this Render: four levels a picture
+  // from the frame's staging buffer, which goes back to its pool for the submissions after this one)
+  if (impostor_staging_) {
+    if (impostor_staging_mapped_) dev->Unmap(impostor_staging_);
+    impostor_staging_mapped_ = nullptr;
+    if (impostor_upload_count_) {
+      for (uint32_t u = 0; u < impostor_upload_count_; ++u) {
+        ImpostorPictureTexture& p = impostor_pictures_[impostor_uploads_[u]];
+        if (p.shader_state) cmd->Barrier(p.texture, nrhi::ResourceState::kPixelShaderResource, nrhi::ResourceState::kCopyDest);
+      }
+      cmd->FlushBarriers();
+      for (uint32_t u = 0; u < impostor_upload_count_; ++u) {
+        ImpostorPictureTexture& p = impostor_pictures_[impostor_uploads_[u]];
+        for (uint32_t lv = 0; lv < kImpostorPictureLevels; ++lv) {
+          cmd->CopyBufferToTexture(p.texture, lv, 0, impostor_staging_, uint64_t(u) * kImpostorStageBytes + kImpostorStageOffset[lv],
+                                   kImpostorStagePitch[lv], kImpostorPictureSize >> lv, kImpostorPictureSize >> lv, 1);
+        }
+        cmd->Barrier(p.texture, nrhi::ResourceState::kCopyDest, nrhi::ResourceState::kPixelShaderResource);
+        p.shader_state = true;
+      }
+      cmd->FlushBarriers();
+      if (!impostor_first_upload_logged_) {
+        impostor_first_upload_logged_ = true;
+        REXLOG_INFO("[native] clay: impostor pictures: first upload at scene frame {}: {} pictures decoded from guest memory and uploaded "
+                    "(256 x 256 R8G8B8A8, four levels each, {} bytes a picture in a staging buffer of {} bytes), {} of {} records with a "
+                    "usable picture",
+                    scene.frame, impostor_upload_count_, kImpostorStageBytes, kImpostorStagingBytes, impostor_usable_count, scene.impostors.size());
+      }
+    }
+    impostor_staging_destroy_.clear();
+    impostor_staging_pool_.Retire(impostor_staging_, kImpostorStagingBytes, dev->CurrentSubmission(), &impostor_staging_destroy_);
+    for (nrhi::Buffer* b : impostor_staging_destroy_) dev->DestroyDeferred(b);
+    impostor_staging_destroy_.clear();
+    impostor_staging_ = nullptr;
+    impostor_upload_count_ = 0;
+  }
 
   // The frame's mask: drawn only for a lit frame of its own valid block which has one inverse
   // view-projection, an eye and the frame's constant buffer (mask_decision, above; the maps are
@@ -4162,6 +4414,8 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   // slots and the frame's quad words into their region of the frame's buffer, whole, once.
   struct ImpostorDraw {
     uint32_t slot = 0, quads = 0;
+    nrhi::TextureView* view = nullptr;   // the flat picture, or (`on`) the record's own
+    uint32_t record = 0;
   };
   ImpostorDraw impostor_draws[capture::kMaxImpostorRecords];
   uint32_t impostor_draw_count = 0;
@@ -4185,7 +4439,8 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       all = ClayImpostorSkip::kPlace;
     }
     if (all != ClayImpostorSkip::kNone) {
-      st.impostor_skip[size_t(all)] += uint32_t(scene.impostors.size());
+      // (`on`: the records without a usable picture were counted at the head, by their own reason)
+      st.impostor_skip[size_t(all)] += impostor_pictures_on ? impostor_usable_count : uint32_t(scene.impostors.size());
     } else {
       // (the frame's output scale: the lit draws' exposure, which in a post frame is the game's c20.w; a frame
       // without light has none, and its records are refused)
@@ -4194,17 +4449,30 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       for (size_t i = 0; i < scene.impostors.size(); ++i) {
         const capture::ImpostorRecord& r = scene.impostors[i];
         ClayImpostorConstants constants{};
+        // (`on`: a record without a usable picture is not drawn, and was counted by its reason at the head; no
+        // flat quad stands in for it)
+        const bool with_picture = impostor_pictures_on && i < records && impostor_usable[i];
+        if (impostor_pictures_on && !with_picture) continue;
         if (i >= records || !ImpostorWordsHeld(r, word_floats)) {
           ++st.impostor_skip[size_t(ClayImpostorSkip::kBuffer)];
           continue;
         }
-        if (!MakeClayImpostorConstants(r, out_scale, post_frame, fog_on, kImpostorKeepFirst, 0, &constants)) {
+        // (the kept set: the first sample's, drawn whole, under either value of the coverage's switch: ledger
+        // rulings 13 and 35; the sampler: the record's fetch's with its picture, the flat texel's otherwise)
+        if (!MakeClayImpostorConstants(r, out_scale, post_frame, fog_on, kImpostorKeepFirst, with_picture ? impostor_sampler[i] : 0u, &constants)) {
           ++st.impostor_skip[size_t(ClayImpostorSkip::kScale)];
+          continue;
+        }
+        nrhi::TextureView* view = with_picture ? impostor_pictures_[impostor_picture[i]].view : impostor_flat_view_;
+        if (!view) {   // (cannot be: a usable picture has its view, and the flat picture is the step's own)
+          ++st.impostor_skip[size_t(with_picture ? ClayImpostorSkip::kPictureUpload : ClayImpostorSkip::kPipeline)];
           continue;
         }
         ImpostorDraw& d = impostor_draws[impostor_draw_count++];
         d.slot = impostor_slot0_ + kClayImpostorSlots * uint32_t(i);
         d.quads = r.quads;
+        d.view = view;
+        d.record = uint32_t(i);
         std::memcpy(terrain_cb_mapped_ + ClaySmallSlotOffset(d.slot), &constants, sizeof(constants));
       }
       if (impostor_draw_count) {
@@ -4224,6 +4492,17 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     }
   }
   colour_order.impostors_at = impostor_at;
+  // (the pictures of the records the step draws, kept for the pictures' file should this frame be dumped)
+  ImpostorPictureEntry impostor_dump_entries[capture::kMaxImpostorRecords];
+  uint32_t impostor_dump_count = 0;
+  if (impostor_pictures_on) {
+    for (uint32_t i = 0; i < impostor_draw_count && impostor_at != ~size_t(0); ++i) {
+      const capture::ImpostorRecord& r = scene.impostors[impostor_draws[i].record];
+      const ImpostorPictureTexture& p = impostor_pictures_[impostor_picture[impostor_draws[i].record]];
+      if (p.base.size() != kImpostorPictureBytes) continue;
+      impostor_dump_entries[impostor_dump_count++] = ImpostorPictureEntry{{r.fetch[1] & 0xFFFFF000u, r.place, p.hash}, p.base.data()};
+    }
+  }
   auto draw_impostors = [&] {
     if (!impostor_draw_count) return;
     cmd->SetBindingLayout(impostor_layout_);
@@ -4231,9 +4510,13 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
     cmd->SetConstantBuffer(kImpostorParamFrame, terrain_cb_, 0);
     cmd->SetBufferSrv(kImpostorParamWords, terrain_cb_, ClaySmallSlotOffset(impostor_words_slot_));
-    cmd->SetTexture(kImpostorParamPicture, impostor_flat_view_);
+    nrhi::TextureView* picture_bound = nullptr;
     for (uint32_t i = 0; i < impostor_draw_count; ++i) {
       const ImpostorDraw& d = impostor_draws[i];
+      if (d.view != picture_bound) {
+        cmd->SetTexture(kImpostorParamPicture, d.view);
+        picture_bound = d.view;
+      }
       cmd->SetConstantBuffer(kImpostorParamConstants, terrain_cb_, ClaySmallSlotOffset(d.slot));
       cmd->Draw(6 * d.quads, 0);
       ++st.impostors_drawn;
@@ -4435,6 +4718,15 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   bool scene_dumping = false;
   if (scene_dump_state_ == SceneDumpState::kAsked && SceneDumpDue(scene_dump_asked_, scene.frame)) {
     scene_dumping = BeginSceneDump(cmd, dev, scene, (post_frame ? kSceneDumpPost : 0u) | (mask == ClayMask::kDrawn ? kSceneDumpPrepass : 0u));
+  }
+  // The pictures' file (criterion 6): when this Render has just started a scene dump of this very frame, in `on`, the
+  // pictures its step drew, as they were uploaded. (A diagnostic: never reached without the scene dump's switch.)
+  if (scene_dumping && impostor_pictures_on && scene_dump_state_ == SceneDumpState::kPending && scene_dump_head_.scene_frame == scene.frame &&
+      impostor_dump_frame_ != scene.frame) {
+    impostor_dump_frame_ = scene.frame;
+    impostor_dump_ready_ = PackImpostorPictures(scene.frame, impostor_dump_entries, impostor_dump_count, &impostor_dump_file_);
+    REXLOG_INFO("[native] clay: impostor pictures: scene frame {}: {} pictures of {} drawn records kept for the dump's pictures file{}",
+                scene.frame, impostor_dump_count, st.impostors_drawn, impostor_dump_ready_ ? "" : " (refused: no file)");
   }
   if (post_frame) {
     // A post frame (DecideClayPost: with the steps' objects and the frame's constant buffer, whose post

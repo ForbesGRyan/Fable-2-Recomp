@@ -5,6 +5,7 @@
 // tests/native/test_texture_decode.cpp wrote beside it (<bin>.cpp.rgba); this test writes <bin>.cpp.levels (the
 // three levels, one after another) and <bin>.cpp.stats for tests/test_impostor_pictures.py.
 #include "../../src/native/render/impostor_picture.h"
+#include "../../src/native/render/texture_decode.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -114,6 +115,60 @@ int main() {
   for (uint32_t v = 0; v < 32; ++v) {
     std::fill(base.begin(), base.end(), Byte(v));
     if (!MakeImpostorLevels(base.data(), n, levels) || levels[0][0] != Byte(v) || levels[2][5] != Byte(v)) return 36;
+  }
+
+  // The pass's own decoder of a base (plan Task 14: fourteen pictures every frame): DecodeImpostorBase against
+  // render::Decode1555Level, the reference, on made bytes of every kind; and the levels against a plain reading of
+  // their rule written out here.
+  {
+    const ImpostorPictureLayout& layout = ImpostorPictureLayoutOnce();
+    if (!layout.ok) return 50;
+    std::vector<uint8_t> src(kImpostorBaseBytes), fast(n, 0xEE), slow;
+    if (kImpostorBaseBytes != 131072u) return 51;
+    uint32_t seed = 0x1234567u;
+    auto next = [&] { seed = seed * 1664525u + 1013904223u; return uint8_t(seed >> 24); };
+    for (int round = 0; round < 6; ++round) {
+      for (uint8_t& b : src) b = round == 0 ? uint8_t(0) : round == 1 ? uint8_t(0xFF) : next();
+      if (round == 5) for (size_t i = 0; i < src.size(); i += 2) { src[i] = uint8_t(i >> 9); src[i + 1] = uint8_t(i >> 1); }   // every word value
+      uint32_t covered = 77;
+      if (!DecodeImpostorBase(src.data(), src.size(), fast.data(), &covered)) return 52;
+      if (!Decode1555Level(src.data(), src.size(), 256, 256, 256, true, 1, &slow) || slow.size() != n) return 53;
+      if (std::memcmp(fast.data(), slow.data(), n) != 0) return 54;
+      if (covered != MeasureImpostorPicture(slow.data(), n).covered) return 55;
+      // (the ring alone, for the pass: the decoder already counted the covered texels)
+      if (ImpostorRingClear(fast.data(), n) != MeasureImpostorPicture(slow.data(), n).ring_clear || ImpostorRingClear(fast.data(), n - 4) != 0 ||
+          ImpostorRingClear(nullptr, n) != 0) return 61;
+      // the levels, by the rule written plainly: five bits a channel, the mean of four with a half up, three of four
+      if (!MakeImpostorLevels(slow.data(), n, levels)) return 56;
+      const uint8_t* above = slow.data();
+      uint32_t edge = 256;
+      for (uint32_t k = 0; k < 3; ++k) {
+        const uint32_t half = edge / 2;
+        for (uint32_t y = 0; y < half; ++y) {
+          for (uint32_t x = 0; x < half; ++x) {
+            uint32_t sum[3] = {}, on = 0;
+            for (uint32_t q = 0; q < 4; ++q) {
+              const uint8_t* t4 = above + ((size_t(2 * y + (q >> 1)) * edge) + 2 * x + (q & 1)) * 4;
+              for (uint32_t c = 0; c < 3; ++c) sum[c] += (uint32_t(t4[c]) * 31 + 127) / 255;
+              on += t4[3] != 0;
+            }
+            const uint8_t* got = &levels[k][(size_t(y) * half + x) * 4];
+            for (uint32_t c = 0; c < 3; ++c) if (got[c] != Byte((2 * sum[c] + 4) / 8)) return 57;
+            if (got[3] != (on >= 3 ? 255 : 0)) return 58;
+          }
+        }
+        above = levels[k].data();
+        edge = half;
+      }
+    }
+    uint32_t covered = 5;
+    if (DecodeImpostorBase(src.data(), src.size() - 1, fast.data(), &covered) || DecodeImpostorBase(nullptr, src.size(), fast.data(), &covered) ||
+        DecodeImpostorBase(src.data(), src.size(), nullptr, &covered) || DecodeImpostorBase(src.data(), src.size() + 2, fast.data(), &covered)) return 59;
+    // The layout itself: every texel's bytes where render::TiledOffset2D puts them.
+    for (uint32_t r = 0; r < 8192; ++r) {
+      const uint32_t texel = layout.run_texel[r], x = texel & 255, y = texel >> 8;
+      if ((x & 7) != 0 || uint32_t(fable2::native::capture::TiledOffset2D(int32_t(x), int32_t(y), 256, 1)) != r * 16) return 60;
+    }
   }
 
   const char* bin = std::getenv("FABLE2_1555_BIN");

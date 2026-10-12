@@ -119,10 +119,13 @@ REXCVAR_DEFINE_STRING(fable2_native_impostors, "off", "Fable2",
                       "with pixel shader 4B1D through BeginVertices in the main scene: its registers, fetch constants, "
                       "state words and the quads' words) into a bounded block of the frame, at most 32 draws and 4,096 "
                       "quads, a draw whole or missing with a counted reason (the capture log's impostors line); they "
-                      "are meant to be drawn as quads of one flat colour. on (or true, 1) = the game's own pictures, "
-                      "which this build does not have: it captures as flat does and draws no impostor (each record "
-                      "counted \"picture: unread\"). off (or false, 0; the default) = none of it is read, made or "
-                      "drawn, and the log has the one line \"impostors: off\".");
+                      "are drawn as quads of one flat colour. on (or true, 1) = the game's own picture of each tree "
+                      "model on its quads: from start-up the emulator is asked to read the fourteen pictures back to "
+                      "guest memory every frame (the seeded readback_resolve_force_addresses gains their bases), and "
+                      "the native view decodes and uploads each picture that changed; a record without a usable "
+                      "picture is not drawn (counted \"picture: base, unread, content or upload\"), never a flat "
+                      "quad. off (or false, 0; the default) = none of it is read, made or drawn, and the log has "
+                      "the one line \"impostors: off\".");
 REXCVAR_DEFINE_STRING(fable2_native_coverage, "off", "Fable2",
                       "Native coverage (sub-project 11, phase 11b; default off until the user's checks: frame map section "
                       "18, \"Validation (11b)\"): on (or true, 1) = the native view "
@@ -562,6 +565,21 @@ void WriteSceneDump(nrhi::Device* device) {
   const bool ok = fp && std::fwrite(file.data(), 1, file.size(), fp) == file.size();
   if (fp) std::fclose(fp);
   const render::SceneDumpHeader& head = g_clay->scene_dump_head();
+  // The impostors' pictures of that frame (fable2_native_impostors=on alone): the same name with .f2np.
+  std::vector<uint8_t> pictures;
+  if (ok && g_clay->TakeImpostorPictures(&pictures)) {
+    std::filesystem::path beside = full;
+    beside.replace_extension(L".f2np");
+    std::FILE* pp = _wfopen(beside.c_str(), L"wb");
+    const bool written = pp && std::fwrite(pictures.data(), 1, pictures.size(), pp) == pictures.size();
+    if (pp) std::fclose(pp);
+    if (written) {
+      REXLOG_INFO("[native] scene dump: the impostors' pictures of frame {} -> logs/{} ({} bytes)", g_clay->scene_dump_head().scene_frame,
+                  beside.filename().string(), pictures.size());
+    } else {
+      REXLOG_ERROR("[native] scene dump: refused (write): logs/{} could not be written ({} bytes)", beside.filename().string(), pictures.size());
+    }
+  }
   if (ok) {
     REXLOG_INFO("[native] scene dump: frame {} (asked {}), flags {}, bad values {} -> logs/{} ({} bytes, {} x {}, exposure {:.5f}; "
                 "file {} of at most {} this run)", head.scene_frame, head.asked_frame, head.flags, head.bad_values, name, file.size(),
@@ -757,6 +775,8 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
       g_clay->RequestSceneDump(first);
     }
   }
+  // (the pictures' availability is decided once, at the first frame drawn with the switch at `on`)
+  if (CurrentImpostors() == capture::ImpostorMode::kOn) g_clay->SetImpostorPicturesAvailable(ImpostorPicturesAvailable());
   g_clay->Render(ctx.cmd, ctx.device, *scene, CurrentClayColor(), textures, CurrentClayLight(), CurrentShadows(), CurrentFog(), CurrentWind(), CurrentCoverage(),
                  CurrentImpostors(), post, st, tst);
   g_shadows_usable.store(g_clay->shadows_usable(), std::memory_order_relaxed);
@@ -827,7 +847,11 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
     if (st.coverage_switch) REXLOG_INFO("[native] clay: {}", render::FormatCoverageText(st));
     // The impostors likewise: only with the mode not off (the step drawn, the records not drawn by reason, the
     // calls without a record by the capture's reason).
-    if (st.impostor_mode != capture::ImpostorMode::kOff) REXLOG_INFO("[native] clay: {}", render::FormatImpostorText(st));
+    if (st.impostor_mode == capture::ImpostorMode::kOn) {
+      REXLOG_INFO("[native] clay: {} | the pictures' CPU time this frame {:.3f} ms", render::FormatImpostorText(st), st.impostor_picture_ms);
+    } else if (st.impostor_mode != capture::ImpostorMode::kOff) {
+      REXLOG_INFO("[native] clay: {}", render::FormatImpostorText(st));
+    }
     if (const std::string by_vs = render::FormatShadowSkippedByVs(st); !by_vs.empty()) {
       REXLOG_INFO("[native] clay: shadow draws skipped by vs {{{}}}", by_vs);
     }
@@ -1062,14 +1086,14 @@ void Install(rex::memory::Memory* memory) {
     REXLOG_INFO("[native] coverage: on (fable2_native_coverage; the native view draws a coverage record's half-covered pixels at one half "
                 "over what lies behind: a late record's in its place, an early record's in a tail after the opaque records)");
   }
-  // The impostors' line always (spec criterion 13 names the off line). `on` is the pictures by read-back, which
-  // this build does not have (the ledger's ruling 31: phase 12c was not entered): it captures as `flat` does and
-  // draws no impostor (ruling 23).
+  // The impostors' line always (spec criterion 13 names the off line). `on` is the pictures by read-back (phase
+  // 12c): the capture is `flat`'s, the pass draws each record with its picture or not at all.
   {
     const capture::ImpostorMode impostors = CurrentImpostors();
     if (impostors == capture::ImpostorMode::kOn) {
-      REXLOG_INFO("[native] impostors: on (no pictures in this build: nothing is drawn) (fable2_native_impostors; the far woods' "
-                  "draws are captured as with flat and every record is counted \"picture: unread\")");
+      REXLOG_INFO("[native] impostors: on (fable2_native_impostors; the far woods' draws are captured as with flat and each is drawn "
+                  "with the game's own picture of its tree model, read back to guest memory by the seeded list of fourteen bases; a "
+                  "record without a usable picture is not drawn and is counted \"picture: base, unread, content or upload\")");
     } else {
       REXLOG_INFO("[native] impostors: {} (fable2_native_impostors)", capture::ImpostorModeName(impostors));
     }

@@ -856,6 +856,8 @@ Capture: `.\tools\drive_game.ps1 -Total 180 -GameArgs "--dump_shaders=C:\Users\R
 
 **Table state since sub-project 6 (added 2026-10-06; section 13, "Alpha and missing shaders").** `0x7CD5...` has an albedo entry (tf0, coordinates from `r1.w` and `r2.w`, by hand) and `A584` a `"uv"` entry; four pixel shaders seen by the trees were added (`0x58D3...`, `0x2FBE...`, `0x1421...`, `0x09CB...`); fourteen entries carry an alpha recipe. `0xA17D...` / `0xF6D9...` are read there as a water-like surface whose colour textures are render-target-like, and stay `no_albedo` with `0x014F...`.
 
+**Dated correction, 2026-10-12 (water Task 19).** The all-zero observation below belongs to earlier dumps. Full-readback water captures now contain slot-13 reflection colour; slot 14 was zero in the earlier standing captures. Task 14 finds some nonzero bytes in new walk dumps without a matching frame resolve, so its intended near-water content remains unknown. `vs-transforms.json` and `ps-albedo.json` remain unchanged: `A17D` / `F6D9` stay `no_albedo`, drawn from their side block (section 20).
+
 Thumbnails (tf0): building-trim and wood-plank atlases, a character-part atlas (faces, eyes, cloth), leaves, ferns, a grass/bark/stone atlas, a feather/fur atlas, an eye iris, a glow sprite and a flame sprite. `no_albedo`: `7CD5...` (only colour fetch tf0 untraceable, scalar co-issue `mulsc`), `014F...` (tf14/tf15 8_8_8_8 all-zero at first use, tf13 8_8 two-channel, likely water), `A17D...`/`F6D9...` (only traced fetch is a single-component `k_8` mask; their 8_8_8_8 fetches are predicated and all-zero at first use). All 8_8_8_8 256x256/128x128 textures of those shaders read as zero bytes when first dumped, so they look like render targets.
 
 **Coverage.** Every in-scene draw has a table decision (17 of 17 shaders, 100%); 12089 of 14391 draws (84.0%) are on albedo shaders (80% was reached at `E99F...`). The draws drawn today are those whose vertex shader has a transform: 6708 (46.6%); of these, 5811 (86.6%) have an albedo entry and a VS `"uv"` entry, the other 897 are `BEAD...` draws with `no_albedo` shaders. The other 7683 draws are on vertex shaders without a transform (characters and instanced foliage `8123`/`B636`, `pos_suspect`; `475E`, `A584`, `7C57`, `48D3`, `29B6`, `775C`, `FC4F`, `6AD4`, `33C0`, `36B5`), so they are not drawn and got no `"uv"`.
@@ -1964,6 +1966,8 @@ Not entered:
 | `0xF525...` | two large leaves `13ED0052` | 63.0% | 39.1% | 35.6% | 59.8% | 40.3% | exchange, u mirror; not v mirror |
 
 The first version of the script gave 45.4%, 75.0%, 85.7%, 66.1% and 74.6% for the entries of rows 1, 2, 3, 6 and 9; those figures are withdrawn.
+
+**Dated correction, 2026-10-12 (water Task 19).** The kills are complementary conditions, but the captured `c141` and every mask put `F6D9` wholly in the killed part. `A17D` alone supplies the visible surface. Both remain `no_albedo`; the water side block supplies the formulas (section 20).
 
 **The two mask shaders and the fur shells** (texts added to their `no_albedo` entries).
 
@@ -4069,6 +4073,8 @@ Plan Task 5 (2026-10-09; commit `6b4a0ea` and the commit of this subsection). Wi
 
 *Freeze check.* No window of the seven real-GPU logs has the freeze signature: in the world the work medians are 6.0 to 10.2 ms with swap medians of 23.5 to 29.6 ms. Under 30 fps: the two loading windows of each run (25.9 to 28.5 fps, work 34 ms, swap 0), the windows with a view switch, a turn or a capture, the native windows of run 408 (below), and the first two windows of run 409: 15.3 fps (the loading with read-back), then **300 frames in 47 s** (6.9 fps; frame median 58.8 ms, work 9.3, swap 49.3), in which the window changed (the shots at 54 s and 60 s have different sizes: 1296 x 759, then an 868 x 517 picture of the upper left part of the large window) and the capture was made. The capture's four frames replay as run 395's and run 404's did (below); from 60 s on the run holds 29.4 to 30.0 fps.
 
+**Dated correction, 2026-10-12 (water Task 19).** The sky-place evidence below predates water. The water step now stands after the sky, moon and clouds, preserving the sky’s place and no-depth-write rule; the surface writes depth before the sun layer copies it (section 20).
+
 *The Sky lines.* Seven real-GPU runs: one `sky changed` line each, at the first native frame, `Sky: on, block valid, drawn with its textures`; every periodic line (29 lines, up to 2,400 frames in run 411) `drawn with its textures`, `sky-block 0 {block: 0, rules: 0}, sky-texture 0, no-fog 0, view 0, no-objects 0`, `0 without depth write`. The place is 4 to 9 records before the end (bridge `place 912 of 916 records`, third `969 of 974`, trees `854 of 860`); in run 411 one line has `before it 25 records`, 6.8 s after the third turn and 4.2 s before the fourth, at the heading of the 67 s shot (viewed: nothing painted over, no hole): the frame was most likely at rest, not turning (inference from the times and headings; correction by the review of plan Task 5, M1). A blended record that is no terrain record came before most of the ground in that frame; which one is not in the log. Drawing the sky early is the safe side: everything after it is drawn over it, at the cost of overdraw. Since plan Task 6 the Sky line names the pixel shader of the record at the sky's place and counts such frames (`early`). `fog_tables.py block` on the eight captures: the fog block and the sky block equal the rows in 8, 8, 8, 4, 4, 4, 4 and 8 frames of as many (`task5_<stamp>_block.txt`). The sky's textures are the 16 x 16 texture of zeros with `c47.x` = 0 in the sunward captures too (`task5_131928_sky.txt`, `task5_132736_sky.txt`): **the texture term has still never been seen with content**; what the runs show of it is that sampling zeros leaves the clear sky.
 
 *The picture has no clear colour left.* Pixels of the clear colour's display value (20, 20, 25 within 1) in the native shots: 420,379 of 2,073,600 (20.3%) at the bridge before the sky (`task4_bridge_on_shot_45s.png`); 0 at the bridge, the third spot and by the trees, 3 and 5 of 2,073,600 in two shots of runs 410 and 411.
@@ -4144,6 +4150,8 @@ Plan Task 6, Part A (2026-10-09; the commit "Native fog: unlit draws ..."), buil
 | How a draw is told | two bits of the draw's `light_mode` above the light's seven: 128 (`kLightModeUnlitFog`) and 256 (`kLightModeUnlitFogAlpha`). Only the pixel stage reads them, and only in a draw without the lit bit. The flat shader `kClayPs` now declares cbuffer Frame with the fog's tail (b2 is bound for the whole frame in every drawn frame; no binding changed) |
 
 *Fog off: equal.* Restated from "Native fog", whose statement was "the 64 programs without the lit bit are the old programs": with the unlit fog's bits clear, every program of the four shaders is line for line the program it was (case 166 for the flat shader at all 128 modes, case 201 for the three others; `task6_old_new_programs.txt`: 22 programs of this tree against commit `c8fb1db`, lit and unlit, all the same listing). With the bits set and the frame's flag a constant 0, the program is line for line the unlit program of the mode without them (case 210: 4 shaders x 64 unlit modes x 2 bit patterns). So a frame without fog draws every unlit draw with the instructions it had. The lit programs did not change at all (the unlit form is a function of its own, `FogUnlit`).
+
+**Dated correction, 2026-10-12 (water Task 19).** `F6D9` below is the dead opaque twin of the same meshes, not a separate near-shore water form. Water on replaces its placeholder with the blended, depth-writing `A17D` surface; the far cube `5763` / `2B09` remains unbuilt (section 20).
 
 *The lake.* What the pictures show as the lake is two things. The water near the shore is `F6D9...` (11 draws at the third spot; in the table, of the plain form): drawn flat, fogged since this task. The far surface out to the horizon is `2B091BD0C45A7454` (`FOG_NOT_OF_THE_FORM`): one draw a frame through the indexed builder `DrawIndx:82217EE8` (8 vertices, 30 indices: the sky cube's box without its top, with the cube's literal 2,850; row 433 of frame 1 of capture `134312`), and **the pass makes no record of that builder's draws, so it is not drawn at all** and nothing was decided for it: where the game has pale far water the native picture has whatever lies behind (ground, or sky). It goes to the follow-ups with the water.
 
@@ -6531,6 +6539,8 @@ So **tf1 is the beam source, reduced and blurred radially twice; tf2 is the seco
 
 **The occluders bring the layer's depth up from the mid-frame copy, but not to the whole scene's** (`t10_occluders_*.txt`; this paragraph and the two after the list were rewritten after the review of plan Task 10, Importants 1 to 3: the first writing said "up to the whole scene's" and concluded that a native layer needs "the clouds only"). The scene's depth copy is resolved mid-frame, before the far water, the late leaf draws, the dog's fur shells (15 draws of `014F`, which have no occluder and are not drawn natively) and the scene's clouds. (The 208 terrain layer draws that also come after the copy, `9C21` and `4755`, write the depth of the ground their underlay already wrote: `out\tests\post-task14\after_copy_052158_f1.txt`.)
 
+**Dated correction, 2026-10-12 (water Task 19).** The 14,769-pixel count below is of the whole stored scene’s final depth, not the layer’s depth place or meshes’ footprint. The far cube floor is 18.4716; the visible mesh surface is 20.1024, and the two layer cubes at 20.0024 supply its level after the game’s bed copy. Native water writes that level before the existing layer-depth place; no `D1CC` draw is built (water ledger ruling 26; section 20, criteria 7 and 13).
+
 - *The cubes are the far water.* The main scene's far lake (`5763` / `2B09`, section 16 "The lake") is the same unit cube through the same builder (8 vertices, 30 indices), with vertex `c119.x` = 18.471556, bit for bit the first layer cube's, and it is drawn after the depth copy. By `D1CC`'s formula (`light_formulas.post_cube_point`): a floor 5,700 x 5,700 about the world's origin at the height `c119.x`, four walls up to a square about the eye at the eye's height, no top. The scene depth of `034415` frame 1 unprojected (`out\tests\post-task10\heights.py`): a flat bed at height 14.7 (8,603 pixels, about 188 units away) and 14,769 pixels (1.83%) below 18.47: the cube's floor is the lake's surface over the lake's bed. The two cubes at 20.002409 have no main-scene draw of that height in the frames read: not identified.
 - *The tree draws are the scene's late leaves.* Each has the index buffer, index count, vertex buffer and vertex `c0..c3` of one main-scene leaf draw (`A584` or `D7DD` / `7CD5`), and those are exactly the leaf draws issued after the depth copy: 3 of 22 at the bridge, 3 of 35 at the third spot, 1 towards the sun, none by the trees (41 before the copy, no occluder draw). Index counts 24,463 / 18,722 / 9,319. State: depth test and write, colour mask 0, register `0x2202` = `0xAA00001C` (alpha test greater than 0, with alpha-to-mask).
 - *The cloud quads* are the scene's clouds with their own alpha as the test (`3FF7`, greater than 0.149).
@@ -6542,6 +6552,8 @@ So **tf1 is the beam source, reduced and blurred radially twice; tf2 is the seco
 **The far lake is not in the native depth** (Important 3; section 16, "The lake" and "Limits"; `capture.cpp`: "nothing is recorded from these draws"): `2B09` is not drawn natively at all, so a native layer sees the lake's bed (14.7) where the game's sees the cube's floor (18.47). In the frames measured the cubes change no texel of the layer's depth; it is a limit for a sun low over open water (plan Task 17 decides between the cube's floor, which is no quad: 8 vertices, 30 indices, `c119.x`, and the limit). The two cubes at 20.0024 stay unidentified. And the native picture has no distant trees: beams pass where the game's far woods stand.
 
 **The quads** (`t10_quads_034415.txt`, `_034918.txt`, `_010653.txt`, `_134312.txt`). Every furniture quad is an `"indx"` row of `DrawIndx:82217EE8`: 4 vertices of 20 bytes (x y z u v), indices 0 1 2 1 3 2; no furniture shader passes another builder (the tree draws, which are no quads, apart). Rows a frame: moon 1, clouds 3, glare 1 (the moon's; 2 with the sun's, towards the sun and by the trees), layer depth 1, cloud occluders 3, cubes 3, tree draws 0 to 3, beam source 1, layer flares 0 (towards the sun), 2 (bridge, trees) or 4 (third spot), moon glow 1, sun disc 1, previous-frame blend 1: at most 16 quad records a frame against the bound of 24. (Not in this list, and no record kinds: `5D67` twice a frame at pitch 320, each before about 90 depth-only draws without a pixel shader, and `F1EB` 47 to 100 times a frame at pitch 1040; both show that a kind is told by shader AND target, ruling 24.) *The alpha test per kind is the same in all 28 frames*: moon greater than 0.0039 (`0x3B808081`), clouds 0.0196, cloud occluders 0.1490, moon glow 0.0392, sun disc 0.5020; off for glare, beam source, flare, layer depth, cubes and the previous-frame blend (register `0x210E` then still reads the sun disc's 0.502).
+
+**Dated correction, 2026-10-12 (water Task 19).** The older third-spot count below was eight; capture `155731` and the fresh water pair have four views, as at the bridge (two by the trees/sun side). Full-readback captures now contain slot-13 reflection colour; the earlier all-zero dumps did not establish an empty reflection. `A17D` is the live surface, `F6D9` dead (section 20).
 
 **`D72F` at pitch 280** (ruling 24): before the main scene the game renders 4 (bridge), 8 (third spot) or 2 (trees) small views of the world with four samples (terrain, a sky cube `8262` / `F760`, and the same two flare quads), each resolved to a 256 x 256 texture (`0x13401000`, `0x13481000`, `0x13501000`, `0x13581000`) that the near-shore water (`F6D9`, `A17D`) samples at slot 13: the water's reflection views. Not the layer's flares.
 
@@ -6704,6 +6716,8 @@ Plan Task 15 (2026-10-10; ledger ruling 7). Files: `src/native/render/clay_logic
 
 **Runs** (2026-10-10, the controller's, `RUN UNCHECKED`; binary `2D9DBBFE6E8942AC`; logs 507 (sun on) and 508 (off), 0 `d3d ERROR` lines each; `t15_on_off.txt`). `previous-frame blend ready` in every run with the switch on, on the software adapter too (log 498), and `previous frame's share 0.1020` on every Sun line of a live frame (0.0000 in the first native frame and on the feed). **A standing frame**: the shots at 76 s, on against off, differ by -0.08 to -0.03 of a level in the mean, 85.9% of the pixels within 2 levels, which is what two runs' shots of one view differ by anyway (85 to 90% at the bridge): the plan's "10b's within one level" holds as far as two runs can show it. **The moving shots** (44 to 47 s, a second apart in a turn): the two runs are not at the same angle in any of them (3 to 20% of the pixels within 2 levels), so the blend's share cannot be read from them; viewed (45 s, on): a clean picture of the turned view, no ghost, no double edge, no seam. A trail of a tenth of the last frame is not to be seen in a still: user check (a fast turn). At the bridge and towards the sun the blend ran in every frame of runs T14-6 and T14-8, whose standing shots are those of "Sun layer".
 
+**Dated correction, 2026-10-12 (water Task 19).** The historical `A17D` rows between the game’s bed copy and the first occluder twin are now drawn when water is on, with depth. The native copy remains at the existing place, after the surface; `PlanWaterPlace` refuses a step after it and coincident steps take depth after water. Section 20 measures lake-level depth in criterion 13 and mid-frame bed depth separately in criterion 7.
+
 ### The layer's depth place
 
 Controller rulings 36 and 39 (2026-10-10; the tracing the review of plan Tasks 14 and 15 asked for, Important 2). Files: `src/native/capture/draw_record.h` (`FindOccluderTwin`), `capture.cpp` (`ObserveLayerOccluder`), `src/native/render/frame_scene.h` (`FrameBuilder::LayerOccluderSeen`, `FrameScene::layer_depth_place`), `clay_logic.h` (`PlanSunDepthPlace`, `SunDepthBefore`, `ClaySun::kDepthPlace`), `clay_pass.cpp` (the depth step in the colour pass). Tests: `tests/native/test_draw_record.cpp` (returns 128 to 135), `test_frame_scene.cpp` (quad cases 31 to 40), `test_clay_logic.cpp` cases 648, 649, 652. Scripts and outputs of the tracing: `out\tests\post-task16\`, `out\native-evidence\post\t16_late_tree_*.txt`.
@@ -6726,6 +6740,8 @@ Controller rulings 36 and 39 (2026-10-10; the tracing the review of plan Tasks 1
 | in the game, native (run T14-6) | 0.48 to 0.51 | 0.56 to 0.60 | 0.57 to 0.70 | 0.22 to 0.23 |
 
 In the model, drawing that one draw whole costs the root a third and "beams right" a quarter and leaves "sun" and "beams left" where they were; from that the first writing of this paragraph concluded "a measured defect and not the cause of criterion 19's failure in the game". **That conclusion was too weak for the root and the beams and holds for the "sun" region alone** ("Runs"): the late draw in the layer's depth was what kept the native root dark, as the review of plan Tasks 14 and 15 had read it; what is left at "sun" is the native scene's own brightness there ("Limits (10c)", 1).
+
+**Dated correction, 2026-10-12 (water Task 19).** The historical “Between the copy and the first twin” account below now has a water-on exception: `A17D` is drawn with depth. That is intentional at the native layer’s place. The game’s earlier copy still holds the bed; these planes are not one reference (section 20).
 
 **The mend** (ruling 39, its simple form). The capture, with the quads wanted, looks at every outermost `DrawIndexedVertices` call between the main scene's first call of the indexed builder and the frame's composite (where the layer's quads are read too; the shadow passes' draws come before and cost a thread-local check). A call whose pixel shader is `F1EB` at a target of half the scene's pitch is a tree occluder: its geometry is read as a scene draw's (`FillDrawInputs`, `AssembleRecord`) and the frame's builder matches it to the scene record it draws again (`FindOccluderTwin`: indexed, the same primitive type, index format, index buffer, range, base vertex, vertex buffer, transform layout and rows, bit for bit; neither skipped, instanced nor skinned). The smallest index among the twins is the frame's **depth place** (`FrameScene::layer_depth_place`; three counters of side data: `DrawRecord` stays 616 bytes). The pass (`PlanSunDepthPlace`) takes the layer's depth **before the first drawn record at or beyond that index**: the colour pass is interrupted for the one full-screen depth step, as the pre-pass is for the shadow mask, and goes on from the depth it had, without a clear; the layer's later steps find the depth taken and draw the cloud occluders into it. In a frame without a tree occluder (by the trees; every frame of a view without such a tree) the depth is taken after the last record, as before. The first record that has an occluder stands for the game's depth copy. *Corrected after the review of plan Tasks 16 and 17, Minor 2: the first writing said "nothing recorded says where the game's copy itself lies". The command words do*: the write of `RB_COPY_CONTROL` (0x2318) with source select 4 is in a `"cmdgap"` row of every frame, and the reviewer read it in all 20 frames of captures `120435`, `120714`, `121036` (`out\native-evidence\post\review16-17\copy_vs_twin.txt`): the copy lies after main-scene row 205 or 206 of 434 to 436 towards the sun, 421 to 423 of 949 to 957 at the bridge, 492 to 494 of 1,011 to 1,016 at the third spot; every twin lies after it (first twin at row 414 or 416; 946 to 952; 1,007), none before, and from the first twin on the frame holds nothing the game has in its copy. **Between the copy and the first twin** (209 or 210 rows towards the sun, 513 to 529 at the other spots) lie terrain layers (which write the depth their underlay wrote), rows without a depth write, the dog's fur (not drawn natively) and, at the bridge and the third spot, 11 or 12 rows of `A17D` with a depth write (the near water's second pass over geometry `F6D9` drew before the copy; not drawn natively: no albedo, blended). So nothing the native pass draws puts a new depth between the copy and the mark in these frames, and taking the depth at the first twin instead of at the copy costs nothing there.
 
@@ -8466,6 +8482,8 @@ Complete at the closing (ledger ruling 57); each once.
     - held by source-text pins alone, never by a test that runs them: the pass's early return by the mode, its use of the reuse rule's plan and commit, the upload block's barriers, the step's draw loop and slot arithmetic, the availability's log lines, and on the capture side `ObserveImpostorCall`, `TakeImpostorCall`, `FlushPendingImpostor`, `ImpostorBoolWord`.
 17. **Two log lines say more than was measured**: the first `"picture: mode"` (and `"picture: base"` for want of the list) line prints a bracket of figures that were never read (zeros, as log 708 shows), and the install line's fixed words "by the seeded list of fourteen bases" stand also when the list was given by hand or the mode refuses.
 18. **Not modelled or not drawn, as before**: the ground-fog block (`b129`: a draw with it set is refused, `ground-fog`); the unidentified pairs `43ED` / `7F65` and `7D1C` / `983E`; the sprites and particles; water (the lake is a flat grey placeholder).
+**Dated correction, 2026-10-12 (water Task 19).** “Nothing built” stands under water ledger ruling 26: live `A17D` meshes write the native lake level before the unchanged layer-depth place. A dead twin is removed only with its whole replacement surface. No cube pipeline, record or draw was added; off retains the old placeholder depth.
+
 19. **The cubes at depth 20.0024 need nothing built**: they are the lake's level in the sun layer's depth (ledger ruling 2).
 20. **One save, late morning, three spots of one place, a standing camera.** Every figure is of stills and stored scenes; nobody has judged the moving picture; every run is `RUN UNCHECKED`.
 
@@ -8491,9 +8509,17 @@ In the order of what they would buy; each is in `roadmap.md`.
 
 ## 20. Water: the lake's surface
 
+`vs-transforms.json` and `ps-albedo.json` are unchanged by this sub-project:
+`A17D` and `F6D9` stay `no_albedo`; their water formulas and records use the
+side block and dedicated step rather than an albedo-schema entry.
+
 Sub-project 13 (spec `docs/superpowers/specs/2026-10-12-native-renderer-water-design.md`, plan `docs/superpowers/plans/2026-10-12-native-renderer-water.md`, research `.superpowers/sdd/water-research.md`). The lake's surface is the blended draw of vertex shader `BEAD84BD72072E0E` with pixel shader `A17D8AEC3A817D45` (twelve draws a frame at the bridge), beside its dead opaque twin `F6D98C7B4D98438B`; it samples a shore mask (slot 1, `k_8`), a normal map (slot 2, `k_DXN`, twice), and a reflection picture of 256 x 256 (slot 13, `k_8_8_8_8`) that the game renders again every frame in views of its own at surface pitch 280. Labels as in the research: [measured], [microcode], [code], [inferred], [unknown].
 
 ### Discovery
+
+**2026-10-12 execution note:** the code-only/no-capture statements below
+retain Task1's early status. W1/W2 and subsequent captures exercise these
+paths, with own-frame/content/level evidence in "Discovery captures" below.
 
 Additions to a discovery capture (section 8's rows), all inside the discovery gate [code]: `DumpTexture`, `AppendTextureFetches`, `AppendPictureViewport`, `WriteDrawRow`, `WriteIndxRow` and `WriteTessRow` are reached only while a capture is armed; nothing was added at a draw's entry, and nothing a record or the pass reads changed (`src/native/capture/capture.cpp`; the pure parts are `WaterPictureFetch`, `DumpKeyedByContentAt`, `DumpMipsAt` and the content kinds in `src/native/render/texture_decode.h`, `tests/native/test_texture_decode.cpp` returns 207 to 219, and `PictureViewportPitch`, `ReflectionViewPitch`, `kClipRegisters` in `discovery_format.h`, `tests/native/test_discovery_format.cpp` returns 90 and 91). `DrawRecord` is untouched; no binding, target or shader text changed; the SDK is untouched. **No capture with these rows exists as this is written**: the first are the plan's captures W1 and W2 (Task 8), and what is said below about what a row holds is the code's reading, not a row's.
 
@@ -8519,7 +8545,25 @@ A **water row** is a row whose vertex shader's hash, as the row prints it, is `k
 
 **Caps**: the reflection pictures 256 files and 64 MiB a capture; the normal map's levels under the mip dumps' bounds (8 MiB a texture, 256 MiB a capture). **Not kept**: the window offset and window scissor and the six clip planes of a view (no shadow); a reflection picture sampled by a row that is no water row, by content (it is kept once an address there, as before); the pictures' own lower levels (their constants name none); slot 13 or 14 of a water row when it holds anything but a 256 x 256 `k_8_8_8_8` texture (kept as before).
 
+### The formulas against the captures (plan Task 4)
+
+**2026-10-12 execution note:** this is the original Task4 census. W1/W2 later
+add92own-frame rows,16views and actual normal levels, "Discovery captures";
+the early “not made yet” status below is historical.
+
+Phase 13a's checks on the captures in hand, none of which has Task 1's new rows (W1 and W2 are not made yet). The figures and what each check can and cannot show are in `lighting-formulas.md`, "The formulas against the captured rows" and the three parts after it; in short [measured, `out/native-evidence/water/t4_*.txt`]:
+
+- **Criterion 1, second half: met on the rows in hand.** 21,784 of 21,784 vertices and 32,800 of 32,800 pixel positions of the 164 water rows of `155547`, `155731`, `221449`, `155929`, `160104` agree with the microcode within 1e-9; no component a formula reads is not finite in any row. Capture `160251` (the held sunward view) holds no water row and no reflection view: the lake is not in that view.
+- **Criterion 2, parts (b) and (c): met.** The dead condition holds for 82 of 82 `F6D9` rows; no texel of the 41 dumped masks gives alpha 1 (largest 0.997); the machine kills `F6D9` at 16,400 of 16,400 captured positions. Under the fetch rule of ledger ruling 33 (each captured mask constant is inside it).
+- **Criterion 3: met.** 32 of 32 views are `diag(c31.x, c31.y, 1, 1) * M * Mirror(h)` within 1.4e-6, `h` from the meshes; three mutations fail in every view.
+- **Closed numbers**: the bool bits (`b136` = `0x100` set, `b137` = `0x200` clear, in both bool members of every row); the state words (the alpha reference is `0x3D70F0F2`, not `0x3D70F0F1`); the register lists stand (4 vertex, 24 pixel), so `sizeof(WaterRecord)` stays 584.
+- **Not exercised by any captured row**: the near branch (no water within 20 units: `range`, `slot14`), the `b137` block, a `c129` that differs from `c130`, a `c28.x` other than 1.
+
 ### The water's textures
+
+**2026-10-12 execution note:** “no caller yet” below records Task5's early
+status. Task11 subsequently uploads masks/BC5 stored levels; Task17 uses the
+same route in its own reflection materials. The original format refusals stand.
 
 Plan Task 5: the two formats of the lake's textures that the renderer does not decode, as pure functions with Python twins; no caller in the product yet (the pass's `ResolveWater` is Task 11's). `src/native/render/texture_decode.h`, `tests/native/test_texture_decode.cpp` returns 220 to 248; `tools/xdk_sigmatch/water_textures.py`, `tests/test_water_textures.py`. **Neither format is entered in `TexFormatFromXenos`** (spec Design 6; sub-project 12's ruling 14): `TexFormatFromXenos(2)` and `(49)` stay `kUnsupported` and `DecodeTextureFetch` still answers `kFormat` for both (returns 220, 221, 233, 237), so no record's material, no `Resolve` of the cache and no texture status of an existing record changes.
 
@@ -8549,16 +8593,6 @@ The normal map's **address differs from capture to capture** (`14D40000`, `14D20
 **The BC4 block of the test.** The plan's test block (`255, 0, 0 x 6` for x and `0, 128, 0x49, 0x92, 0x24, 0x49, 0x92, 0x24` for y) is right: the test packs the block from the format's definition (two end values, then texel i's 3-bit index at bit 3 i of the next 48 bits; index 1 everywhere is the bit pattern 001 repeated) and holds the result to those literal bytes (return 228). What the decoder was checked against: whole-number arithmetic on both palettes and all eight indices, values rounded down and up both met (return 240, and the same in Python); `terrain_replay.bc4_values`; the real map as above. **Not done**: the SDK's load shader was read only for its divisions and its 3-bit fields (the disassembly of compiled code), not followed to the end for the texel order inside a block; that order rests on the terrain's check of the same decoder against the heightmap's slopes (section 13, "Terrain") and on the sheet.
 
 Each rule was seen to fail its test when broken on a scratch copy: 69 of 69 mutations of Tasks 1 and 5 killed (`out/tests/w15_mutations.txt`); the capture's own code (`capture.cpp`) is reached by no test.
-
-### The formulas against the captures (plan Task 4)
-
-Phase 13a's checks on the captures in hand, none of which has Task 1's new rows (W1 and W2 are not made yet). The figures and what each check can and cannot show are in `lighting-formulas.md`, "The formulas against the captured rows" and the three parts after it; in short [measured, `out/native-evidence/water/t4_*.txt`]:
-
-- **Criterion 1, second half: met on the rows in hand.** 21,784 of 21,784 vertices and 32,800 of 32,800 pixel positions of the 164 water rows of `155547`, `155731`, `221449`, `155929`, `160104` agree with the microcode within 1e-9; no component a formula reads is not finite in any row. Capture `160251` (the held sunward view) holds no water row and no reflection view: the lake is not in that view.
-- **Criterion 2, parts (b) and (c): met.** The dead condition holds for 82 of 82 `F6D9` rows; no texel of the 41 dumped masks gives alpha 1 (largest 0.997); the machine kills `F6D9` at 16,400 of 16,400 captured positions. Under the fetch rule of ledger ruling 33 (each captured mask constant is inside it).
-- **Criterion 3: met.** 32 of 32 views are `diag(c31.x, c31.y, 1, 1) * M * Mirror(h)` within 1.4e-6, `h` from the meshes; three mutations fail in every view.
-- **Closed numbers**: the bool bits (`b136` = `0x100` set, `b137` = `0x200` clear, in both bool members of every row); the state words (the alpha reference is `0x3D70F0F2`, not `0x3D70F0F1`); the register lists stand (4 vertex, 24 pixel), so `sizeof(WaterRecord)` stays 584.
-- **Not exercised by any captured row**: the near branch (no water within 20 units: `range`, `slot14`), the `b137` block, a `c129` that differs from `c130`, a `c28.x` other than 1.
 
 ### The replays (plan Task 6)
 
@@ -8601,7 +8635,323 @@ Phase 13a's checks on the captures in hand, none of which has Task 1's new rows 
 
 **The glint and the edge on the captures in hand** (`t6_glint_<stamp>.txt`, `t6_edge_<stamp>.txt`): no kept pixel has a sun term above 5% in any capture (the largest share is 0.000 at the bridge and the third spot). By the trees (`155929`) and on the sun side (`160104`) the lake's three meshes are wholly behind the land in the depth copy (63,761 and 38,590 fragments hidden, 0 kept); the held sunward view (`160251`) has no water row at all. **So no capture in hand shows a glint, and SUNHELD is not a view over water**: criterion 12 needs another view (W4). No kept pixel lies within 20 units of the eye (nearest 114.4 and 116.0 units); 2,064 and 1,880 kept pixels have an alpha below 0.99 (the shore's fade).
 
+### Discovery captures (plan Task 8, continuation)
+
+2026-10-12: W1/W2, logs 709/710, captures 083950/084135 and stored scenes 083953/
+084137. Scene frames 1872/1873 and 1924/1925 are checked against each capture.
+These original full-readback drivers remain **RUN UNCHECKED**, with no timing
+or motion claim. `first-batch-verification.md` audits the runs; the completed
+Task 8 continuation report names commands in `t8_checks_manifest.json` and
+`t8_scenes_manifest.json`. The original recorded binary provenance
+`A31EC9B0887CAAB6` is retained rather than reconstructed from a later build.
+
+**Own-frame input checks.** `t8_check_rows_own_frames.txt`:92 water rows,
+14,236/14,236 vertices and 18,400/18,400 sampled pixel positions agree; no read
+component nonfinite or row incomplete. The controls blind on these captured
+branches are named, not counted as mutation passes. `t8_check_dead.txt`:46/46
+opaque rows dead,23 mask constants inside the rule, maximum alpha 0.997 and no
+mask texel reaching 1. `t8_check_views.txt`:16/16 views within 1e-5, maximum
+1.437e-6; factor/plane/height controls fail every view. Bools remain b136 set/
+b137 clear, and state reference 0x3D70F0F2 remains distinct from c141.w.
+
+**Stored normal levels.** Both captures have 256x256 base plus eight lower
+levels. `t8_levels_083950.txt` / `t8_levels_084135.txt` report the same decoded
+RG8 differences from the recursive 2x2 mean:
+
+| Level/size | Largest X/Y difference | Mean X/Y difference |
+|---|---|---|
+|1/128x128|2/3|0.421/0.544|
+|2/64x64|2/3|0.465/0.561|
+|3/32x32|2/2|0.506/0.474|
+|4/16x16|2/2|0.387/0.398|
+|5/8x8|1/1|0.172/0.188|
+|6/4x4|0/1|0.000/0.062|
+|7/2x2|0/0|0.000/0.000|
+|8/1x1|0/0|0.000/0.000|
+
+The game-scene replay uses unrounded BC5 palette values, actual stored levels
+and each row's LOD; this byte census is not a substitute for that sampling.
+
+**Criterion 4 repeated with actual game pictures.** All 16 scene variants run
+with `--levels stored`, own-frame content and the previously **GIVEN** sample
+place (-0.25,-0.25). `t8_scene_<stamp>_f<1|2>_<variant>.txt`:
+
+| Capture/frame | All judged pixels | Constant reading RGB/game | Correlation |
+|---|---:|---|---:|
+|W1/1|16,360|1.006/1.008/1.009|0.863|
+|W1/2|16,362|1.006/1.008/1.010|0.863|
+|W2/1|18,938|1.008/1.009/1.011|0.848|
+|W2/2|18,940|1.007/1.009/1.011|0.848|
+
+**Met by ruling 35's substituted all-judged-pixel measure**: every wrong
+flip/channel variant misses a bound in every frame. **Not decidable as
+written**: the named 0x13501000 set is 191/191/137/136 pixels, below 5,000, with
+correlation 0.618/0.618/0.601/0.597. All 16 commands honestly exit 1 for that
+original deciding set; none reports a replay problem. Old paired-preference
+statistics are not claimed rerun. The small residual remains; different
+captures do not attribute its change to stored levels alone.
+
+**Criterion 5.** `t8_sky_*`: colour **met 16/16**, RGB 0.996–1.005; horizon row
+**10/16 met, not met as written overall**. W1 view 3 begins 103 against 101.31;
+W2 views 2/3 begin 91 against 89.15, in both frames. The six miss the 1-row bound.
+Flipped pictures begin row 0 and exchanged channels miss colour in 16/16.
+
+**Picture content, viewport and unresolved question4.** The two viewed
+`t8_pictures_<stamp>.png` sheets contain four pictures per frame. At first
+base 0x13401000, W1 changes 302 texels and W2 changes 2,153, maximum RGB byte
+difference 1. `t8_pictures.json` records actual files/hashes; the normal is
+static and reused from frame 1. `t8_vp.json` shows viewport 256x256 and screen
+scissor 00000000/20002000. Clip-control **00080001 on export/terrain/sky/
+objects, 00080000 on flares**; bit 0 enables/disables the user plane by family.
+Window offset/scissor and plane coefficients remain unshadowed and absent.
+Blur census repeats views 1/2 at bridge, view 1 at third, both trees/sun-side
+views, none held sun. There is no separately preserved resolve-moment view1
+picture against later in-scene content: `cmdgap840` remains unexplained.
+
+**Reader repair.** The old `read_capture` picked the first texture row for a
+fetch constant even when frame 2 requested newer content. The new explicit
+frame reader picks latest content at/before its frame, permits static/global
+fallback and excludes future rows; cache keys include frame. `check_rows`
+also uses per-frame RowTextures. Test-first red/green evidence and 45 focused
+passing tests are in `t8_reader_*` / `t8_rows_reader_*`. Fresh continuation
+review approves the repair (`review-task8-continuation.md`); the controller's
+combined pre-fix2 suite passes1885tests in536.686s, seven skips
+(`t16_python_full_root.txt`). Task16's final checker-only fix2 suite passes
+1886tests in527.866s, seven skips, exit0 (`t16_fix2_python_full.txt`); the
+combined Task8/16 ten source/test paths are committed as `2fcd472`.
+Earlier frame1-only legacy reading is
+unchanged. No product shader, SDK or runtime change is made by this repair.
+
+### Water records (plan Task 9)
+
+Behind `--fable2_native_water` = `off` (default; also `false`, `0`), `on` (also `true`, `1`). `capture/water_record.h` (pure; `tests/native/test_water_record.cpp`), `capture.cpp` ("The water records"), `render/frame_scene.h`. **This step captures; nothing is drawn by it** (the targets are plan Task 11's, the surface step Task 12's). **Not yet run in the game**: everything below is [code] and unit tests, except where a figure names the captures in hand.
+
+- **Which draw.** A main-scene draw whose pixel shader has a no-albedo entry (`FillMaterial`, inside `if (albedo->slot < 0)`), in a frame with records and the switch on (`g_water_frame`, latched at the frame's boundary beside the impostors' word), whose pixel shader's hash is `A17D8AEC3A817D45` (kind `surface`) or `F6D98C7B4D98438B` (kind `opaque`): `ObserveWaterDraw`. Any other no-albedo draw returns there at once. **The draw keeps making the draw record it made before** (a `no_albedo` record; the frame's fog block is still read at the first `F6D9` draw); `DrawRecord` stays 616 bytes (`tests/native/test_draw_record.cpp` return 151).
+- **What is read** (before the scene's mutex): the vertex shader's hash (`BEAD84BD72072E0E`, else `shader`); the pixel shader object's own literal table against `water_table.inc`'s `c254` and `c255` (every component bit for bit; asked once an object and frame; a table that loads one of the 24 registers is `literal` too); the vertex shader's two decoded fetches (`WaterFetchList`); vertex `c115` to `c118` from the bank (no buffer load names them: a static assert); the 24 pixel registers as `ReadPixelConstant` gives them (`ReadWaterPixelRegisters`: `c0`, the one register of the table a constant-buffer load can name, through `ReadPixelConstant` itself; the other 23 from the device's bank, their one source, after the shader's own literal table is known to load none of them); the fetch constants of slots 1, 2, 13 and 14; the base addresses of slots 4 and 5; the pixel bool word of its last writer.
+- **The bool word.** The device's shadow is not the GPU's word (`0x100` against `0x110` in 164 of 164 captured water rows; both have `b136` set and `b137` clear, so the rows cannot tell which word decides). The record takes the last writer's, by the impostors' rule (`ImpostorBoolWord`: the draw runs the GPU-owned pair of the thread's last `GpuLoadShaders` call and one of the two uses flow constants, which `A17D` and `F6D9` both do: `cexec b136`, `cexec b137`; or a builder's flush since); anything else is `unread`. The word is followed while either switch is on (`g_pbool_follow`: `kFollowImpostors`, `kFollowWater`; the three places that follow it test `kFollowWord`). **The following begins anew (the epoch) only when neither followed it in the frame before**: the plan had the epoch bumped whenever either began, which would have cost the impostors one frame of records (`unread`) each time the water's switch came on in a running game; with the word followed without a gap there is nothing to forget, so neither switch costs the other a frame.
+- **The record** (`WaterRecord`, **584 bytes**: 16 hashes; 16 place, kind, bool word, stride; 64 vertex registers; 384 pixel registers, unread components as the game left them; 96 four fetch constants; 8 the two fog tables' bases). The state words, the alpha test's reference among them, are **the draw record's own** (`DrawRecord::state_words`), which `place` = `DrawRecord::seq` names: so the two thresholds are two numbers in two places, `ps[kWatP141][3]` (shaded against colour 0, inside the shader: `0x3D70F0F1`) and the draw's alpha reference (drawn against not: `0x3D70F0F2`). At most **64 records a frame** of both pixel shaders (24 at the bridge).
+- **The rules** (`CheckWaterDraw`, then the copy in `MakeWaterRecord`, made in `RecordDraw` with the draw's own state words; the first that fails is the reason, counted under `water-record`): `unread` (also a draw whose draw record is itself skipped, and a draw seen that was never answered); `shader`; `literal`; `fetch-list` (not two fetches of one stream of 5 dwords, format 57 at dword 0 and format 37 at dword 3); `register`; `scale` (`c20.w` not in (0, 64]); `state`; `fetch`; `shadow-term` (`b137` set); at the frame's end `fog`; `over-limit` (the 65th).
+  - **`register`: only what a formula reads.** A component is judged exactly when the table's read mask has it (50 of the 96 pixel components, the x and y of the four vertex registers) **and** its register is read with the draw's bool word: `c136`, `c137`, `c138`, `c142`, `c143` only with `b136` set; `c139` never (it is read under `b137` alone, and such a draw gives no record). Everything else is carried bit for bit and never looked at, not even for being a number (`c129.z` is no number in every captured row). A judged component must be a number inside its kind's sanity bound (`water_table.inc`: a place within 1e6, a factor within 65,536; the vertex registers are factors, as `gen_water_table.VS_KIND` has them), **fitted to no capture**; kind 3 (`c128.x`, `c136.x`, `c138.x`) is in [1 / 65,536, 65,536], strictly above 0 (ledger ruling 34: the console's zero-product points give no record). The spec's named bounds besides: `c31.xy` in (0, 4]; `c131.x` in [0, 64]; `c128.x` and `c136.x` at most 64; `c141.w` in [0, 1]; `c0.zw` the reciprocal of 1120 x 720 within 1e-6 relative. **Since the review of Tasks 4 to 15 (ledger ruling 42):** `c131.x`, `c128.x` and `c136.x` have their KIND's bound alone (within 65,536; the latter two at least 1 / 65,536). The spec's `c131.x` in [0, 64] refused a value the formula takes (it saturates the mix factor: a negative one means no reflection), and 64 for `c128.x` and `c136.x` was a multiple of this region's values; a made record of another region (a 512 x 512 mask, a 2,048 x 2,048 normal map, `c131.x` = -0.5, `c128.x` = 200) passes whole (return 49; `gen_water_table.other_region`), and garbage is refused as before. **A reason that empties a frame's water is said at once**, the first time it occurs in a run: `[native] capture: water: the first draw refused for "<reason>" (water-record): vs ... ps ... pbool ...: <the value>` (`DescribeWaterRefusal`: the first component outside its bound with its value and bits, `c20.w`, the state words, the first refused slot's constant, the stream's shape; return 51), or `the first frame refused for ...` for the frame's own reasons (a record whose fog is not the frame's block, the 65th record, a draw seen and never answered); later ones are counted in the 300-frame line as before. The record a draw of the pair makes is a thread-local, written on the water's path alone (the review's Minor 1: a local of `RecordDraw` was 584 bytes zeroed at every recorded draw).
+  - **`state`, by decoded fields** (`DecodeRenderState`), not by whole words: valid; depth test and write under the reversed range; four colour channels; alpha test "greater" with a reference in [0, 1]; no alpha-to-mask; the surface besides depth function 4 and the colour blend source alpha, inverse source alpha, add; the opaque twin depth function 6 and no blend. (The plan had the opaque twin held to its measured words whole. A whole-word compare refuses a draw for a bit whose meaning nobody established, which is what sub-project 12's packet rule had to be mended for; `test_water_record.cpp` return 38 holds that such a bit is not compared.)
+  - **`fetch`** (ledger ruling 33): slot 1 by `render::WaterTextureFetch(kK8)`, slot 2 by `(kDxn)`, each of which now also refuses (`FetchError::kSign`) a constant that does not deliver its components as unsigned fractions: a sign field other than 0 on a delivered component (x for the mask; x and y for the normal map), the integer number format, an exponent adjust; and for the normal map alone (`FetchError::kLodBias`, "lod-bias"; ledger ruling 46) a LOD bias other than 0 (dword 4 bits 12 to 21): the surface's program hands the GPU the coordinates' derivatives as they are, so such a map would be drawn a level off (the captured constant's field is 0; the mask is sampled at level 0 and its bias is not judged); slot 13 a 2D `k_8_8_8_8` picture of 256 x 256 with a base and without a sign (gamma among them) on its three colours. Slot 14 is not judged (spec ruling 21). So a mask's sample is a number in [0, 1] whenever a record exists, which the dead draw's proof stands on.
+  - **`fog`** (`WaterFogMatches`, at `FrameBuilder::Finish`): the record's slots 4 and 5 at the frame's two tables by base address, and `c28.xy`, `c66.xyz`, `c67.x`, `.z`, `.w`, `c68.xyz` bit-equal to the frame's validated fog block; in a frame without a valid block every record is `fog` (the native surface is fogged from the frame's block and is never drawn unfogged).
+  - Both kinds are judged alike but for the state: the opaque twin is the same formula with another kill.
+- **Whole or empty** (spec ruling 11; `FrameBuilder::AddWater`, `Finish`): if any reason was counted in the frame, of either kind, `FrameScene::water` is empty and the counts say why; else it holds every draw of the pair in the frame's order. A reader may take `water` as it is. The records of a frame refused whole are kept apart in `FrameScene::water_evidence`, which the discovery row alone reads.
+- **The rules on the captures in hand** [measured: `out/tests/w910/t9_rows_check.txt`; a scratch program that feeds `MakeWaterRecord` and `FrameBuilder` the rows' own words]: **164 of 164 water rows of five captures give a record, and each of the ten frames is whole** (24, 24, 22, 22, 6, 6, 6, 6, 24, 24 records; surface and opaque equal in each); capture `160251` has no water row and its two frames hold none. This holds the pure rules to real rows; it does not run `capture.cpp`'s own reading (the literal table, the bool word's last writer, the bank), which no test reaches: the runs below are its first check.
+- **Switch off**: nothing is read, no record or array is made (`FrameScene::water` has no memory and no block of 64 is allocated: `test_frame_scene.cpp` return 220). Per draw [code, by reading the diff, and held as source text by `tests/test_water_literals.py`, `Record`; no instruction count was made]: a draw whose pixel shader has an albedo entry executes one compare of its own material status in `RecordDraw` (a byte of the draw's inputs, written a few lines before) and one test of a local under the scene's mutex; a no-albedo draw besides one load of `g_water_frame` and a branch in `FillMaterial` and one load of a thread-local byte. The plan had every recorded draw load that thread-local byte; the material status is asked first, so only the no-albedo draws do. `OnGpuLoadShaders` and a draw's return test the same word as before under another mask. A frame: one load, one exchange, `WaterOn`; in `Finish` a store, a fill of 12 counters and a `clear()` of an empty vector.
+- **Evidence a capture carries**: every in-scene `"draw"` row of a frame with records now has `"seq"`, the `DrawRecord::seq` its draw was recorded under (`RecordDraw`'s answer, handed to the row's writer: no thread-local, nothing read). The frame row's `"water"`: `"off"`, or `{"on":true,"whole":bool,"seen":{"surface":S,"opaque":O},"taken":T,"refused":{reason: n},"records":[{"place","kind","ps_hash","vs_hash","pbool","stride","vs":[16 words],"ps":[96 words],"fetch":[[6 words] x 4],"fog_base":[2 words]}]}` (floats as their bits), **written from the scene's stored records** (`AppendFrameWater` reads `FrameScene::water`, or `water_evidence` with `"whole":false`), not from a second read at the draw. `water_check.py records <capture>` holds each record to the row whose `"seq"` is its place, bit for bit (the vertex registers against `"bank"`, the pixel registers against `"pfull"`, the fetch constants and the two bases against `"tf"`, the bool word against `"pbool_load"`, the hashes, the stride), `seen` and `taken` to the frame's in-scene `BEAD` rows by pixel shader, and every such row to having its record (spec criterion 6). The place is exact because the row carries its own number: sub-project 12's records could hold a place only to an interval (its review of Tasks 8 and 9, Minor 1).
+- **Log**: `[native] water: off|on (fable2_native_water)` at install, always; with the switch on, every 300 frames `[native] capture: frame N water: seen S (opaque O), taken T | water-record in F of W frames {reason: n}`.
+- **Cost with the switch on** [code; not measured]: a water draw reads about 30 small guest ranges (4 vertex registers, 23 pixel registers from the bank, `c0` through the load model, 6 fetch constants) and copies 584 bytes; the frame allocates one block of 64 records (37,376 bytes) under the scene's mutex in a frame that has water. 24 such draws a frame at the bridge.
+- **Never run**: any of it in the game. The runs that decide it are `r9_bridge_on`, `r9_third_on` and `r9_bridge_off` (the task's report has the lines).
+
+### The water's rules (plan Task 10)
+
+`render/clay_logic.h`, "Native water" (pure; `tests/native/test_clay_logic.cpp` cases 838 to 858; `tests/test_water_literals.py`, `Mirrors`). **No binding, target or shader text is in this step, and nothing calls these functions yet**: plan Tasks 11 and 12 wire the verdict, the targets, the place, the constants and the mirrors; Tasks 16 and 17 the rules of phase 13c at the section's end. [code and unit tests throughout; "measured" where a figure names a file]
+
+- **The dead draw** (`WaterOpaqueDead`, spec ruling 12): `min(c141.x, c141.x - c141.y) >= 1e-6` with both magnitudes at most 4, **the difference and the comparisons in double on the single inputs against the double 1e-6**. The single nearest 1e-6 is `0x358637BD`, which lies below it: a single-precision margin would call a `c141` dead that the reference refuses (pin: `0x358637BE` is dead, `0x358637BD` is not). The 14 dead pins agree. It holds for a mask in [0, 1], which the record's fetch rule guarantees ("Water records").
+- **The mirrored camera** (`WaterViewRows`, spec ruling 15): a row (a, b, c, d) of the frame's view-projection becomes f (a, b, -c, d + 2 h c), f = `c31.x`, `c31.y`, 1, 1; in double from the singles, each entry rounded once; refused for a value that is no number, a factor outside (0, 4] or a height beyond 1e6. **Bit-equal to the three view pins** (which are the Python reference; the game's own view rows equal it within 1.4e-6 in 32 of 32 views: "The formulas against the captures"). The sky's ray basis of the result does not depend on the height (two bodies' targets are equal in phase 13b) and its centre ray is the main view's with the third component turned.
+- **A mesh's height** (`WaterMeshHeight`): the mesh's position box with `hi.z - lo.z <= 1e-3`; h is `lo.z`.
+- **The targets** (`PlanWaterTargets`, spec ruling 16): one for each distinct slot-13 base of the frame's surface records, **ascending by base**, at most 4; `plane` for a mesh that is not flat or two heights on one base more than 1e-3 apart, else `reflection` for a fifth base (the enum's order decides when both hold). **The ascending order is phase 13c's rule as well**: the game's k-th reflection view of a frame is the picture at the k-th smallest base ("The reflection views"), so target k is view k's (`PlanWaterViews`: with as many views as targets, view k fills target k; with more or fewer, none, and every target holds the sky alone).
+- **The verdict** (`DecideClayWater`; `ClayWater`, names `drawn, off, no-records, light, opaque-live, pair, plane, view, reflection, texture, order, pipeline, slot, scale`): the first reason in `kWaterDecisionOrder`, which is that order **but `view` before `plane`** (ledger ruling 46; the review of Tasks 11 and 12, I1: a record whose draw record is not found, whose layout is not `kDot` or whose rows are not the frame's is never asked for its positions, so it has no height and `PlanWaterTargets` says `plane` for it; with `plane` judged first the log named the mesh's flatness where the cause was the lookup or the matrix. A frame reads `plane` only when every record passed the view's checks). `slot` is also the verdict of a scene with more surface records than the step holds (`WaterRecordsFit`; the capture's cap makes it unreachable, and such a scene no longer reads `drawn` with nothing prepared); `WaterSceneVerdict` is what the head of a Render can say before the frame's buffer is sized (the switch, the records, the light, the dead draw, the pairs, their number, the scale); the step's slots are reserved iff it says `drawn`. **`WaterLeavesOut`: an opaque record is left out of the pre-pass and the colour pass iff the verdict is `drawn`, for every verdict; a surface record always** (Review Focus 2).
+- **The step's place** (`PlanWaterPlace`): before the first prepared record whose `DrawRecord::seq` is at or beyond the smallest place of the frame's surface records (after the last when there is none). Usable only if the sky step and the early records' tail lie at or before it, **and the sun layer's depth is not taken before it** (added to the plan's rule: with the dead draw left out, a layer's depth taken before the water step holds the lake's bed where the game's holds the lake's level, and the beams would pass through the lake; in the captures the layer's place stands after the water's rows). `ColourDue` gains `water` (drawn last of an index's steps, after the sky step) and **`depth_after_water`**: when the layer's depth and the water are due at the same index the loop takes the depth after the water, not before the sky as in every other frame. That order rests on the sky step writing no depth, which Task 12 must hold where it wires the loop. `WaterPlacesOneRun`: no drawn record between the first and the last surface place, else `order` (the step has one place). `WaterDrawIndex`: the draw record a water record names, by its seq (`FrameScene::draws` holds the drawable records alone, so a seq is not an index).
+- **The constants** (`ClayWaterConstants`, **448 bytes**, two small slots a record: 64 the draw record's rows, 64 `c115` to `c118`, 288 eighteen pixel registers, 16 the alpha reference, the output scale, `sun_on`, `fog_on`, 16 three samplers and the swizzle word). **Eighteen registers, not the plan's seventeen** (its own list names eighteen: the record's 24 less `c20`, which is `out_scale`; `c28`, `c66`, `c67`, `c68`, which are the frame's fog block; and `c139`, which no record reads). `alpha_ref` is at byte 416 and `swizzle` at 444. `MakeClayWaterConstants` refuses, with the output untouched: a record that is not a valid surface record; a draw record that is not the one the record names (`seq` = `place`) or whose row layout is not `kDot` or whose rows are not numbers within 1e7; registers that fail the capture's own rule again (`capture::WaterRegistersBounded`: one function for both, so `c128.x`, `c136.x` and `c138.x` are above 0 here too); a scale outside (0, 64]; a reference outside [0, 1]; a sampler above 3; a swizzle field above 5. Unread components are carried bit for bit. `kClayWaterStepSlots` = 2 x 64 + 4 + 21 = 153 (the records', the targets' sky constants, one second frame block: `WaterFrameBlock`, the frame's with the exposure 1 and 1 / 256); `PlanClayFrameSlots` and `ClayFrameSmallSlots` take `water_slots` after the impostors', and with 0 the plan is the one of before, slot for slot (case 845).
+- **The mirrors** (`WaterPositionMirror`, `WaterCoordsMirror`, `WaterAlphaMirror`, `WaterFateMirror`, `WaterDrawn`, `WaterPixelCore`, `WaterPixelMirror`): single precision, contraction off, the reference's order term for term (they are `tests/test_water_hlsl.py`'s `FIXTURE` in C++). **At the pins (10 vertex, 12 alpha, 19 of 20 pixel, 3 view, 14 dead lines) every value is bit-equal to the single-precision reference** under this compiler (`water pins: ... values not bit-equal to the pin: 0`), the intermediate ones too (both lookups, the normal, the fresnel factor, the distance, the sun term, the fog's two coordinates); the test's bound, should a compiler differ, is 4 units in the last place. Two lines are not compared whole, each said in the test: the line with `b137` (no record has it; the block has no `c139`), and the sun term of the line with a power of exactly 0 (below).
+  - **The four zero-product points** (ledger ruling 34) are written out as in the HLSL: the three reciprocal square roots give 0 for a sum of squares of exactly 0 (a flat normal with `c128.x` = 0, a pixel at the eye, `c136.x` = 0 on a flat pair: the pins' lines `flat_zero`, `at_eye`, `second_flat` are met bit for bit), and the power gives 0 on a cosine of 0. At a power of exactly 0 the console gives the sun's whole colour and the mirror, like the HLSL, 0: no record has such a power, and the test holds that line's sun term to 0 and the pin's to the console's value.
+  - **Two thresholds**: `c141.w` decides shaded against colour 0 (`WaterFateMirror`); the state's alpha reference, `ClayWaterConstants::alpha_ref`, decides drawn against not (`WaterDrawn`). A skipped pixel that passes the state's test is drawn with colour 0 at its alpha, as in the game; the alpha pins have a line of each kind.
+  - **A colour or alpha that is no number is a discard** (`kept` false), never a clamp to black.
+  - Slot 14 is an input of the mirror (`WaterPixelIn::slot14`) so that the near branch's arithmetic is pinned with a picture there; the native draw gives zeros (spec ruling 21).
+- **Phase 13c's rules, as pure functions** (historical Task10 build-time status: Task15 found them; nothing wired them then. **2026-10-12 correction:** Task17 now wires these helpers, "The targets' terrain"):
+  - *The cull*: `ReflectionViewCull` decodes the view record's own `0x2205` (`0x00218006`: back faces culled, clockwise is front; the main scene's `0x00218002` has the winding the other way). `ViewHandedness` (the sign of the determinant of rows 0, 1, 3) is turned by the mirror, and `WaterViewCullConsistent` says whether a view's word is the main scene's with the winding turned exactly as its camera turns the handedness. Case 855 shows on a pinned camera why the record's own word must be used: under the mirrored camera the view's word draws the side of a ground triangle the mirrored eye faces, and the main scene's word the other one.
+  - *The clip*: `WaterClipDistance(z, h)` = z - h, kept at 0 or above (the far terrain's mirrored vertex program); `WaterSkyClipDistance` = the third component of the pixel's ray (the mirrored sky of Task 11). **The horizon's row it gives from the derived camera alone is 101.31 at the bridge and 89.15 at the third spot**, where the replay derived 101.3 and 89.2 and the game's pictures begin at rows 100 to 103 and 89 to 91 (`out/native-evidence/water/t6_sky_*.txt`): the target is not upside down.
+  - *The blur*: `WaterBlurConstants` (128 bytes), `MakeWaterBlurConstants` (the row's seven registers, of which only the xy are read, and the literal weight; an offset beyond one picture or a weight outside (0, 1] is refused), `WaterBlurCoord` (**the pixel's integral position over the size, not the texel's centre**), `WaterBlurMirror` (seven taps in the microcode's order, a tap that is no number counts as 0, alpha 0). The captured hexagon and weight are constants for tests alone.
+- **Two pins were added by this task** (`water_pins.py`, `MADE_PIXELS`: `part_fog`, `fog_edge`), because the mutation run found three wrong mirrors that met every pin of before: one without `c28.x` (the plan's own "fog" mutation: every captured and made `c28` was (1, 1)), one with `c130` at slot 13 (`c129.xy` equals `c130.xy` in every captured row), and one without the fog's near colour (the blend `sat(c67.z (d - c67.x))` was 1 on every fogged line). `part_fog` has `c28` = (0.5, 0.75), `c129` unlike `c130`; `fog_edge` stands 0.43 units past the fog's start. The same blind spots are in the captured rows ("The formulas against the captures": four of sixteen pixel mutations cannot fail there).
+- **Mutations** [measured: `out/tests/w910/t10_mut_clay.txt`, scratch copies, run alone]: the plan's two (`WaterLeavesOut` true for an opaque record with any verdict: case 843; `PlanWaterPlace` usable always: case 847) and the five wrong mirrors of the plan (`base`, `centre`, `near_far`, `sun_sign`, `fog`: case 851 each) fail the test, with the others of the list: 94 of 95. The one that does not fail is a different order of the three squares under the normal's length, which gives the same bits on every pinned line (a rounding-level change; said, not chased). The five wrong mirrors are text changes on a scratch copy, not `#if` blocks in the header: a wrong formula does not belong in a header the pass includes.
+
+### The reflection targets (plan Task 11)
+
+**2026-10-12 execution note:** the account below retains Task11's build-time
+status and153-slot sky-only reservation. Task13 runs that route; Task17 wires
+terrain/D32/scratch/own blur and amends472slots, "The targets' terrain" below.
+W1/W2 subsequently provide all stored normal levels, "Discovery captures".
+
+Built and tested without the game; nothing here has run in it. [code] throughout unless marked.
+
+- **The targets** (`ClayPass::EnsureWaterTargets`, `clay_pass.cpp`): four pictures of 256 x 256 `R8G8B8A8_UNORM` (render target, shader resource and, for the stored scene, copy source), resting in the pixel-shader-resource state; **one 256 x 256 `D32_FLOAT` depth target**, bound and cleared with each of them; and **one more picture, `water_blur_`**, the scratch of phase 13c's blur. The last two are what Task 17 needs and nothing of this phase reads or writes the scratch: the mirrored sky is tested less-or-equal at the far depth against the cleared depth and writes none, so the views' far terrain can be drawn into the same pair before it without another pipeline for the sky; a blurred view is then drawn sharp into the scratch and blurred into its target. 1.5 MB together. Made on the first frame whose water would otherwise be drawn, never with the switch off; a failure is logged once, turns every frame's water to `reflection` until the pass is rebuilt (another device, the F6 retry after a failure of the renderer), and leaves the pass and the renderer running. Destroyed with the pass's objects, before the sky step's (the pipeline is made of the sky's pixel program object).
+- **The mirrored sky** (`shaders::kSkyMirrorVs`, 1,804 bytes compiled; `sky_mirror_pipeline_`): `kSkyVs`'s triangle and position, and as `SV_ClipDistance0` the third component of the pixel's view ray, `s_ray0.z + X * s_rayx.z + Y * s_rayy.z` at the vertex's own clip position (`WaterSkyClipDistance`): the ray is linear in (X, Y), so the half of a target below the mirrored camera's horizon is cut exactly and keeps the clear value 0, as in the game's pictures. The pixel program is the sky step's own object (`sky_ps_`: nothing is compiled anew, and `kSkyVs` and `kClaySkyPs` keep their text and bytes). **Its layout is a new one** (`water_sky_layout_`), where the plan had the sky step's: the vertex program reads cbuffer Sky at `b0`, which the sky step's layout shows to the pixel stage alone; the sky step's layout is not changed.
+- **A target's constants**: `WaterViewRows(M, c31.xy, h)` of the frame's view-projection with the body's own `c31.xy` (every record of a base must hold the same two, bit for bit) and the height of its meshes; `SkyRayBasis` of those rows; `MakeClaySkyConstants` with the frame's fog and sky blocks; the sky's two textures, their samplers and scales as the main sky has them that frame; in the target's own small slot (`ClayWaterTargetSlot`). The **second frame block** (`WaterFrameBlock`: the frame's with the exposure 1 and 1 / 256; `ClayWaterFrameSlot`, 21 small slots) is bound at `b2` in the frame's block's place. In this phase one block serves all targets (the sky reads no eye and no inverse); Task 17's far terrain needs the mirrored view's inverse and eye a target and amends the count.
+- **The slots**: `water_step_slots_` is `kClayWaterStepSlots` (153) iff the frame's scene verdict is `drawn`, else 0; `FinishTerrain` sizes the buffer and plans the slots with it (`PlanClayFrameSlots(..., water_slots)`: CHECK 845 holds that with 0 the plan is the one of before over a grid).
+- **Drawn** (`DrawWaterTargets`) after the shadow maps and before the scene's targets are bound, only with the final verdict `drawn`: each target a render target for its own draw alone, cleared to 0 with its depth cleared to 1, one triangle.
+- **The water's two textures** (`TextureCache::ResolveWater`): the cache's own residency, per-frame sample hash, upload budget and dynamic rule (`ResolveFetch`, which is `ResolveImpl`'s body with the block layout, the level count, the key's kind and the upload's form given by the caller; an albedo takes the values it took), under a key of kind 3. The constant is judged by `WaterTextureFetch` before its address is followed. **The shore mask**: one level through `DecodeK8Level` to `R8_UNORM`. **The normal map: `BC5_UNORM`, every stored level** (ledger ruling 32): `WaterDxnUploadLevel` untiles the guest's 16-byte blocks and swaps their bytes by the constant's endian and decodes nothing; after the swap a block is the BC4 block of x and then that of y, which is BC5's red and green. The GPU then samples the palette entries as fractions over the stored levels with its own filter, as the emulator's does. **Held by test**: `DecodeBc5Rows`, what a GPU reads of such rows, equals `DecodeDxnLevel`'s float decode of the guest bytes float for float on a made tiled level with both palettes and on a level inside a packed tail (returns 257, 241), and **on the real map's base level of the three captures** [measured: `out/tests/w1112/t11_real_dxn.txt`]: 131,072 of 131,072 values equal, 75,559 of them (57.6%) no whole 8-bit step (the review's figure). The stored levels of the real map are in no capture in hand (W1). The views have no swizzle: the surface's program picks the channels by `ClayWaterConstants::swizzle`, which `WaterSwizzleWord` makes of the two fetches through `WaterHostChannel` (R8: every source channel is the byte; BC5: channel 0 red, the others green; the SDK's host swizzles `RRRR` and `RGGG`). A normal map that is not a whole number of blocks is refused (the surface's coordinates take no host scale). Neither format is entered in `TexFormatFromXenos`; `Resolve` is not changed.
+- **The stored scene, version 2** (`scene_dump.h`; `foliage_trace.read_dump`, `read_dump_water`): **a file is version 2 iff it has a flag above 4**, and a file without one is version 1, byte for byte the file of before (cases 110 to 113 of `test_scene_dump.cpp`). After every plane of before, in this order: flag 8, the scene's depth taken just before the water step (levels); **flag 32, the linear target taken right after the water step** (three floats a pixel: added by ledger ruling 44, see "The water step"); flag 16, a count (1 to 4) and for each reflection target its base, its height and 262,144 bytes (red, green, blue, alpha; rows from the top). A file with all of them and the layer's planes is 28.4 MB. Only a frame whose water is drawn has any of them. A plane whose read-back buffer cannot be made is left out of the file, counted `buffer` and logged; the scene's own dump goes on.
+- **Tests**: the shader test's case 55, parts (a) to (c): the 39 programs of before (case 54's 37 and the impostors' two) compile to the bytes recorded at `f87e556` (`out/tests/w1112/baseline_hashes_f87e556.txt`; the canary says whether the compiler is the one of the record); `kSkyMirrorVs`: cbuffer Sky at `kClaySkyFields`' offsets, one clip-distance output, the three z components read and no other, `kSkyVs`'s position instruction for instruction; the sky's pixel program takes `SV_Position` alone at the register the mirrored program writes.
+
+### The water step (plan Task 12)
+
+Built and tested without the game. **None of it has run in the game or on any GPU**: the software-adapter runs and the early look are owed (the task's report has the lines).
+
+- **The programs** (`shaders::kClayWaterVs` 2,740 bytes, `kClayWaterPs` 11,108 bytes; cbuffer `Water`, 464 bytes: `kClayWaterFields`). The vertex program pulls a vertex by `SV_VertexID` through the draw's index buffer and base vertex, as the clay vertex program does, and forms the position by the record's four rows with the same dot products (the surface lies at the depth a clay draw of the same mesh has). **`ClayWaterConstants` is 464 bytes** (448 before): the draw's base vertex and the vertices its position buffer holds were not in plan Task 10's block; two small slots a record as before. The pixel program's functions between the two markers are the reference written as HLSL (`tests/test_water_hlsl.py` translates them line by line and holds them to `light_formulas` by value: 24 tests, **none skipped since this task**; the 22 wrong texts of the fixture are applied to the header too and each fails).
+- **The main**: the mask at level 0 by its fetch's static sampler and the channel the swizzle word names; `WaterAlpha`; **`WaterFate`, the pixel's two answers by its two thresholds** (shaded: not killed and alpha above `c141.w`, else the colour is 0; drawn: not killed and alpha above the state's alpha reference, else discarded): the decision is a function of the text so that it is held BY VALUE at the pins' alpha lines, among them the line that is skipped and drawn and the line that is shaded and not drawn, and by three wrong texts that fold the thresholds or drop the kill (ledger ruling 43; the test of before asked only that both names occur). For a shaded pixel: the normal map's two samples with their own coarse screen derivatives (`SampleGrad`: the level the host computes over the stored levels), the lookup at the floor of the pixel's position, the record's own target at slot 13's coordinates at level 0, zero for slot 14 (spec ruling 21), fresnel, the mix, the sun's glint under `w_sun_on`, and the ground form of the fog (`FogForm`, unchanged) from the pixel's own view vector and distance. Out: `colour * w_out_scale`, each channel `(v > 0) ? min(v, 31.875) : 0`, with the pixel's alpha. **A colour or alpha that is no number is discarded** (`WaterFinite`: the sum of the four magnitudes below 3e38; the comparison is in the compiled code: case 55 part (f) and its control).
+- **Compiled** (case 55, parts (d) to (g)): the block at `ClayWaterConstants`' offsets in both stages; **34 register components read and 38 not, none of the unread an operand** (the table's read masks, minus `c130.xy`, slot 14's lookup, which the native draw does not make); the registers under the sun's bool are read inside its block alone; two discards; eight `sample_l` and eight `sample_d`, one executed a fetch behind its sampler's test; one target with its alpha, no depth output; controls for each.
+- **The step's objects** (`EnsureWaterObjects`): its own layout (`b0` the record's constants for both stages, `b2` the frame's block for the pixel stage, the record's positions, indices and mask coordinates as buffers at `t3`, `t4`, `t5` of the vertex stage, a table of three textures at `t0` of the pixel stage, the four static samplers), the two programs and one pipeline a cull mode: the colour pass's targets, source alpha over inverse source alpha, **the depth tested "less" and written** (the game's "greater" with the write under its reversed range: ledger ruling 27). Made on the first frame whose water would otherwise be drawn, never with the switch off; a failure is logged once and every frame's water is then `pipeline`.
+- **The frame's verdict** (`DecideClayWater`; one chain, the first thing missing decides), in two parts. At the head of `Render`, before the buffer is sized, the scene's own rules (`WaterSceneVerdict`): the switch in a scene captured with it, the records by kind, the frame's light, every opaque twin dead by its own `c141` (`WaterOpaqueDead`), the pairs whole, the scale. Only such a frame reserves the step's 153 slots and marks its records. Before any target is bound, the rest: each surface record's draw record by its place, its state from that record's own words judged again (`WaterSurfaceStateOf`; another state is `pipeline`), its positions with their box (`WaterMeshHeight`), indices and mask coordinates (`GeometryCache::Uvs` with a copy of the draw record whose coordinate stream is the vertex stream and whose layout is the pair's: two floats at byte 12 of a 20-byte vertex), its rows against the frame's one view-projection (`view`), its two textures (`texture`), the targets' plan (`plane`, `reflection`), the sky drawn with its constants (`reflection`), the place (`order`), the targets' and the step's objects asked last (`reflection`, `pipeline`), the buffer with the slots (`slot`), each record's constants (`MakeClayWaterConstants`, which judges the record again; one refused is `scale`).
+- **The output scale**: the lit draws' exposure. **In a post frame it is the game's `c20.w` and each record's own must equal it within a thousandth** (`WaterScaleMatches`); **in a frame without post (the default configuration: the native renderer and the water's switch alone) it is the pass's fixed exposure 2.22** (`kLitExposure`), as for every lit draw there, and a record's `c20.w` is held to its bound alone. The targets are drawn at exposure 1 in both.
+- **The place**: before the first prepared record at or beyond the first surface record's place (`PlanWaterPlace` over every prepared record's sequence number, index for index, so that its answer is a place of the colour loop; the plan had the dead draws left out of the list, which would have shifted the index), with the sky step and the early tail at or before it and the layer's depth not before it; the surface records one run among the drawn records without the dead draws (`WaterPlacesOneRun`). The loop draws it last of an index's steps: the tail, the layer's depth, the sky with the moon and the clouds, the water; **when the layer's depth and the water are due at one record the depth is taken after the water** (`ColourDue::depth_after_water`), so that the layer sees the surface. That rests on the sky step writing no depth, which holds for all three of its pipelines (`clay_pass.cpp`: the sky's `write_enable = false`, the quads' two, the clouds'). What the colour pass's order needs (the records left out for want of a buffer, whether the sky is drawn, whether the layer's depth is early, the coverage's order) is computed before any target is bound since this task: none of it records a command and its results are the ones of before.
+- **Only with `drawn`**: the frame's opaque twins (`Prepared::water_dead`) are left out of the pre-pass's pipelines, the pre-pass and the colour pass (`water_left_out`); the targets are drawn; the step is due. **The pre-pass and the shadow maps draw no water.** With any other verdict the frame is the picture of before, record for record: the surface records are counted `blend-unknown` and the twins `alpha-unknown` as before (held back in the prepare loop and counted once the verdict is final), and the reason is counted on the Water line.
+- **Lines**: F3's last line and, every 300 frames with the switch on, `[native] clay: Water: drawn 12 of 12, targets 4, opaque left out 12 | not drawn {light: 3 frames} | water-record {} | the step's CPU time this frame N ms`; `[native] clay: water changed at scene frame N: ...` when the line's form changes (the verdict, what was drawn; at most 16) and once for the first frame of each reason the water was not drawn for, with the place, the output scale and whether it is the game's or the fixed one, and the targets' bases and heights.
+- **With the switch off**: the pass tests a bool at each of the water's places and does nothing behind any of them; no record is marked, no slot reserved, no object made; the slot plan is the one of before (CHECK 845) and every program of before compiles to its bytes of before (case 55 part (a)).
+- **The stored scene's planes** (dump runs only): the colour pass is interrupted before the step for the depth (flag 8, through the depth step, as the layer's depth copy interrupts it) and after it for the linear target (flag 32); the targets are copied while they rest, after the pass (flag 16).
+- **The main by value** (ledger ruling 44; `water_replay.py main <capture> <scene.f2ns>`): the test frame does not reach the main (its fetches, which lookup pair goes to the picture, the floor of the position, the fog, the scale), and criterion 8 is not decidable at these views. The replay is therefore fed **the pass's own inputs**: the stored scene's own targets (`replay(pictures=)`), zero in slot 14's place, the stored exposure as the output scale, and (ledger ruling 46) **the depth test and the judged set from the stored scene's own depth before the water step** (flag 8, at the native pixel centre), so that nothing of the game's read-back is read and the software adapter's pair carries the check; and it is held per pixel against the stored plane of flag 32, on the judged pixels more than 3 pixels from the judged set's edge. **The bound, stated before any run**: the ratio of the means, native over replay, within 0.99 to 1.01 a channel; the median of the per-pixel luminance ratio within 0.99 to 1.01; its 5th to 95th percentile inside 0.95 to 1.08 (the replay-against-game's own span). `main_measure` holds this on made arrays (a channel 2% off misses the means; a scatter of 12% with a right mean misses the span; garbage in the edge band changes nothing; six mutations of the measures each fail: `out/tests/w1112/pymut`). **The number format** (ruling 46): the plane is R11G11B10 float (6 bits of mantissa in red and green, 5 in blue); the replay, held to the program's clamp of 31.875, is brought to the format with both roundings (to nearest, toward zero), the bounds are printed for each and for the exact replay, and the bound is applied to the rounding that lies nearer the stored plane, which the verdict line names (`main_rounded`; an exact replay against a truncating plane reads about 0.985 in blue: `tests/test_water_replay.py`, `Rounded`). **The runs that carry it**: the software-adapter dump run (`warp_dump`) and the real-GPU look run (`look_on`). `targets` (the native targets against the game's own pictures) stays a real-GPU check and ends "NOT DECIDED on this pair" where the game's pictures are empty. The made stored scenes of the tests are written by `tests/water_made.py`, held to `PackSceneDump`'s layout by one hash pinned in both (`DUMP_LAYOUT_PIN`; `test_scene_dump.cpp` case 114). What it cannot see: the bed under the surface (the replay blends over black: 0.3% of a pixel in open water, at most 1% of a judged one) and, on a capture without the map's stored levels, the difference between the 2 x 2 mean pyramid and the stored one.
+- **Also for the runs' reading**: `water_replay.py targets` (criterion 10's part of this phase: each stored target against the capture's picture of its base by criterion 5's two measures, and the targets equal texel for texel), `cover` (criterion 7: the native water pixels, those whose last depth is nearer than the stored depth before the step, against the replay's kept pixels, each side's share farther than one pixel; and the bed within 1% of the game's depth copy), `colour` (criterion 8's figures on the sky-sampling judged pixels, the far-shore pixels and the whole footprint, with the off-run's pair on the same pixels).
+- **What was not built as the plan words it**, each with its reason: the targets' layout is not the sky step's (above); the depth target and the blur's scratch are made now (the dispatch: Task 17 must not re-plumb); `ClayWaterConstants` 464 bytes (above); the plan's flag 8 "refused by the packer until Task 12" was not staged (both tasks are one build); the vertex program does not include the frame's block (it reads nothing of it); `MakeClayWaterConstants`' refusal is counted `scale`; a surface record without geometry is `plane` (no positions: no height) or `texture` (no indices or no coordinates).
+
+### Validation (13b)
+
+2026-10-12: phase 13b's surface and mirrored sky, with default water off. Full
+commands and outputs are `out/native-evidence/water/t13_*`; report
+`.superpowers/sdd/2026-10-12-native-renderer-water/task13-report.md`. Fresh pairs
+are logs 718/719 (bridge off/on), 720/721 (third), 722/723 (bridge sun), 724/725
+(defaults). Controller metadata `c13b_<name>_run.json` records the same binary
+`2F1980B20F7D3D11` before/after each run. Wind is explicitly off. All original
+driver labels remain **RUN UNCHECKED**. These read-back pairs are **no timing
+evidence**. No known freeze signature or D3D error was found; all six captures
+pass `check_discovery.py --rows-only`. Rejected first-batch bridge713 does not
+carry acceptance: its earlier snapshots are diagnostics only.
+
+| Criterion | Verdict | [measured] evidence |
+|---|---|---|
+| 6, captured records | met | 48/48 bridge and 44/44 third records bit equal, no problems; `t13_*_records.txt`. 16/16 reflection views within 1e-5; maximum1.437e-6; `t13_*_views.txt`. |
+| ruling44, surface main by value | met under ruling46 | `t13_*_main.txt`: native/replay RGB about1.0015–1.0027 under the explicitly selected nearer toward-zero rounding; luminance median1, p95 about1.008. Nearest rounding still misses blue and is retained. |
+| 7, surface cover and bed | met with the stated sampling calibration | `t13_*_cover_given_place.txt`: bridge0.41%/0.14% and third0.66%/0.06% farther than1pixel (bound2% each); pre-water bed95.4%/95.0% within1% of game's copy (bound80%). Off-side “before,” by the research's final native placeholder depth measure: **4.4% of18,788 bridge pixels /4.3% of21,103 third pixels** within1% of game's copy; `t13_*_off_gap_given_place.txt`, report-only, different plane/set from the on-side bed. Sampling(-0.25,-0.25) GIVEN from the prior identical-view calibration, not freshly fitted here; the cancelled fresh fit's empty file carries no evidence. |
+| 8, sky-sampling colour | not decidable as defined | `t13_*_colour_given_place.txt`: bridge1,173 / third3,200 sky-sampling pixels below5,000. RGB0.955/0.950/0.932 and0.974/0.971/0.958, hue-1.0/-0.7degrees; red/blue error more than halved against the paired off frame. Whole/far-shore figures are reported without a bound. |
+| 10, 13b sky targets | met | `t13_*_targets.txt`: four equal targets each pair; mesh heights equal; first content/horizon101/101.31 bridge,89/89.15 third; channel mean bound met. |
+| 13, sun-layer depth at lake | met | `t13_sun_layer.json`: first layer plane before trees,4,705 lake texels;99.9787% at19.95–20.15 (bound95%), median20.10103. Off identical, no off bound.195 no-water texels over game's bed below20.0024 reported without a cube bound. |
+| 14, common-set land | met | `t13_bridge_land.json`: shore+0.001036, outside+0.000569, island+0.000045, peak-0.000246. Third shore+0.000152, outside+0.000258. All within0.005; each pair's camera matrices exactly equal. The bridge-only island/peak rectangles are not invented at the third spot. |
+| 14, pools | **not met as written** | Absolute native/game luminance, common pool sets: bridge40.0 off1.03616/on1.04387,40.474 off1.03898/on1.04595; third40.0 off1.04767/on1.04980,27.52 off1.21455/on1.29570. These miss0.97–1.03 on off and on sides; no threshold reinterpretation. |
+| 15, off log/capture/programs/slots | met in these parts | Defaults724: one `[native] water: off`, no Water-step line. Bridge718: alpha-unknown12, blend-unknown27; captured off-frame rows water off. Controller attribution: sampler_fix_native_full.txt exit0,40PASS lines includes case55, CHECK845 and WaterLine; Python1877 OK skipped7, sampler fix e5edbda. The Task13 implementer reran no native/product suite. Old-image comparison remains not decidable. |
+| 15, old defaults image | not decidable as written | Ruling29 baseline706 PNG1944x1139, new724 PNG1942x1136; `t13_off_control.json` refuses the differing dimensions rather than silently resizing. Baseline696 is1942wide but enables post/bloom/sun/wind/coverage, so is not a defaults baseline. |
+| 15, same-width sensitivity control | met | New725 native40s over724 native40s lake1.147013, outside0.98–1.02; `t13_defaults_sensitivity.json`. This proves sensitivity only, not the old-binary image part. |
+| 16, graphics errors | first-batch software-adapter evidence | WARP711/712:0D3Derrors, warning1328 identical to pre-water675/685/694/699; main-by-value passes712. Its empty game pictures leave target-colour comparison not decidable. See `first-batch-verification.md`. A changed binding/text build still needs its own software-adapter gate. |
+| 17, cost | **not decidable**; frame-rate floor met | Solo logs733–736, `t13_timing_results.json` / `.txt`:61 steady150-frame windows, minimum40.6fps; off means18.5350/20.5564ms differ2.0214ms (over1.0), on means19.4131/18.9353 differ0.4778ms. Nominal mean cost-0.3715ms is not a cost verdict. Capture delta+0.010ms is not decidable below one thirdms; Water CPU medians0.0270/0.0275ms are separate instantaneous readings. |
+
+The controller viewed original fresh bridge36/44s and third44/50s shots: correct
+lake footprint, smooth sky-only colour, missing shore reflection as expected;
+no holes or displaced patches. This is a still-shot observation. Ripple drift,
+temporal z-fighting, shoreline fade and glint are not established by it.
+
+Timing provenance: metadata `c13b_time_<configuration>_<repeat>_run.json`
+records binary `2F1980B20F7D3D11` before and after all four, order off/on/on/off.
+The controller attests one session, the usual monitor, all agents paused and no
+concurrent analysis/build/test. All five shots per run are 1942 wide; all logs
+seed `guest_vblank_pacing=false`; drivers use POST/BLOOM/EXPO, wind off and no
+`readback_resolve` argument, with water the sole difference. No known freeze
+signature or D3D error. Driver labels remain RUN UNCHECKED. The first complete
+native window after each switch and all partial windows are excluded. Capture
+medians retain the distant-tree cost tool's native-level eligibility (records
+on, median above 0.5 ms), with raw values retained: off 1.907 / on 1.917 ms.
+Because off repetitions exceed the agreement bound, these measurements give
+no claim of speedup or compliance with the 0.5 ms cost limit. Relevant config
+and step lines: `t13_timing_config_extract.txt`.
+
+### Limits (13b)
+
+The sky alone samples too few lake pixels for criterion8. Rulings36/38 require
+phase13c's native terrain and the game's blur; no phase13c implementation or
+acceptance follows from these13b results. Houses/flares remain the named
+reductions of ruling38. The pool discrepancy predates the switch in these
+paired frames and the27.52 pool becomes brighter with water; its absolute bound
+is unmet and remains named. The old defaults-image comparison lacks equal
+dimensions; the new control tells water on/off apart but does not prove equality
+with the old executable. Stored normal levels are used by main; cover/colour
+retain the generated mean pyramid and given old sampling calibration. The
+selected nearer-rounding check is ruling46's substitute, not proof of one final
+hardware truncation. No motion claim or default-on recommendation is made.
+
+### The water's edge (plan Task 14)
+
+Task 14's bounded search is complete: **criterion 11 not decidable**, no W3 found
+after six walks and no V-EDGE pair. The controller's full read-back runs are
+**RUN UNCHECKED** (`-UserPresent`), water off, wind explicitly off, post/bloom and
+exposure read-back on; no timing claim. Driver outputs, metadata, logs and every
+requested shot are under `out/native-evidence/water/c14_*`; source captures and
+native dumps are in `out/build/win-amd64-release/logs/`. All logs have 0 D3D errors.
+e4/e5's work/swap-only heuristic is **SUSPECT** (work38–40ms, swap under1ms;
+no native geometry/decode windows). Nonzero native redraws and sequential scene
+frames alone do not prove a live guest. The blanket no-freeze claim is withdrawn;
+the controller accepts these two as static endpoint evidence under the manual
+audit below. All eighteen edge shots were viewed.
+
+Fresh `review-task14.md`, "Follow-up: manual audit", contradicts sustained frozen
+guest state at the captures and run ends: e4 frames2026/2027 have vertex c10
+clock78.0693054/78.3659897 and c115.x scroll1.7307544/1.7372895; e5 frames1699/1700
+have c10 78.1203079/78.1612091 and c115.x1.7128516/1.7137367; exposure changes too.
+Emulated72/96s shots change visibly (e4 hero/leaves/ripples, e5 leaves/ripples;
+mean RGB absolute differences3.9627/2.2475 byte levels). Guest commands still
+issue at e4's11:43:08.099 (frame2350,3730 draws,87 resolves) and e5's11:44:49.688
+(frame1950,3553 draws,90 resolves); e4 final draws vary3728–3730. Resolve CPU
+work27–55ms a frame explains the high-work/low-swap result [inferred]. The
+complete zero-upload/decode freeze signature was not established. This manual
+audit supports the static search endpoints. It does not establish uninterrupted
+physics, absence of brief hitches/user input, continuous motion or a timing result.
+
+`t14_shore.py/png/txt/json` maps every fading mask texel centre through its actual
+UV triangle in the twelve meshes of old155547 (counts743,463,887,747,653,736,842,
+39,167,255,243,793). Nearest sampled lake fade to the three old eyes is
+(68.929688,204.187515,20.102409). Distances on the map: bridge48.657, trees35.804,
+sun side51.210. The visible native depth near the approaches stays around the
+bridge's height; it includes objects and cannot establish hidden terrain or an
+opening through the fence. It suggested replacing two mesh-corner headings with
+LS(-97,25) from the bridge and LS(54,84) after the trees walk; neither descended.
+The last three routes retreated and tried around either side of the same fence,
+or the opposite bridge end. Full plans/reasons are in
+`.superpowers/sdd/2026-10-12-native-renderer-water/task14-report.md`.
+
+| Walk | Log; capture suffix; scene suffix (20261012) | Frame1 eye | Kept / fading / near pixels | Viewed endpoint |
+|---|---|---|---|---|
+| e1 |726;113458;113501|83.583771,160.473206,50.182434|10,059 /727 /0|Against bridge post/fence, distant lake sliver at right|
+| e2 |727;113640;113643|84.482468,171.950867,49.758259|0 /0 /0|Against tree-side fence in canopy, no water|
+| e3 |728;113822;113825|84.462059,171.927917,49.755009|0 /0 /0|Same tree-side fence, no water|
+| e4 |730;114248;114252|82.072098,157.339264,50.170704|18,426 /2,057 /0|Back on bridge, distant lake visible|
+| e5 |731;114429;114433|85.183548,159.593124,50.177670|33,871 /3,410 /0|At bridge post/rail, distant lake visible|
+| e6 |732;114611;114613|83.091049,160.630798,50.182434|10,347 /318 /0|At bridge post/rail, lake sliver at right|
+
+Counts: `t14_edge_counts.py/txt/json`, frame1, each capture's own emulated depth
+copy, declared sample place(-0.25,-0.25). This focused replay omits colour work
+(normal maps/reflections/fog) and retains the established vertex geometry,
+rasterizer, mask sampler, alpha formula, state's alpha/depth tests and depth
+writes. Its old155547 control exactly matches the full replay's18,429 kept/2,064
+fading/0 near (`t6_edge_155547.txt`). Eye-to-AABB bounds independently exceed35
+units for every captured mesh, including pools, proving near's upper bound0.
+Nearest kept water:107.73, none, none,114.38,100.00,108.75 units respectively.
+
+`t14_e1_audit.txt`, `t14_e2_audit.txt`, `t14_e3_audit.txt`,
+`t14_e45_audit.txt`, `t14_e6_audit.txt` check slot14: no resolve of frame1 targets
+its bases. At least one slot14 dump is nonzero in e1/e2/e3/e5/e6; all four e4
+dumps are zero. What the
+game intends the near picture to hold remains unknown. Six misses exhaust the
+planned search; shoreline fade and the near branch remain user checks.
+The earlier cancelled full edge tools produced empty files, which carry no
+evidence; the completed focused outputs above decide the search.
+
+### The sunward view (plan Task 14)
+
+**Criterion12 not decidable.** The old160104/160251 captures had0 qualifying
+glint pixels or no A17D row (`t6_glint_160104.txt`, `t6_glint_160251.txt`). The
+prescribed exploratory W4 used the held SUNHELD plan through100s: controller
+log729, capture113949, native scene113952. Frame1 eye
+(90.097015,158.370255,47.206989), scene frames1616/1617, **zero A17D rows**, hence
+exactly0 kept water pixels and0 with glint above5%. The four shots47/53/84/96s
+were viewed: upwards through bridge rails toward pink sky/sun, no water. Its
+log remains live with415–417 native draws and0 D3D errors. Evidence:
+`t14_w4_audit.txt`, `t14_edge_counts.json`, `c14_w4_*`. The cancelled full glint
+tool's empty output carries no evidence. No V-SUN pair or no-glint colour control
+was needed; the glint's sparkle remains a user check.
+
 ### The reflection views (plan Task 15)
+
+**2026-10-12 execution note:** the route/cost/code-gap discussion below is
+Task15's historical offline proposal. Task16 subsequently captures those own
+records; Task17 builds/runs terrain and blur as recorded in "Reflection draws"
+and "The targets' terrain". Its predicted triangle work is not measured cost.
 
 Phase 13c's entry conditions, without the game. Tools: `water_replay.py view` (the census and the replay; its head has the method and what it assumes), `water_check.py view-rule` and `view-terrain`, `post_check.py --water-blur`; tests in `tests/test_water_replay.py` (`ViewShare`, `ViewPictures`), `tests/test_water_formulas.py` (`ViewRule`, `ViewTerrain`), `tests/test_post_formulas.py` (`WaterBlur`). Evidence `out/native-evidence/water/t15_*`. Captures: `155547` (bridge), `155731` (third spot), `221449` (bridge, all switches), frame 1's pictures; the rule and the registers also on `155929`, `160104` and both frames. Everything below is [measured] on those unless it says otherwise.
 
@@ -8662,82 +9012,307 @@ Phase 13c's entry conditions, without the game. Tools: `water_replay.py view` (t
 **What the native route takes, and what it costs** [code read, nothing built]: 55 `7DDA` draws in four views a frame at the bridge and 52 at the third spot (10 and 7 in two views at the trees and on the sun side) with 1,325 and 1,253 patches, against the main scene's 57 and 60 `7DDA` draws with 1,337 and 1,447 patches among its 567 and 560 tess rows: the views' far terrain is as much again as the main scene's far terrain, 678,400 triangles at the native grid into four 256 x 256 targets (the main scene's far ground: 684,544). The rows are hooked draws of the adaptive builder outside the scene, which the capture today passes by (`OnXdkCall`: `RecordDraw` only inside the scene's bracket; outside it only `ObserveShadowDraw`, `ObservePostDraw`, `ObserveQuadDraw`, `ObserveLayerOccluder`); the shadow casters' path (`ShadowPassTracker`, `RecordShadowDraw`, `FrameBuilder::AddShadow`: draw records of their own with side arrays, proven whole at the frame's end) is the pattern, with `FillTerrainInputs` for the patches as `RecordDraw` uses it. Needed beside the plan's Task 16 and 17 as written: **the cull as the record's own word asks** (already in the spec's Design 9; this section shows it is what makes the picture), **the clip at `z = h`** (a clip distance in the far terrain's vertex program), the mirrored eye in the target's frame block for the fog, output scale 1, the blur's step with the row's seven offsets and its coordinate at the integral position, and a 4-sample or 2 x 2 target if the shore's edge is to be the game's (the game's views have four samples; the replay's 2 x 2 stands for them). Not needed: the export pass, the tessellation factors.
 
 **Ruling 37's fallback, measured for comparison** (`t15_resolves.txt`) [inferred where it says so]: a forced read-back list with the frame's slot-13 bases forces **6 resolves a frame** at the bridge and the third spot (`0x13401000` three times: the two 128 x 128 resolves of the earlier pass and the view's own; the other three once) and 4 at the trees and on the sun side; at sub-project 12's 1.81 ms for fourteen (0.13 ms a forced resolve on the usual monitor) about 0.8 ms a frame [inferred: not measured for these bases], and on the other monitor six more blocking waits (section 19, "Limits (12)"). Four pictures of 262,144 bytes are read from guest memory and decoded (`k_8_8_8_8`, tiled, endian 2: `water_check.decode_8888`). The pass runs after every resolve of the frame, so what it reads is this frame's picture, the blurred one where the game blurs. The list is seeded once at start-up (section 19, "The read-back list"), so the bases must be known beforehand: they are the same four in five captures of one region; no capture of another region is in hand. The route's figure for the lake is the first column of the table above.
-### Water records (plan Task 9)
+### Reflection draws (plan Task 16)
 
-Behind `--fable2_native_water` = `off` (default; also `false`, `0`), `on` (also `true`, `1`). `capture/water_record.h` (pure; `tests/native/test_water_record.cpp`), `capture.cpp` ("The water records"), `render/frame_scene.h`. **This step captures; nothing is drawn by it** (the targets are plan Task 11's, the surface step Task 12's). **Not yet run in the game**: everything below is [code] and unit tests, except where a figure names the captures in hand.
+2026-10-12 [code]: `reflection_view.h` tracks complete pitch-280 off-scene,
+non-shadow view runs while water is wanted. Each `7DDA` patch gets its own
+616-byte DrawRecord, terrain patch and light inputs in `FrameScene`'s
+`reflection_draws`, `reflection_terrain` and `reflection_lights`, with bounded
+`reflection_views`. The observer uses existing geometry/material readers,
+requires the record's own output scale 1 and keeps its own cull word, mirrored
+eye and c11.x. It does not borrow main-scene rows or side-array indices.
 
-- **Which draw.** A main-scene draw whose pixel shader has a no-albedo entry (`FillMaterial`, inside `if (albedo->slot < 0)`), in a frame with records and the switch on (`g_water_frame`, latched at the frame's boundary beside the impostors' word), whose pixel shader's hash is `A17D8AEC3A817D45` (kind `surface`) or `F6D98C7B4D98438B` (kind `opaque`): `ObserveWaterDraw`. Any other no-albedo draw returns there at once. **The draw keeps making the draw record it made before** (a `no_albedo` record; the frame's fog block is still read at the first `F6D9` draw); `DrawRecord` stays 616 bytes (`tests/native/test_draw_record.cpp` return 151).
-- **What is read** (before the scene's mutex): the vertex shader's hash (`BEAD84BD72072E0E`, else `shader`); the pixel shader object's own literal table against `water_table.inc`'s `c254` and `c255` (every component bit for bit; asked once an object and frame; a table that loads one of the 24 registers is `literal` too); the vertex shader's two decoded fetches (`WaterFetchList`); vertex `c115` to `c118` from the bank (no buffer load names them: a static assert); the 24 pixel registers as `ReadPixelConstant` gives them (`ReadWaterPixelRegisters`: `c0`, the one register of the table a constant-buffer load can name, through `ReadPixelConstant` itself; the other 23 from the device's bank, their one source, after the shader's own literal table is known to load none of them); the fetch constants of slots 1, 2, 13 and 14; the base addresses of slots 4 and 5; the pixel bool word of its last writer.
-- **The bool word.** The device's shadow is not the GPU's word (`0x100` against `0x110` in 164 of 164 captured water rows; both have `b136` set and `b137` clear, so the rows cannot tell which word decides). The record takes the last writer's, by the impostors' rule (`ImpostorBoolWord`: the draw runs the GPU-owned pair of the thread's last `GpuLoadShaders` call and one of the two uses flow constants, which `A17D` and `F6D9` both do: `cexec b136`, `cexec b137`; or a builder's flush since); anything else is `unread`. The word is followed while either switch is on (`g_pbool_follow`: `kFollowImpostors`, `kFollowWater`; the three places that follow it test `kFollowWord`). **The following begins anew (the epoch) only when neither followed it in the frame before**: the plan had the epoch bumped whenever either began, which would have cost the impostors one frame of records (`unread`) each time the water's switch came on in a running game; with the word followed without a gap there is nothing to forget, so neither switch costs the other a frame.
-- **The record** (`WaterRecord`, **584 bytes**: 16 hashes; 16 place, kind, bool word, stride; 64 vertex registers; 384 pixel registers, unread components as the game left them; 96 four fetch constants; 8 the two fog tables' bases). The state words, the alpha test's reference among them, are **the draw record's own** (`DrawRecord::state_words`), which `place` = `DrawRecord::seq` names: so the two thresholds are two numbers in two places, `ps[kWatP141][3]` (shaded against colour 0, inside the shader: `0x3D70F0F1`) and the draw's alpha reference (drawn against not: `0x3D70F0F2`). At most **64 records a frame** of both pixel shaders (24 at the bridge).
-- **The rules** (`CheckWaterDraw`, then the copy in `MakeWaterRecord`, made in `RecordDraw` with the draw's own state words; the first that fails is the reason, counted under `water-record`): `unread` (also a draw whose draw record is itself skipped, and a draw seen that was never answered); `shader`; `literal`; `fetch-list` (not two fetches of one stream of 5 dwords, format 57 at dword 0 and format 37 at dword 3); `register`; `scale` (`c20.w` not in (0, 64]); `state`; `fetch`; `shadow-term` (`b137` set); at the frame's end `fog`; `over-limit` (the 65th).
-  - **`register`: only what a formula reads.** A component is judged exactly when the table's read mask has it (50 of the 96 pixel components, the x and y of the four vertex registers) **and** its register is read with the draw's bool word: `c136`, `c137`, `c138`, `c142`, `c143` only with `b136` set; `c139` never (it is read under `b137` alone, and such a draw gives no record). Everything else is carried bit for bit and never looked at, not even for being a number (`c129.z` is no number in every captured row). A judged component must be a number inside its kind's sanity bound (`water_table.inc`: a place within 1e6, a factor within 65,536; the vertex registers are factors, as `gen_water_table.VS_KIND` has them), **fitted to no capture**; kind 3 (`c128.x`, `c136.x`, `c138.x`) is in [1 / 65,536, 65,536], strictly above 0 (ledger ruling 34: the console's zero-product points give no record). The spec's named bounds besides: `c31.xy` in (0, 4]; `c131.x` in [0, 64]; `c128.x` and `c136.x` at most 64; `c141.w` in [0, 1]; `c0.zw` the reciprocal of 1120 x 720 within 1e-6 relative. **Since the review of Tasks 4 to 15 (ledger ruling 42):** `c131.x`, `c128.x` and `c136.x` have their KIND's bound alone (within 65,536; the latter two at least 1 / 65,536). The spec's `c131.x` in [0, 64] refused a value the formula takes (it saturates the mix factor: a negative one means no reflection), and 64 for `c128.x` and `c136.x` was a multiple of this region's values; a made record of another region (a 512 x 512 mask, a 2,048 x 2,048 normal map, `c131.x` = -0.5, `c128.x` = 200) passes whole (return 49; `gen_water_table.other_region`), and garbage is refused as before. **A reason that empties a frame's water is said at once**, the first time it occurs in a run: `[native] capture: water: the first draw refused for "<reason>" (water-record): vs ... ps ... pbool ...: <the value>` (`DescribeWaterRefusal`: the first component outside its bound with its value and bits, `c20.w`, the state words, the first refused slot's constant, the stream's shape; return 51), or `the first frame refused for ...` for the frame's own reasons (a record whose fog is not the frame's block, the 65th record, a draw seen and never answered); later ones are counted in the 300-frame line as before. The record a draw of the pair makes is a thread-local, written on the water's path alone (the review's Minor 1: a local of `RecordDraw` was 584 bytes zeroed at every recorded draw).
-  - **`state`, by decoded fields** (`DecodeRenderState`), not by whole words: valid; depth test and write under the reversed range; four colour channels; alpha test "greater" with a reference in [0, 1]; no alpha-to-mask; the surface besides depth function 4 and the colour blend source alpha, inverse source alpha, add; the opaque twin depth function 6 and no blend. (The plan had the opaque twin held to its measured words whole. A whole-word compare refuses a draw for a bit whose meaning nobody established, which is what sub-project 12's packet rule had to be mended for; `test_water_record.cpp` return 38 holds that such a bit is not compared.)
-  - **`fetch`** (ledger ruling 33): slot 1 by `render::WaterTextureFetch(kK8)`, slot 2 by `(kDxn)`, each of which now also refuses (`FetchError::kSign`) a constant that does not deliver its components as unsigned fractions: a sign field other than 0 on a delivered component (x for the mask; x and y for the normal map), the integer number format, an exponent adjust; and for the normal map alone (`FetchError::kLodBias`, "lod-bias"; ledger ruling 46) a LOD bias other than 0 (dword 4 bits 12 to 21): the surface's program hands the GPU the coordinates' derivatives as they are, so such a map would be drawn a level off (the captured constant's field is 0; the mask is sampled at level 0 and its bias is not judged); slot 13 a 2D `k_8_8_8_8` picture of 256 x 256 with a base and without a sign (gamma among them) on its three colours. Slot 14 is not judged (spec ruling 21). So a mask's sample is a number in [0, 1] whenever a record exists, which the dead draw's proof stands on.
-  - **`fog`** (`WaterFogMatches`, at `FrameBuilder::Finish`): the record's slots 4 and 5 at the frame's two tables by base address, and `c28.xy`, `c66.xyz`, `c67.x`, `.z`, `.w`, `c68.xyz` bit-equal to the frame's validated fog block; in a frame without a valid block every record is `fog` (the native surface is fogged from the frame's block and is never drawn unfogged).
-  - Both kinds are judged alike but for the state: the opaque twin is the same formula with another kill.
-- **Whole or empty** (spec ruling 11; `FrameBuilder::AddWater`, `Finish`): if any reason was counted in the frame, of either kind, `FrameScene::water` is empty and the counts say why; else it holds every draw of the pair in the frame's order. A reader may take `water` as it is. The records of a frame refused whole are kept apart in `FrameScene::water_evidence`, which the discovery row alone reads.
-- **The rules on the captures in hand** [measured: `out/tests/w910/t9_rows_check.txt`; a scratch program that feeds `MakeWaterRecord` and `FrameBuilder` the rows' own words]: **164 of 164 water rows of five captures give a record, and each of the ten frames is whole** (24, 24, 22, 22, 6, 6, 6, 6, 24, 24 records; surface and opaque equal in each); capture `160251` has no water row and its two frames hold none. This holds the pure rules to real rows; it does not run `capture.cpp`'s own reading (the literal table, the bool word's last writer, the bank), which no test reaches: the runs below are its first check.
-- **Switch off**: nothing is read, no record or array is made (`FrameScene::water` has no memory and no block of 64 is allocated: `test_frame_scene.cpp` return 220). Per draw [code, by reading the diff, and held as source text by `tests/test_water_literals.py`, `Record`; no instruction count was made]: a draw whose pixel shader has an albedo entry executes one compare of its own material status in `RecordDraw` (a byte of the draw's inputs, written a few lines before) and one test of a local under the scene's mutex; a no-albedo draw besides one load of `g_water_frame` and a branch in `FillMaterial` and one load of a thread-local byte. The plan had every recorded draw load that thread-local byte; the material status is asked first, so only the no-albedo draws do. `OnGpuLoadShaders` and a draw's return test the same word as before under another mask. A frame: one load, one exchange, `WaterOn`; in `Finish` a store, a fill of 12 counters and a `clear()` of an empty vector.
-- **Evidence a capture carries**: every in-scene `"draw"` row of a frame with records now has `"seq"`, the `DrawRecord::seq` its draw was recorded under (`RecordDraw`'s answer, handed to the row's writer: no thread-local, nothing read). The frame row's `"water"`: `"off"`, or `{"on":true,"whole":bool,"seen":{"surface":S,"opaque":O},"taken":T,"refused":{reason: n},"records":[{"place","kind","ps_hash","vs_hash","pbool","stride","vs":[16 words],"ps":[96 words],"fetch":[[6 words] x 4],"fog_base":[2 words]}]}` (floats as their bits), **written from the scene's stored records** (`AppendFrameWater` reads `FrameScene::water`, or `water_evidence` with `"whole":false`), not from a second read at the draw. `water_check.py records <capture>` holds each record to the row whose `"seq"` is its place, bit for bit (the vertex registers against `"bank"`, the pixel registers against `"pfull"`, the fetch constants and the two bases against `"tf"`, the bool word against `"pbool_load"`, the hashes, the stride), `seen` and `taken` to the frame's in-scene `BEAD` rows by pixel shader, and every such row to having its record (spec criterion 6). The place is exact because the row carries its own number: sub-project 12's records could hold a place only to an interval (its review of Tasks 8 and 9, Minor 1).
-- **Log**: `[native] water: off|on (fable2_native_water)` at install, always; with the switch on, every 300 frames `[native] capture: frame N water: seen S (opaque O), taken T | water-record in F of W frames {reason: n}`.
-- **Cost with the switch on** [code; not measured]: a water draw reads about 30 small guest ranges (4 vertex registers, 23 pixel registers from the bank, `c0` through the load model, 6 fetch constants) and copies 584 bytes; the frame allocates one block of 64 records (37,376 bytes) under the scene's mutex in a frame that has water. 24 such draws a frame at the bridge.
-- **Never run**: any of it in the game. The runs that decide it are `r9_bridge_on`, `r9_third_on` and `r9_bridge_off` (the task's report has the lines).
+The maximum is 256 records in 8 views. An indexed `F760` sky completes the
+run; a following `F186` BeginVertices marks that view blurred and supplies its
+seven xy offsets and weight from the actual guest row/literal. The view's
+three integers are therefore extended with `offsets[7][2]` and `weight`;
+unread zw are neither copied nor judged. Finite offset bounds are [-1,1],
+weight (0,1]. Objects, flares and the tessellation export make no terrain record.
 
-### The water's rules (plan Task 10)
+The frame's set is whole or empty, with reasons 1 over-limit, 2 incomplete view,
+3 refused record. Every observer handoff checks the captured epoch and water
+latch under `g_scene_mutex`, which also finishes and advances the scene. Water
+off holds no reflection records. A refused set cannot leak to the next frame.
+Fix round 1 restricts the post-sky exception to the known indexed `D72F` flare:
+export-only and sky-only new runs are counted and may refuse the entire set,
+including a ninth view. No SDK, readback list, shader, binding, target, sun-depth
+place or renderer draw step changes in this capture task.
 
-`render/clay_logic.h`, "Native water" (pure; `tests/native/test_clay_logic.cpp` cases 838 to 858; `tests/test_water_literals.py`, `Mirrors`). **No binding, target or shader text is in this step, and nothing calls these functions yet**: plan Tasks 11 and 12 wire the verdict, the targets, the place, the constants and the mirrors; Tasks 16 and 17 the rules of phase 13c at the section's end. [code and unit tests throughout; "measured" where a figure names a file]
+Discovery writes view first/count/blurred, blur inputs, count/refusal, and exact
+bit-pattern record evidence. `water_check.py reflection` compares those with
+the independent same-frame tess rows: matrices/state, patch/material floats,
+five fetch constants, height layout, own light factor and blur data; omissions,
+reordering and bit differences fail. New tracker cases 1–17, builder cases 230–241
+and six Python checker cases include discriminating mutations. Initial and
+fix-round native suites pass; the current controller rebuild supersedes the
+initial `44F068...956D6` build with SHA-256
+`33A7E12AC139BB42ECFC3707CF52F9D4007F0BCDF3C9DACF51D6CDAD2AA05056`
+(`t16_fix1_game_build_root.txt`). Controller runs737/738 captured this SHA,
+not the later `E3CE579D...6689E` relink. Their reflection checks pass214/214
+exact records: bridge55/55, view counts36/4/12/3, blur1/1/0/0; third52/52,
+view counts33/4/12/3, blur1/0/0/0. Water checks pass48/48 and44/44. Evidence:
+`t16_fix2_bridge_reflection.txt`, `t16_fix2_third_reflection.txt` and the
+controller's structural checks in `task16-report.md`.
 
-- **The dead draw** (`WaterOpaqueDead`, spec ruling 12): `min(c141.x, c141.x - c141.y) >= 1e-6` with both magnitudes at most 4, **the difference and the comparisons in double on the single inputs against the double 1e-6**. The single nearest 1e-6 is `0x358637BD`, which lies below it: a single-precision margin would call a `c141` dead that the reference refuses (pin: `0x358637BE` is dead, `0x358637BD` is not). The 14 dead pins agree. It holds for a mask in [0, 1], which the record's fetch rule guarantees ("Water records").
-- **The mirrored camera** (`WaterViewRows`, spec ruling 15): a row (a, b, c, d) of the frame's view-projection becomes f (a, b, -c, d + 2 h c), f = `c31.x`, `c31.y`, 1, 1; in double from the singles, each entry rounded once; refused for a value that is no number, a factor outside (0, 4] or a height beyond 1e6. **Bit-equal to the three view pins** (which are the Python reference; the game's own view rows equal it within 1.4e-6 in 32 of 32 views: "The formulas against the captures"). The sky's ray basis of the result does not depend on the height (two bodies' targets are equal in phase 13b) and its centre ray is the main view's with the third component turned.
-- **A mesh's height** (`WaterMeshHeight`): the mesh's position box with `hi.z - lo.z <= 1e-3`; h is `lo.z`.
-- **The targets** (`PlanWaterTargets`, spec ruling 16): one for each distinct slot-13 base of the frame's surface records, **ascending by base**, at most 4; `plane` for a mesh that is not flat or two heights on one base more than 1e-3 apart, else `reflection` for a fifth base (the enum's order decides when both hold). **The ascending order is phase 13c's rule as well**: the game's k-th reflection view of a frame is the picture at the k-th smallest base ("The reflection views"), so target k is view k's (`PlanWaterViews`: with as many views as targets, view k fills target k; with more or fewer, none, and every target holds the sky alone).
-- **The verdict** (`DecideClayWater`; `ClayWater`, names `drawn, off, no-records, light, opaque-live, pair, plane, view, reflection, texture, order, pipeline, slot, scale`): the first reason in `kWaterDecisionOrder`, which is that order **but `view` before `plane`** (ledger ruling 46; the review of Tasks 11 and 12, I1: a record whose draw record is not found, whose layout is not `kDot` or whose rows are not the frame's is never asked for its positions, so it has no height and `PlanWaterTargets` says `plane` for it; with `plane` judged first the log named the mesh's flatness where the cause was the lookup or the matrix. A frame reads `plane` only when every record passed the view's checks). `slot` is also the verdict of a scene with more surface records than the step holds (`WaterRecordsFit`; the capture's cap makes it unreachable, and such a scene no longer reads `drawn` with nothing prepared); `WaterSceneVerdict` is what the head of a Render can say before the frame's buffer is sized (the switch, the records, the light, the dead draw, the pairs, their number, the scale); the step's slots are reserved iff it says `drawn`. **`WaterLeavesOut`: an opaque record is left out of the pre-pass and the colour pass iff the verdict is `drawn`, for every verdict; a surface record always** (Review Focus 2).
-- **The step's place** (`PlanWaterPlace`): before the first prepared record whose `DrawRecord::seq` is at or beyond the smallest place of the frame's surface records (after the last when there is none). Usable only if the sky step and the early records' tail lie at or before it, **and the sun layer's depth is not taken before it** (added to the plan's rule: with the dead draw left out, a layer's depth taken before the water step holds the lake's bed where the game's holds the lake's level, and the beams would pass through the lake; in the captures the layer's place stands after the water's rows). `ColourDue` gains `water` (drawn last of an index's steps, after the sky step) and **`depth_after_water`**: when the layer's depth and the water are due at the same index the loop takes the depth after the water, not before the sky as in every other frame. That order rests on the sky step writing no depth, which Task 12 must hold where it wires the loop. `WaterPlacesOneRun`: no drawn record between the first and the last surface place, else `order` (the step has one place). `WaterDrawIndex`: the draw record a water record names, by its seq (`FrameScene::draws` holds the drawable records alone, so a seq is not an index).
-- **The constants** (`ClayWaterConstants`, **448 bytes**, two small slots a record: 64 the draw record's rows, 64 `c115` to `c118`, 288 eighteen pixel registers, 16 the alpha reference, the output scale, `sun_on`, `fog_on`, 16 three samplers and the swizzle word). **Eighteen registers, not the plan's seventeen** (its own list names eighteen: the record's 24 less `c20`, which is `out_scale`; `c28`, `c66`, `c67`, `c68`, which are the frame's fog block; and `c139`, which no record reads). `alpha_ref` is at byte 416 and `swizzle` at 444. `MakeClayWaterConstants` refuses, with the output untouched: a record that is not a valid surface record; a draw record that is not the one the record names (`seq` = `place`) or whose row layout is not `kDot` or whose rows are not numbers within 1e7; registers that fail the capture's own rule again (`capture::WaterRegistersBounded`: one function for both, so `c128.x`, `c136.x` and `c138.x` are above 0 here too); a scale outside (0, 64]; a reference outside [0, 1]; a sampler above 3; a swizzle field above 5. Unread components are carried bit for bit. `kClayWaterStepSlots` = 2 x 64 + 4 + 21 = 153 (the records', the targets' sky constants, one second frame block: `WaterFrameBlock`, the frame's with the exposure 1 and 1 / 256); `PlanClayFrameSlots` and `ClayFrameSmallSlots` take `water_slots` after the impostors', and with 0 the plan is the one of before, slot for slot (case 845).
-- **The mirrors** (`WaterPositionMirror`, `WaterCoordsMirror`, `WaterAlphaMirror`, `WaterFateMirror`, `WaterDrawn`, `WaterPixelCore`, `WaterPixelMirror`): single precision, contraction off, the reference's order term for term (they are `tests/test_water_hlsl.py`'s `FIXTURE` in C++). **At the pins (10 vertex, 12 alpha, 19 of 20 pixel, 3 view, 14 dead lines) every value is bit-equal to the single-precision reference** under this compiler (`water pins: ... values not bit-equal to the pin: 0`), the intermediate ones too (both lookups, the normal, the fresnel factor, the distance, the sun term, the fog's two coordinates); the test's bound, should a compiler differ, is 4 units in the last place. Two lines are not compared whole, each said in the test: the line with `b137` (no record has it; the block has no `c139`), and the sun term of the line with a power of exactly 0 (below).
-  - **The four zero-product points** (ledger ruling 34) are written out as in the HLSL: the three reciprocal square roots give 0 for a sum of squares of exactly 0 (a flat normal with `c128.x` = 0, a pixel at the eye, `c136.x` = 0 on a flat pair: the pins' lines `flat_zero`, `at_eye`, `second_flat` are met bit for bit), and the power gives 0 on a cosine of 0. At a power of exactly 0 the console gives the sun's whole colour and the mirror, like the HLSL, 0: no record has such a power, and the test holds that line's sun term to 0 and the pin's to the console's value.
-  - **Two thresholds**: `c141.w` decides shaded against colour 0 (`WaterFateMirror`); the state's alpha reference, `ClayWaterConstants::alpha_ref`, decides drawn against not (`WaterDrawn`). A skipped pixel that passes the state's test is drawn with colour 0 at its alpha, as in the game; the alpha pins have a line of each kind.
-  - **A colour or alpha that is no number is a discard** (`kept` false), never a clamp to black.
-  - Slot 14 is an input of the mirror (`WaterPixelIn::slot14`) so that the near branch's arithmetic is pinned with a picture there; the native draw gives zeros (spec ruling 21).
-- **Phase 13c's rules, as pure functions** (plan Task 15 found them; nothing wires them yet):
-  - *The cull*: `ReflectionViewCull` decodes the view record's own `0x2205` (`0x00218006`: back faces culled, clockwise is front; the main scene's `0x00218002` has the winding the other way). `ViewHandedness` (the sign of the determinant of rows 0, 1, 3) is turned by the mirror, and `WaterViewCullConsistent` says whether a view's word is the main scene's with the winding turned exactly as its camera turns the handedness. Case 855 shows on a pinned camera why the record's own word must be used: under the mirrored camera the view's word draws the side of a ground triangle the mirrored eye faces, and the main scene's word the other one.
-  - *The clip*: `WaterClipDistance(z, h)` = z - h, kept at 0 or above (the far terrain's mirrored vertex program); `WaterSkyClipDistance` = the third component of the pixel's ray (the mirrored sky of Task 11). **The horizon's row it gives from the derived camera alone is 101.31 at the bridge and 89.15 at the third spot**, where the replay derived 101.3 and 89.2 and the game's pictures begin at rows 100 to 103 and 89 to 91 (`out/native-evidence/water/t6_sky_*.txt`): the target is not upside down.
-  - *The blur*: `WaterBlurConstants` (128 bytes), `MakeWaterBlurConstants` (the row's seven registers, of which only the xy are read, and the literal weight; an offset beyond one picture or a weight outside (0, 1] is refused), `WaterBlurCoord` (**the pixel's integral position over the size, not the texel's centre**), `WaterBlurMirror` (seven taps in the microcode's order, a tap that is no number counts as 0, alpha 0). The captured hexagon and weight are constants for tests alone.
-- **Two pins were added by this task** (`water_pins.py`, `MADE_PIXELS`: `part_fog`, `fog_edge`), because the mutation run found three wrong mirrors that met every pin of before: one without `c28.x` (the plan's own "fog" mutation: every captured and made `c28` was (1, 1)), one with `c130` at slot 13 (`c129.xy` equals `c130.xy` in every captured row), and one without the fog's near colour (the blend `sat(c67.z (d - c67.x))` was 1 on every fogged line). `part_fog` has `c28` = (0.5, 0.75), `c129` unlike `c130`; `fog_edge` stands 0.43 units past the fog's start. The same blind spots are in the captured rows ("The formulas against the captures": four of sixteen pixel mutations cannot fail there).
-- **Mutations** [measured: `out/tests/w910/t10_mut_clay.txt`, scratch copies, run alone]: the plan's two (`WaterLeavesOut` true for an opaque record with any verdict: case 843; `PlanWaterPlace` usable always: case 847) and the five wrong mirrors of the plan (`base`, `centre`, `near_far`, `sun_sign`, `fog`: case 851 each) fail the test, with the others of the list: 94 of 95. The one that does not fail is a different order of the three squares under the normal's length, which gives the same bits on every pinned line (a rounding-level change; said, not chased). The five wrong mirrors are text changes on a scratch copy, not `#if` blocks in the header: a wrong formula does not belong in a header the pass includes.
+Fix round2 is a checker correction: serialized integer zero in c46.zw/c14.xy
+must be converted to float32 before unary arithmetic to retain signed zero.
+All strict bit comparisons remain; no product source changed in that fix.
+Six focused tests pass. The earlier controller full Python suite passed1885
+tests in536.686s, seven skips (`t16_python_full_root.txt`); the final fix2 full
+suite passes1886tests in527.866s, seven skips, exit0
+(`t16_fix2_python_full.txt`). `review-task16.md` approves the fresh
+implementation/fixes; the combined Task8/16 ten source/test paths are
+committed as `2fcd472`.
 
-### The reflection targets (plan Task 11)
+Both runs are1296x759 full readback and labelled RUN UNCHECKED. The static
+audit finds advancing water clocks/scroll, changing emulated endpoint pictures
+and continued draws/resolves; viewed native footprints match the sky-only
+surface expected before Task17. Whole-run freeze is **NOT EXCLUDED**: no
+aggregate guest windows were retained. Endpoint evidence establishes neither
+continuous motion nor absent input. Capture cost is **not decidable** against
+the1942-wide13b captures with differing configuration. No timing or final13c
+rendering acceptance is claimed (`t16_static_audit.txt`, `task16-report.md`).
 
-Built and tested without the game; nothing here has run in it. [code] throughout unless marked.
+### The targets' terrain (plan Task17)
 
-- **The targets** (`ClayPass::EnsureWaterTargets`, `clay_pass.cpp`): four pictures of 256 x 256 `R8G8B8A8_UNORM` (render target, shader resource and, for the stored scene, copy source), resting in the pixel-shader-resource state; **one 256 x 256 `D32_FLOAT` depth target**, bound and cleared with each of them; and **one more picture, `water_blur_`**, the scratch of phase 13c's blur. The last two are what Task 17 needs and nothing of this phase reads or writes the scratch: the mirrored sky is tested less-or-equal at the far depth against the cleared depth and writes none, so the views' far terrain can be drawn into the same pair before it without another pipeline for the sky; a blurred view is then drawn sharp into the scratch and blurred into its target. 1.5 MB together. Made on the first frame whose water would otherwise be drawn, never with the switch off; a failure is logged once, turns every frame's water to `reflection` until the pass is rebuilt (another device, the F6 retry after a failure of the renderer), and leaves the pass and the renderer running. Destroyed with the pass's objects, before the sky step's (the pipeline is made of the sky's pixel program object).
-- **The mirrored sky** (`shaders::kSkyMirrorVs`, 1,804 bytes compiled; `sky_mirror_pipeline_`): `kSkyVs`'s triangle and position, and as `SV_ClipDistance0` the third component of the pixel's view ray, `s_ray0.z + X * s_rayx.z + Y * s_rayy.z` at the vertex's own clip position (`WaterSkyClipDistance`): the ray is linear in (X, Y), so the half of a target below the mirrored camera's horizon is cut exactly and keeps the clear value 0, as in the game's pictures. The pixel program is the sky step's own object (`sky_ps_`: nothing is compiled anew, and `kSkyVs` and `kClaySkyPs` keep their text and bytes). **Its layout is a new one** (`water_sky_layout_`), where the plan had the sky step's: the vertex program reads cbuffer Sky at `b0`, which the sky step's layout shows to the pixel stage alone; the sky step's layout is not changed.
-- **A target's constants**: `WaterViewRows(M, c31.xy, h)` of the frame's view-projection with the body's own `c31.xy` (every record of a base must hold the same two, bit for bit) and the height of its meshes; `SkyRayBasis` of those rows; `MakeClaySkyConstants` with the frame's fog and sky blocks; the sky's two textures, their samplers and scales as the main sky has them that frame; in the target's own small slot (`ClayWaterTargetSlot`). The **second frame block** (`WaterFrameBlock`: the frame's with the exposure 1 and 1 / 256; `ClayWaterFrameSlot`, 21 small slots) is bound at `b2` in the frame's block's place. In this phase one block serves all targets (the sky reads no eye and no inverse); Task 17's far terrain needs the mirrored view's inverse and eye a target and amends the count.
-- **The slots**: `water_step_slots_` is `kClayWaterStepSlots` (153) iff the frame's scene verdict is `drawn`, else 0; `FinishTerrain` sizes the buffer and plans the slots with it (`PlanClayFrameSlots(..., water_slots)`: CHECK 845 holds that with 0 the plan is the one of before over a grid).
-- **Drawn** (`DrawWaterTargets`) after the shadow maps and before the scene's targets are bound, only with the final verdict `drawn`: each target a render target for its own draw alone, cleared to 0 with its depth cleared to 1, one triangle.
-- **The water's two textures** (`TextureCache::ResolveWater`): the cache's own residency, per-frame sample hash, upload budget and dynamic rule (`ResolveFetch`, which is `ResolveImpl`'s body with the block layout, the level count, the key's kind and the upload's form given by the caller; an albedo takes the values it took), under a key of kind 3. The constant is judged by `WaterTextureFetch` before its address is followed. **The shore mask**: one level through `DecodeK8Level` to `R8_UNORM`. **The normal map: `BC5_UNORM`, every stored level** (ledger ruling 32): `WaterDxnUploadLevel` untiles the guest's 16-byte blocks and swaps their bytes by the constant's endian and decodes nothing; after the swap a block is the BC4 block of x and then that of y, which is BC5's red and green. The GPU then samples the palette entries as fractions over the stored levels with its own filter, as the emulator's does. **Held by test**: `DecodeBc5Rows`, what a GPU reads of such rows, equals `DecodeDxnLevel`'s float decode of the guest bytes float for float on a made tiled level with both palettes and on a level inside a packed tail (returns 257, 241), and **on the real map's base level of the three captures** [measured: `out/tests/w1112/t11_real_dxn.txt`]: 131,072 of 131,072 values equal, 75,559 of them (57.6%) no whole 8-bit step (the review's figure). The stored levels of the real map are in no capture in hand (W1). The views have no swizzle: the surface's program picks the channels by `ClayWaterConstants::swizzle`, which `WaterSwizzleWord` makes of the two fetches through `WaterHostChannel` (R8: every source channel is the byte; BC5: channel 0 red, the others green; the SDK's host swizzles `RRRR` and `RGGG`). A normal map that is not a whole number of blocks is refused (the surface's coordinates take no host scale). Neither format is entered in `TexFormatFromXenos`; `Resolve` is not changed.
-- **The stored scene, version 2** (`scene_dump.h`; `foliage_trace.read_dump`, `read_dump_water`): **a file is version 2 iff it has a flag above 4**, and a file without one is version 1, byte for byte the file of before (cases 110 to 113 of `test_scene_dump.cpp`). After every plane of before, in this order: flag 8, the scene's depth taken just before the water step (levels); **flag 32, the linear target taken right after the water step** (three floats a pixel: added by ledger ruling 44, see "The water step"); flag 16, a count (1 to 4) and for each reflection target its base, its height and 262,144 bytes (red, green, blue, alpha; rows from the top). A file with all of them and the layer's planes is 28.4 MB. Only a frame whose water is drawn has any of them. A plane whose read-back buffer cannot be made is left out of the file, counted `buffer` and logged; the scene's own dump goes on.
-- **Tests**: the shader test's case 55, parts (a) to (c): the 39 programs of before (case 54's 37 and the impostors' two) compile to the bytes recorded at `f87e556` (`out/tests/w1112/baseline_hashes_f87e556.txt`; the canary says whether the compiler is the one of the record); `kSkyMirrorVs`: cbuffer Sky at `kClaySkyFields`' offsets, one clip-distance output, the three z components read and no other, `kSkyVs`'s position instruction for instruction; the sky's pixel program takes `SV_Position` alone at the register the mirrored program writes.
+**Built and run, 2026-10-12; final C9/C10 acceptance remains Task18.**
+Source/test commit `fb45e2b`; approved fresh source/runtime review in
+`review-task17.md`. `task17-report.md` and `task17-runtime-report.md` are the
+implementation/run evidence, distinct from Task15's offline proposal above.
 
-### The water step (plan Task 12)
+[code] Each complete contiguous guest view maps to the k-th smallest target
+base. Every own record must match that target's derived rows within1e-5
+relative. Each target gets its own21-slot frame block with exposure1,
+inverse256, mirrored eye and inverse view; materials/light/geometry/state use
+its own side arrays and the existing far-terrain preparation path. A refused
+record/resource/state/light/matrix/blur input leaves that entire target sky-only,
+counted on the Water line. The observed bridge has four terrain targets and
+no fallback. Main-scene preparation lists/statistics are not reused as view data.
 
-Built and tested without the game. **None of it has run in the game or on any GPU**: the software-adapter runs and the early look are owed (the task's report has the lines).
+The mirrored vertex source is compiled from the unchanged far-terrain string
+by inserting a clip output and world.z-height store; its root pad2 holds the
+plane height. All39 prior programs retain their bytes. Pipelines use each
+record's own cull/state in UNORM with D32: clear, sky, complete far terrain,
+then optional blur. A flagged view is sharp in `water_blur_` and blurred into
+the final sampled target. Seven explicit samples use one linear-clamp texture,
+integral coordinates, actual own xy taps/weight, order117/116/118–122 and
+alpha0. No loop, object/flares/export colour, D1CC draw, readback-list or SDK
+change. Flag16 stores the final targets sampled by the surface.
 
-- **The programs** (`shaders::kClayWaterVs` 2,740 bytes, `kClayWaterPs` 11,108 bytes; cbuffer `Water`, 464 bytes: `kClayWaterFields`). The vertex program pulls a vertex by `SV_VertexID` through the draw's index buffer and base vertex, as the clay vertex program does, and forms the position by the record's four rows with the same dot products (the surface lies at the depth a clay draw of the same mesh has). **`ClayWaterConstants` is 464 bytes** (448 before): the draw's base vertex and the vertices its position buffer holds were not in plan Task 10's block; two small slots a record as before. The pixel program's functions between the two markers are the reference written as HLSL (`tests/test_water_hlsl.py` translates them line by line and holds them to `light_formulas` by value: 24 tests, **none skipped since this task**; the 22 wrong texts of the fixture are applied to the header too and each fails).
-- **The main**: the mask at level 0 by its fetch's static sampler and the channel the swizzle word names; `WaterAlpha`; **`WaterFate`, the pixel's two answers by its two thresholds** (shaded: not killed and alpha above `c141.w`, else the colour is 0; drawn: not killed and alpha above the state's alpha reference, else discarded): the decision is a function of the text so that it is held BY VALUE at the pins' alpha lines, among them the line that is skipped and drawn and the line that is shaded and not drawn, and by three wrong texts that fold the thresholds or drop the kill (ledger ruling 43; the test of before asked only that both names occur). For a shaded pixel: the normal map's two samples with their own coarse screen derivatives (`SampleGrad`: the level the host computes over the stored levels), the lookup at the floor of the pixel's position, the record's own target at slot 13's coordinates at level 0, zero for slot 14 (spec ruling 21), fresnel, the mix, the sun's glint under `w_sun_on`, and the ground form of the fog (`FogForm`, unchanged) from the pixel's own view vector and distance. Out: `colour * w_out_scale`, each channel `(v > 0) ? min(v, 31.875) : 0`, with the pixel's alpha. **A colour or alpha that is no number is discarded** (`WaterFinite`: the sum of the four magnitudes below 3e38; the comparison is in the compiled code: case 55 part (f) and its control).
-- **Compiled** (case 55, parts (d) to (g)): the block at `ClayWaterConstants`' offsets in both stages; **34 register components read and 38 not, none of the unread an operand** (the table's read masks, minus `c130.xy`, slot 14's lookup, which the native draw does not make); the registers under the sun's bool are read inside its block alone; two discards; eight `sample_l` and eight `sample_d`, one executed a fetch behind its sampler's test; one target with its alpha, no depth output; controls for each.
-- **The step's objects** (`EnsureWaterObjects`): its own layout (`b0` the record's constants for both stages, `b2` the frame's block for the pixel stage, the record's positions, indices and mask coordinates as buffers at `t3`, `t4`, `t5` of the vertex stage, a table of three textures at `t0` of the pixel stage, the four static samplers), the two programs and one pipeline a cull mode: the colour pass's targets, source alpha over inverse source alpha, **the depth tested "less" and written** (the game's "greater" with the write under its reversed range: ledger ruling 27). Made on the first frame whose water would otherwise be drawn, never with the switch off; a failure is logged once and every frame's water is then `pipeline`.
-- **The frame's verdict** (`DecideClayWater`; one chain, the first thing missing decides), in two parts. At the head of `Render`, before the buffer is sized, the scene's own rules (`WaterSceneVerdict`): the switch in a scene captured with it, the records by kind, the frame's light, every opaque twin dead by its own `c141` (`WaterOpaqueDead`), the pairs whole, the scale. Only such a frame reserves the step's 153 slots and marks its records. Before any target is bound, the rest: each surface record's draw record by its place, its state from that record's own words judged again (`WaterSurfaceStateOf`; another state is `pipeline`), its positions with their box (`WaterMeshHeight`), indices and mask coordinates (`GeometryCache::Uvs` with a copy of the draw record whose coordinate stream is the vertex stream and whose layout is the pair's: two floats at byte 12 of a 20-byte vertex), its rows against the frame's one view-projection (`view`), its two textures (`texture`), the targets' plan (`plane`, `reflection`), the sky drawn with its constants (`reflection`), the place (`order`), the targets' and the step's objects asked last (`reflection`, `pipeline`), the buffer with the slots (`slot`), each record's constants (`MakeClayWaterConstants`, which judges the record again; one refused is `scale`).
-- **The output scale**: the lit draws' exposure. **In a post frame it is the game's `c20.w` and each record's own must equal it within a thousandth** (`WaterScaleMatches`); **in a frame without post (the default configuration: the native renderer and the water's switch alone) it is the pass's fixed exposure 2.22** (`kLitExposure`), as for every lit draw there, and a record's `c20.w` is held to its bound alone. The targets are drawn at exposure 1 in both.
-- **The place**: before the first prepared record at or beyond the first surface record's place (`PlanWaterPlace` over every prepared record's sequence number, index for index, so that its answer is a place of the colour loop; the plan had the dead draws left out of the list, which would have shifted the index), with the sky step and the early tail at or before it and the layer's depth not before it; the surface records one run among the drawn records without the dead draws (`WaterPlacesOneRun`). The loop draws it last of an index's steps: the tail, the layer's depth, the sky with the moon and the clouds, the water; **when the layer's depth and the water are due at one record the depth is taken after the water** (`ColourDue::depth_after_water`), so that the layer sees the surface. That rests on the sky step writing no depth, which holds for all three of its pipelines (`clay_pass.cpp`: the sky's `write_enable = false`, the quads' two, the clouds'). What the colour pass's order needs (the records left out for want of a buffer, whether the sky is drawn, whether the layer's depth is early, the coverage's order) is computed before any target is bound since this task: none of it records a command and its results are the ones of before.
-- **Only with `drawn`**: the frame's opaque twins (`Prepared::water_dead`) are left out of the pre-pass's pipelines, the pre-pass and the colour pass (`water_left_out`); the targets are drawn; the step is due. **The pre-pass and the shadow maps draw no water.** With any other verdict the frame is the picture of before, record for record: the surface records are counted `blend-unknown` and the twins `alpha-unknown` as before (held back in the prepare loop and counted once the verdict is final), and the reason is counted on the Water line.
-- **Lines**: F3's last line and, every 300 frames with the switch on, `[native] clay: Water: drawn 12 of 12, targets 4, opaque left out 12 | not drawn {light: 3 frames} | water-record {} | the step's CPU time this frame N ms`; `[native] clay: water changed at scene frame N: ...` when the line's form changes (the verdict, what was drawn; at most 16) and once for the first frame of each reason the water was not drawn for, with the place, the output scale and whether it is the game's or the fixed one, and the targets' bases and heights.
-- **With the switch off**: the pass tests a bool at each of the water's places and does nothing behind any of them; no record is marked, no slot reserved, no object made; the slot plan is the one of before (CHECK 845) and every program of before compiles to its bytes of before (case 55 part (a)).
-- **The stored scene's planes** (dump runs only): the colour pass is interrupted before the step for the depth (flag 8, through the depth step, as the layer's depth copy interrupts it) and after it for the linear target (flag 32); the targets are copied while they rest, after the pass (flag 16).
-- **The main by value** (ledger ruling 44; `water_replay.py main <capture> <scene.f2ns>`): the test frame does not reach the main (its fetches, which lookup pair goes to the picture, the floor of the position, the fog, the scale), and criterion 8 is not decidable at these views. The replay is therefore fed **the pass's own inputs**: the stored scene's own targets (`replay(pictures=)`), zero in slot 14's place, the stored exposure as the output scale, and (ledger ruling 46) **the depth test and the judged set from the stored scene's own depth before the water step** (flag 8, at the native pixel centre), so that nothing of the game's read-back is read and the software adapter's pair carries the check; and it is held per pixel against the stored plane of flag 32, on the judged pixels more than 3 pixels from the judged set's edge. **The bound, stated before any run**: the ratio of the means, native over replay, within 0.99 to 1.01 a channel; the median of the per-pixel luminance ratio within 0.99 to 1.01; its 5th to 95th percentile inside 0.95 to 1.08 (the replay-against-game's own span). `main_measure` holds this on made arrays (a channel 2% off misses the means; a scatter of 12% with a right mean misses the span; garbage in the edge band changes nothing; six mutations of the measures each fail: `out/tests/w1112/pymut`). **The number format** (ruling 46): the plane is R11G11B10 float (6 bits of mantissa in red and green, 5 in blue); the replay, held to the program's clamp of 31.875, is brought to the format with both roundings (to nearest, toward zero), the bounds are printed for each and for the exact replay, and the bound is applied to the rounding that lies nearer the stored plane, which the verdict line names (`main_rounded`; an exact replay against a truncating plane reads about 0.985 in blue: `tests/test_water_replay.py`, `Rounded`). **The runs that carry it**: the software-adapter dump run (`warp_dump`) and the real-GPU look run (`look_on`). `targets` (the native targets against the game's own pictures) stays a real-GPU check and ends "NOT DECIDED on this pair" where the game's pictures are empty. The made stored scenes of the tests are written by `tests/water_made.py`, held to `PackSceneDump`'s layout by one hash pinned in both (`DUMP_LAYOUT_PIN`; `test_scene_dump.cpp` case 114). What it cannot see: the bed under the surface (the replay blends over black: 0.3% of a pixel in open water, at most 1% of a judged one) and, on a capture without the map's stored levels, the difference between the 2 x 2 mean pyramid and the stored one.
-- **Also for the runs' reading**: `water_replay.py targets` (criterion 10's part of this phase: each stored target against the capture's picture of its base by criterion 5's two measures, and the targets equal texel for texel), `cover` (criterion 7: the native water pixels, those whose last depth is nearer than the stored depth before the step, against the replay's kept pixels, each side's share farther than one pixel; and the bed within 1% of the game's depth copy), `colour` (criterion 8's figures on the sky-sampling judged pixels, the far-shore pixels and the whole footprint, with the off-run's pair on the same pixels).
-- **What was not built as the plan words it**, each with its reason: the targets' layout is not the sky step's (above); the depth target and the blur's scratch are made now (the dispatch: Task 17 must not re-plumb); `ClayWaterConstants` 464 bytes (above); the plan's flag 8 "refused by the packer until Task 12" was not staged (both tasks are one build); the vertex program does not include the frame's block (it reads nothing of it); `MakeClayWaterConstants`' refusal is counted `scale`; a surface record without geometry is `plane` (no positions: no height) or `texture` (no indices or no coordinates).
+**As fixed by Task17: slots472**, replacing the historical153 under "The
+reflection targets":128surface +4target +84frame +256terrain. Each256-byte
+target slot shares sky112bytes at0 and blur128bytes at128, without extra blur
+slots. `DrawRecord` remains616bytes. Ruling53 fixes the device-change branch
+to forget `water_blur_layout_` beside the sky layout; direct lifecycle review
+and the release rebuild cover the fix, not a hot-device runtime test.
+
+Pure cases859–862 replace plan853–856 (already Task10 IDs);845/852 and the
+companion literal assertion are amended. Existing blur pin857 remains.
+Independent case860 strengthening occurred after implementation, explicitly
+not a new tests-first claim. Initial stale153assert failure is preserved.
+Full native41PASS and final Python1888tests in539.238s,7skips, exit0:
+`t17_native_full.txt`, `t17_python_full_final.txt`. Eight source/test paths,
+including added `test_water_literals.py`, are committed as `fb45e2b`.
+Runtime release SHA256
+`4554F15CCADD016573709ED81B6334D0888B963196F28C515B2B76C92C453768`
+supersedes the initial pre-I1 build.
+
+[measured] Official WARP739/740,240s each under debug, precede the real-GPU
+pair: zero D3D errors, water12/12, targets4(terrain4), opaque leftout12.
+Two texture warmup refusals remain. Both225s1296x759 lake shots were viewed,
+with the expected footprint. Warnings1328 remain; dump warning1008 describes
+duplicate barrier entries for an unnamed resource/subresource. Review found
+no duplicate water resource in one new explicit transition batch; the precise
+origin is unattributed. It is nonblocking efficiency evidence, not a suppressed
+error or zero-warning claim. Criterion16's stated debug/drawn/shot gate is met.
+WARP discovery frame319 versus stored scene320 is unpaired and supplies no
+paired target colour/silhouette measurement.
+
+GPU741/742 bridge off/on uses full readback, explicit windoff and the same
+plan/session/binary/runtime DLLs. All eight1296x759 shots were viewed; zero
+errors/warnings. On capture142522 frames437/438 matches native scene142525
+frame437 for the target sheet. Reflection110/110 and water48/48 are bit equal,
+blur1/1/0/0, four terrain targets and no fallback. Discovery rows-only checks
+1343indexed-file rows,176mip rows,32stored vertex rows and324water checks:
+zero problems; unlogged vertex shader bindings remain unchecked.
+
+[observed] The coast's dark bands return in the game's broad regions, with
+no misplaced upside-down hill, picture-edge band or below-plane hill seen.
+All four same-frame targets contain terrain in corresponding broad positions;
+object features in the game's centre stay absent, expected terrain-only scope
+and a possible C10 miss. Native water is smoother in these stills; motion and
+sparkle remain check101. Labelled lake/target sheets are visual evidence only.
+Earlier13b screenshot dimensions differ, precluding quantitative screenshot
+comparison. The whole-footprint18433-pixel diagnostic RGB.985/.984/.972,
+hue-.6degrees is not yet the required `colour --all` verdict. C9/C10 final
+quantitative judgments remain Task18.
+
+**Limits of this gate.** All runs remain RUN UNCHECKED and static-only.
+Clock/scroll/image endpoint changes and continuing draws/resolves do not
+exclude whole-run freeze without aggregate guest windows: **NOT EXCLUDED**.
+No continuous motion, absent input or performance is verified. Ruling54
+defers four13c timing runs: current display inventory1024x768 at100% and
+1296-wide shots cannot attest the required usual1942-wide/150% setup. C17(13c)
+is not decidable; no substituted frame-rate floor or cost claim. Ruling55 fixes
+Task18's classifier before actual acceptance: each own-frame/view sky with its
+own blur; content maxRGB distance>=8/255 and maxRGB>0; no horizon mask/erosion;
+all boundary/native-only content, square one-texel comparison both directions,
+and RGB means on exact common content. This section reports no final C10 result.
+
+**2026-10-12 superseding timing note (ruling57):** the user identified display
+sleep as the resolution change and restored the usual7680x2160/144DPI150%
+monitor. Ruling54's deferral above describes the earlier gate, not the closing
+state. Four isolated timing runs743–746 were subsequently made on that setup
+before the third/off readback runs, with all agents idle and no analysis/build/
+tests during the session. All20shots1942wide were viewed; uncapped pacing and
+aggregate guest windows were audited. Final C17frame cost/floor is met as
+measured below; capture increment remains not decidable. Task18 review approves.
+
+### Validation (13c)
+
+2026-10-12, `task18-report.md` final measurements; fresh source/runtime review
+APPROVED (`review-task18.md`), tool/test commit `9e6096f`. Product remains
+`fb45e2b`, executable SHA256
+`4554F15CCADD016573709ED81B6334D0888B963196F28C515B2B76C92C453768`.
+`task18-controller-report.md` owns run/viewing provenance. Executable and both
+recorded runtime DLL hashes are unchanged before/after each run. Tool-only
+R56 I1 fix rejects invalid consumed view matrix/basis/rays before deriving
+sky; the interrupted first full suite is not passed. Final Python1895tests
+in551.878s,7skips, exit0 (`t18_python_full_final.txt`), ResourceWarning retained.
+No product/native change or new binary; Task17 native41PASS remains attributed
+to its build, not rerun as Task18 evidence.
+
+Bridge off/on741/742: captures142350/142522, native142353/142525, scene410/411
+off and437/438 on; stored on437 matches capture frame1. Third off/on747/748:
+captures150458/150635, native150501/150638, scene2026/2027 off and1987/1988 on;
+stored on1987 matches capture frame1. Same plan/session/config except water,
+explicit windoff, full readback/Post/Bloom/Exposure/stats/dump. Stored planes
+are1120x720 independently of screenshot width: bridge1296x759, third1942x1136.
+Both8-shot pairs, four own-frame targets and defaults749's3shots were viewed.
+All real-GPU logs have zero errors/warnings. Bridge lacks aggregate guest
+windows: whole-run freeze **NOT EXCLUDED**; static endpoint evidence remains.
+Third owns6/7 aggregate windows, defaults749 owns8: known signature **NOT SEEN**.
+All drivers remain RUN UNCHECKED; no uninterrupted motion/input-absence claim.
+
+| Criterion | Verdict | [measured] final evidence |
+|---|---|---|
+| 6, own records | met | `t18_records.txt`:48/48bridge+44/44third =92bit-equal water records. `t18_reflection.txt`:110/110bridge+104/104third =214exact own rows; four views/frame, blur1/1/0/0bridge,1/0/0/0third. DrawRecord616 remains pinned. Rows-only discovery has324water checks per bridge capture/332per third, zero problems; unlogged vertex bindings are NOT checked. |
+| 7, cover and bed | met with GIVEN sampling | `t18_bridge_cover.txt`: native18665/replay18433, farther than1px.36%/.14%, bed95.4%. Third21139/20824,.74%/.05%, bed94.9%; bounds2% each/80%. Place(-.25,-.25) is the prior calibration, not a new fit. Off placeholder18788/21103pixels has4.4%/4.3% within1% of game's copy (`t18_*_off_gap.txt`), a different plane/set from on before-water bed; no common-set improvement statistic. |
+| 9, all kept water colour | met | `t18_bridge_colour_all.txt`:18433pixels, RGB.984900/.983597/.971809, hue-.629degrees; native/game luminance P5/50/95 ratios.948298/.995727/.992886. Third20824pixels, RGB.981218/.979685/.968927,hue-.562; ratios.968218/.995434/.996679. All meet RGB.92–1.08,hue6degrees,percentiles.93–1.07; no shore/low-alpha/sky exclusions or5000floor. |
+| 10, target silhouettes | **not met as written** | All8 game-to-native shares36.5709–84.6931% miss85%; reverse97.2272–100% and every exact-common RGB mean pass. Table below; `t18_*_silhouette.txt`. Logs742/748 have four terrain targets, zero terrain fallbacks; three initial texture warmups are not terrain fallbacks. |
+| 14, common land | met | `t18_bridge_land.json`: shore-.000203806,outside-.000360667,island+.000062067,peak+.000248211. Third shore+.000464624,outside-.000356498. Absolute changes<=.005 on common sets. Bridge-only island/peak are not invented at third. |
+| 14, pools | **not met as written** | Native/game off/on: bridge40=1.029566/1.055547,40.474=1.036011/1.041345; third40=1.043455/1.048152,27.52=1.214655/1.162564. Each pool misses.97–1.03 on at least one side; absent bridge27.52/third40.474 individually not decidable. `t18_*_land.json`. |
+| 15, off source/log/flags/counts | met in these parts | `t18_off_flags.txt`:741/747both frames water off/no records;741/747/749zero Water-step/on lines. Defaults749State12/27; third747initial11/26, transient12/27 from other families; bridge741aggregate State absent. Task17 native41PASS/39old-byte pins/off-slot arithmetic and final Python1895pass carry exact attribution; no hidden resource-inspection claim. |
+| 15, old off image | **not decidable** | `t18_off_control.json`: old706/defaults749 differ EXPO;742on control also changes Post/Bloom; screenshots1944x1139/1942x1136/1296x759. Baseline6961942wide has incompatible all-features config. No resize, old-executable launch or numeric image acceptance. |
+| 16, debug/drawn/lake gate | met in prescribed parts | Task17 WARP739/740,240s each:0D3Derrors,12/12surfaces,4terrain targets,225s lake shots viewed before hardware. Warnings1328both/1008dump retained, no aggregate guest windows; dump319/320unpaired excluded from target metrics. |
+| 17, frame cost/floor | met for13c; capture increment not decidable | R57 restored usual7680x2160/144DPI150% display. Solo timing743–746,68steady150-frame windows, minimum47.6fps; off17.932941/on17.928824ms, delta-.004117647ms; repeats.42/.118824ms. Bounds30fps,+.5ms,repeat<=1.0met. Pooled capture1.879/2.0465ms, delta+.1675<1/3ms resolution: not decidable. Water CPU median.077ms, ranges.076–.080/.077–.079, separate instantaneous steps. |
+| 18, closing evidence/reviews | pending closing gates | Every execution verdict retains source/run/inference and RUN UNCHECKED limits. Task19 initial closing commit and two fresh whole-branch reviews are pending; no approval of those gates is claimed here. |
+
+C9's actual game/native luminance P5/50/95 is bridge
+1.341029/1.692726/1.921381 versus1.271694/1.685492/1.907713; third
+1.292079/1.587695/1.821078 versus1.251014/1.580445/1.815030. These are
+all replay-kept water pixels, distinct from C8's sky-only subset. Historical13b
+whole-footprint RGB was1.150/1.141/1.107,hue-1.5degrees bridge and
+1.154/1.146/1.113,hue-1.5third (`t13_*_colour_given_place.txt`), different
+captures/sets18428/20830, reported before/after without a common-set delta claim.
+
+C15's measured count qualification: defaults749 at15:08:07.381 and later
+has alpha-unknown12/blend-unknown27; third747 at15:05:04.945 has11/26.
+Its15:05:14.600 row is12/27 from additional33477588alpha1/401A01FDblend1,
+not a new water-on record. Stable third counts are F6D9alpha11/A17Dblend11
+plus014Fblend15; defaults F6D9alpha12/A17Dblend12 plus014Fblend15. Bridge741
+has no aggregate State row and is not independently counted. Raw logs and
+`task18-report.md` retain all transient rows, not a blanket11/26 assertion.
+
+**C10's fixed operational classifier (R55).** Each game/native target is
+independently compared with its own frame/view derived sky, including its own
+captured blur; content iff maxRGB distance>=8/255 and maxRGB>0. Exact black
+is excluded, no horizon mask/erosion, all boundary/native-only content judged.
+Square radius1 (eight neighbours), both directions>=85%; RGB arithmetic means
+on exact common content. Tolerance inherited Task15, fixed before actual figures,
+not tuned to improve these outcomes. R56 invalid consumed matrix/basis/ray
+guards run before baseline generation. No absent texel is assigned to a shader
+family without independent census; missing object shapes are an observation.
+
+| Spot/base | Game/native content | Game/native within1px % | Exact common | Native/game RGB |
+|---|---|---|---|---|
+| Bridge13401000, blurred |7316/4977|67.0858/97.2272|4627|1.010894/1.019972/1.033834|
+| Bridge13481000, blurred |2018/642|36.5709/100|642|1.112964/1.114320/1.111034|
+| Bridge13501000, sharp |1287/1030|84.6931/98.3495|935|.941783/.931672/.936460|
+| Bridge13581000, sharp |555/273|53.8739/100|268|.944913/.946869/.960943|
+| Third13401000, blurred |4631/2133|45.6273/97.8903|1970|.998202/1.003119/1.008821|
+| Third13481000, sharp |1012/754|83.3992/100|750|.944794/.938814/.940166|
+| Third13501000, sharp |1025/733|76.5854/99.1814|654|.933077/.921708/.928701|
+| Third13581000, sharp |804/500|68.1592/100|491|.938302/.941477/.961197|
+
+Timing is one isolated session73528, off/on/on/off100s, no readback/dump,
+Post/Bloom/Exposure/stats, usual monitor and uncapped seeded
+`guest_vblank_pacing=false` logged. Controller manifest attests all agents idle,
+no analysis/build/tests/other game; all20shots1942x1136 viewed. Aggregate guest
+windows13/13/14/13 have no known freeze signature. Means by run743–746 are
+17.722941/17.988235/17.869412/18.142941ms,17steady windows each, excluding
+first/partial native windows by the unchanged Task13 rule. The tiny negative
+nominal delta is not acceleration proof. R57 supersedes54 and moves timing
+before third/off to use the user's restored display; no threshold changed.
+Evidence: `t18_timing.json`/`.txt`, `t18_timing_manifest.json`,
+`t18_restored_display_state.txt`, `task18-controller-report.md`.
+
+### Limits (13)
+
+- The lake is one region/save, late morning. Moving ripples, glint, shoreline
+  fade, other water bodies/times and indoor/rivers/sea remain user checks101–105.
+- Reflections contain mirrored sky and complete far terrain plus own blur.
+  Objects and flares are omitted by ruling38. A4A9 is factor memory export,
+  0%colour, not omitted picture content. No forced-readback list was added.
+- `2B09` far water and D1CC's165-instruction far-lake shader stay unbuilt.
+  The D1CC cubes are not drawn under ruling26; the live surface writes depth
+  before the unchanged native sun-layer copy instead.
+- Six bounded walks reached no near branch; native slot14 stays zero. Some
+  guest slot14 bytes are nonzero without a matched resolve; meaning unknown.
+- Live opaque water and `b137` shadow term are unexercised and refused whole;
+  unavailable shapes/states/resources retain the old placeholder, counted.
+- The in-scene resolve to0x13401000 remains unexplained. Two water bodies of
+  one height use observed ordered view/base association, checked by own rows;
+  this is not a new independently scheduled native scene/culling path.
+- Stored normal levels are uploaded BC5 with their palette fractions; host
+  derivative/filter/LOD and one sample differ from the console's four samples.
+  Quarter-pixel registration is GIVEN, not refitted; wrap follows captured state.
+- The unidentified43ED/7F65 pass is undrawn. Native layer depth at the lake
+  differs in source/height from the game's bed copy plus cubes; each is measured
+  against its own criterion, with no silent depth-place change.
+- Historical13b pool bound misses, sky subset shortages, original tiny named-base
+  replay shortage, six sky-horizon misses and old-image configuration/dimension
+  mismatch remain disclosed even if a later whole-lake measure succeeds.
+- Final13c C10 misses85% game-to-native cover on all eight targets despite
+  passing reverse cover/common RGB. C14 pools also miss; C15 old-image control
+  is not decidable from differing EXPO/config/width. C17 frame cost/floor passes,
+  capture+.1675ms remains not decidable below1/3ms resolution.
+- WARP dump warning1008 is retained as an unattributed nonblocking duplicate-
+  barrier observation. Real hot-device replacement is source-reviewed, untested.
+- Earlier bridge/WARP runs have no aggregate guest windows: whole-run freeze
+  NOT EXCLUDED. Later third/timing/defaults have actual aggregate windows and
+  no known signature seen, without proving uninterrupted motion/input absence.
+
+### Follow-ups (13)
+
+- Far lake geometry/165-instruction shader; no D1CC cube implementation under26.
+- Reflected objects and flares; A4A9 remains factor export, not a colour draw.
+- Replace guest-issued reflection views with native scene/culling, alongside
+  roadmap presentation/HUD/menu/cutscene work (item6).
+- Other water bodies/regions/times, a live opaque form and the `b137` term.
+- Slot14 meaning and a reachable near-shore view/route; user check102.
+- Resolve timing/content at0x13401000; native route currently does not consume it.
+- Sun-layer copy place when other depth-writing blends appear; keep each source
+  plane explicit. No depth timing adjustment is hidden in the water step.
+- Normal map BC5/all-level upload is implemented; console/host sampling and
+  MSAA/sample-position differences remain under roadmap item5.
+- Identify43ED/7F65 and measure its role independently.
+- SDK copy interface B2 is the user's separate decision (ruling2), no SDK edit.
+- Monitor experiments remain separate (ruling8); keep user restoration/ruling57
+  and timing preconditions explicit for future sessions.
+- Attribute warning1008's unnamed resource and exercise hot-device replacement.
+- User checks101–106: motion/glint, shoreline, reflection objects, beams, other
+  water/time and the exact off control. Water default remains off.
 
 ## Pending
 

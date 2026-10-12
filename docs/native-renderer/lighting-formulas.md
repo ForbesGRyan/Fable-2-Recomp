@@ -1512,6 +1512,39 @@ Each of the seven position mutations fails on every capture (`rows`, `components
 
 ## Water (sub-project 13)
 
+**Dated reconciliation, 2026-10-12 (plan Task 19).** The early task labels below
+describe when each check was written. Tasks 4–6 subsequently checked the captured
+rows, fetch constants, masks, stored normal levels and reflection pictures;
+Tasks 9–12 built the surface, and Task 13 ran its mirrored-sky phase. These
+checks settle the formerly unknown fetch channels and picture orientation:
+the constants' own swizzles, no picture flip (frame map section 20, "The water's
+textures" and "The replays"). The read components, bool fields and integral
+position are checked against the captured rows and the SDK's position rule;
+`b137` remains unexercised by a captured row and is refused by the native pass
+as `shadow-term`. The near branch is checked on made inputs, with zero supplied
+for slot 14 in the native step; no near-water game view was reached in six walks.
+The interpreter's equivalence to console arithmetic and multiply-add fusion
+remain assumptions. Task 15's mirrored camera, far-terrain lighting and seven-tap
+blur are measured below; Task17 now builds/uses the own-view constants and
+seven captured xy taps/weight, with microcode addition order117/116/118–122,
+integral coordinates and alpha0. Its separate mirrored vertex variant inserts
+world.z-height clipping while old program byte pins remain equal. Static/debug
+run evidence is in frame-map section20, "The targets' terrain" and "Validation
+(13c)": final Task18 whole-lake colour meets its bounds, all eight target
+game-to-native silhouette shares miss85%. Fresh source/runtime review approves
+those scoped verdicts; whole-branch closing reviews remain pending. No motion claim follows from formula
+checks or still shots.
+
+Task 8 continuation now repeats the game-scene replay with all nine actual
+normal levels and each frame's own picture content: ruling35's all-judged-pixel
+substitute passes four frames (RGB 1.006–1.011, correlation 0.848–0.863), while
+the original named-base set remains too small. Stored/mean RG8 census differs
+by at most 3 units; the sampled replay uses unrounded BC5 palette entries instead.
+`t8_scene_*`, `t8_levels_*`, `task8-continuation-report.md`. The newly tested
+frame reader prevents later-frame queries from silently taking frame1pictures;
+this is a capture-tool repair, no formula change. Sky colour passes 16/16,
+but horizon passes10/16, with six two-row misses retained.
+
 Native renderer sub-project 13 (water), phase 13a, plan Tasks 2 and 3, 2026-10-12. The lake's surface as closed formulas, each checked against its microcode: vertex shader `BEAD84BD72072E0E` (17 instructions, numbered 3 to 19) and pixel shaders `A17D8AEC3A817D45` (the surface, 80 instructions numbered 10 to 89) and `F6D98C7B4D98438B` (the opaque twin; the two dumps differ in instruction 14 alone). Nothing here was run in the game and no captured row was read: the rows are plan Task 4's.
 
 ### Result

@@ -1,9 +1,18 @@
 # Native renderer sub-project 13: water (the lake's surface with a native reflection)
 
-Status: **design, 2026-10-12; nothing built, nothing run in the game. Amended 2026-10-12 for ledger
-rulings 26 (the `D1CC` cubes are not drawn: their design, ruling 22 and their part of criteria 6, 13
-and 16 are struck, each passage marked "ledger ruling 26") and 27 (the surface tests and writes depth:
-ruling 14 stands).** Branch
+Status: **execution complete with concerns, 2026-10-12; phase13a formulas,
+phase13b surface/sky and mandatory13c own far-terrain/blur built and run.
+Fresh Task18 source/runtime review approved; tool/test commit9e6096f. Whole-lake
+colour, records, cover/bed, sun-layer depth, common land, debug gates and13c
+frame-cost/floor pass their stated measures. Target silhouettes and pools are
+not met as written; original tiny-base replay, sky subset, near/glint views,
+old-image control and capture increment remain not decidable. Six sky-horizon
+misses remain. Task19 initial closing commit and two fresh whole-branch reviews
+are pending, with criterion18 closing gate pending. Water stays off by default.**
+Ledger rulings 26 (the `D1CC` cubes are not drawn:
+their design, ruling 22 and their part of criteria 6, 13 and 16 are struck, each
+passage marked "ledger ruling 26") and 27 (the surface tests and writes depth:
+ruling 14 stands) continue to apply. Branch
 `native-renderer-water` (from master `ce61f2d`). Research: `.superpowers/sdd/water-research.md`
 (untracked; its scripts and outputs in `out/native-evidence/water/`, "WE" below: `b_*`). Ledger:
 `.superpowers/sdd/2026-10-12-native-renderer-water/progress.md` (rulings 1 to 8 are the controller's
@@ -162,6 +171,24 @@ research has differently"):
 | 8 | the near branch: what slot 14 holds within 20 units; the shore fade on screen | discovery run W3, if a walk to the water exists | criterion 11 is "not decidable"; slot 14 stays zero (ruling 21) |
 | 9 | whether any view of this save shows the glint | the replay on the sunward captures in hand (`160104`, `160251`), then W4 | criterion 12 is "not decidable"; user check |
 | 10 | whether the water is drawn the same in another region | no run of this sub-project | a draw outside the measured shape is refused, counted |
+
+**Execution reconciliation, 2026-10-12 (Task 19 preparation).** The original
+questions above are retained. Tasks16–18 capture/static/quantitative gates are
+complete with the named misses; fresh Task18 review approves. Task19 closing
+commit and whole-branch reviews remain pending; this table claims no such approval.
+
+| Question | What became of it | Evidence and remaining limit |
+|---|---|---|
+| 1, formulas | Settled on made inputs and captured rows. The plan's glint sign and saturated mix factor win. | Tasks 2–4, `t2_*`, `t3_*`, `t4_rows.txt`; console equivalence/fusion remains an arithmetic assumption. |
+| 2, picture channels/orientation | Constant's own channels; no vertical flip. | Task 6, `t6_variants.txt`, `t6_sky_*.txt`. Criterion 4 as written has too few pixels at the named base; the substitute whole set and independent controls are disclosed. |
+| 3, normal levels/LOD | W1/W2 supply nine stored levels; native upload is BC5, not rounded RG8. LOD follows the SDK's coarse derivative rule. | `t8_levels_083950.txt` / `t8_levels_084135.txt`: largest stored/mean RG8 difference 3, mean up to 0.561; levels 7/8 equal. Actual unrounded stored-level game-scene replays pass ruling 35's substitute in all four frames. `task8-continuation-report.md`; residual remains, not attributed to levels alone. |
+| 4, in-scene `0x13401000` resolve | Remains unexplained. The dumped picture as sampled reproduces the earlier game scene within the disclosed substitute bound. | Task 6 replays; no proof of what the command-ring entry means. Native targets do not depend on it. |
+| 5, viewport/scissor/clip | W1/W2 shadows show 256x256 viewport/scissor; clip-control `0x00080001` on export, terrain, sky and objects, `0x00080000` on flares. | `t8_vp.json` / `t8_pictures.json`; actual window and plane words have no shadow. Plane `z=h` remains a disclosed fallback; Task17 wires own cull and world.z-height clipping; Task18's fixed classifier finds all eight game-to-native cover shares below85%; no clipping equivalence claim is substituted. |
+| 6, `6954` / `A4A9` | Settled as tessellation-factor memory export with position (0,0,0,0), 0% of the picture. | Task 15 listing/geometry, `t15_export_155731.txt`, `t15_view_*.txt`; not run through the interpreter's unsupported export/opcodes. Ruling 49 admits phase 13c. |
+| 7, blur choice | The F186 row marks each blurred view: two at bridge, one at third; seven offsets, weight and integral coordinate measured. | Task15 formula/own-picture comparison; Task16 captures actual guest inputs and exact checks pass214records over four frames (blur1/1/0/0 bridge,1/0/0/0 third). Task17 now consumes/render-blurs these own inputs; Task18 final target metrics are disclosed above: C10game-to-native cover misses, reverse/common RGB passes. |
+| 8, near branch/shore | No W3 after six bounded walks. Criterion 11 not decidable. | Task 14 focused counts and eye-to-AABB bounds. Some new slot-14 dumps are nonzero without a matching frame resolve; meaning remains unknown. Native slot 14 stays zero. |
+| 9, glint view | No qualifying W4: held-sun capture113949 has no A17D row. Criterion 12 not decidable. | Task 14; earlier sun-side replay has no qualifying kept glint. User check101 judges motion/sparkle. |
+| 10, other regions | Unseen; no closure inferred from one region. | User check105 and named refusal reasons. Water remains off by default. |
 
 ## Design
 
@@ -733,12 +760,38 @@ at 20.1024") is the placeholder's and does not exist in an on-run. Criteria 9 an
     slot 14 is zero in W3 and at least 1,000 such pixels exist: then 0.90 to 1.10 *(no precedent)*.
     No such view: "not decidable", user check. **Reference**: none in hand (the nearest lake pixel
     of any capture is over 100 units away). **Decided by**: W3, V-EDGE.
+    **Task 14 verdict (2026-10-12): not decidable.** Six bounded exploratory walks,
+    logs 726–728 and 730–732, found no W3. Frame-1 kept/fading/near counts:
+    10,059/727/0; 0/0/0; 0/0/0; 18,426/2,057/0; 33,871/3,410/0;
+    10,347/318/0 (`out/native-evidence/water/t14_edge_counts.txt` and `.json`).
+    The geometry/alpha-only replay uses the established rasterizer, sampler and
+    formula on each frame's own game depth copy at declared (-0.25, -0.25);
+    it matches the old full-replay control 155547 exactly (18,429 kept, 2,064
+    fading, 0 near). Independently, eye-to-mesh-AABB lower bounds exceed 35 units
+    for every captured mesh, pools included, so the near count has upper bound 0.
+    No V-EDGE pair was made. Shoreline/near-water motion remains a user check.
+    **Run qualifier:** e4/e5 remain SUSPECT under the work/swap-only heuristic,
+    with no geometry/decode windows to establish the complete freeze signature.
+    The controller accepts their static endpoints after fresh manual audit:
+    guest clock/scroll/exposure inputs advance in the capture, emulated72/96s
+    shots change, and guest draws/resolves continue to each run's end
+    (`review-task14.md`, "Follow-up: manual audit", in the water ledger).
+    Nonzero native redraws alone are insufficient. No continuous motion,
+    uninterrupted physics, absence of brief hitches/user input or timing claim.
 12. *The glint (conditional on a sunward view over water).* First the replay on CAP `160104` and
     `160251`; a view counts if at least 500 kept pixels have a glint term above 5% of the pixel.
     Then, in such a pair: native over game on those pixels within **0.85 to 1.15** in luminance, and
     with the glint's term left out of the replay the same measure must miss *(no precedent)*. No
     such view: "not decidable", user check. **Reference**: none in hand. **Decided by**: the
     captures in hand; W4, V-SUN.
+    **Task 14 verdict (2026-10-12): not decidable.** W4 (log 729, capture
+    `native_discovery_20261012_113949.jsonl`) has zero A17D rows in frame 1,
+    hence exactly zero kept and qualifying glint pixels; all four held-look shots
+    show bridge rails and sunward sky, no water. No V-SUN pair or no-glint colour
+    control was made. Evidence: `out/native-evidence/water/t14_w4_audit.txt`,
+    `t14_edge_counts.json`; the cancelled full glint tool's empty file is not
+    evidence. The glint's sparkle remains a user check. All seven exploratory
+    controller runs are RUN UNCHECKED (UserPresent), not timing evidence.
 13. *The sun layer's depth at the lake.* At the bridge with the sun's switch on, on the layer's
     texels over the water pixels: the stored native layer depth (the plane before the tree occluders)
     lies at the lake's level (a height between 19.95 and 20.15) on at least **95%** with the water
@@ -794,10 +847,177 @@ at 20.1024") is the placeholder's and does not exist in an on-run. Criteria 9 an
 18. *Evidence rule.* Every number names its file; inference is marked; a run made with a user at the
     machine is labelled `RUN UNCHECKED`; a criterion not met as written is said to be not met.
 
+**Executed criteria, 2026-10-12.** This table retains all eighteen original
+numbers. “Met” binds only the stated measure; substituted measures, shortages
+and missed bounds are separately named. Final Task18 measurements/review:
+`task18-report.md`, `task18-controller-report.md`, `review-task18.md`;
+tool/test commit9e6096f, runtime unchanged from Task17's4554F15C SHA. Earlier
+reports and all `tN_*` evidence below are in the water ledger/evidence folders.
+Whole-branch closing approvals are still pending.
+
+| Criterion | Executed verdict | Evidence and practical limit |
+|---|---|---|
+| 1, formulas | met within the interpreter reference | `t2_formulas.txt`/`t3_formulas.txt`, made2000/2000 and mutations; `t4_rows.txt`:21784vertices/32800positions over164rows; Task8 adds14236vertices/18400positions over92own-frame rows. Console equivalence/fusion remains an assumption. |
+| 2, dead draw | met under the captured fetch rule | `t2_dead.txt`, `t4_dead.txt`:82dead rows/41masks, maxalpha.997,16400captured positions killed; Task8 continuation46rows/23masks. No live opaque support claimed. |
+| 3, mirrored camera | met | `t4_views.txt`:32/32within1.4e-6, three mutations fail; Task8 adds16views, max1.437e-6. |
+| 4, game-picture scene replay | original deciding base not decidable; ruling35 substitute met | Task8 actual stored-level four own-frame replays RGB1.006–1.011,correlation.848–.863; every wrong variant misses. Named13501000sets191/191/137/136pixels remain below5000. `t8_scene_*`; no silent criterion rewrite. |
+| 5, mirrored sky | colour met; horizon **not met as written** | Task8 sixteen own pictures RGB.996–1.005;10/16horizons within1row, six miss by2. `t8_sky_*`; tolerance unchanged. |
+| 6, records | met | `t18_records.txt`:92/92 own water rows; `t18_reflection.txt`:214/214 independent reflection rows, four views/frame and own blur exact. DrawRecord616. Rows-only discovery excludes unlogged shader bindings. |
+| 7, cover/bed | met with GIVEN prior sampling | `t18_*_cover.txt`:bridge.36%/.14%,bed95.4%;third.74%/.05%,bed94.9%. Place(-.25,-.25) declared, not refitted. Off placeholder4.4%/4.3% uses a different plane/set, report-only. |
+| 8,13b sky-sampling colour | not decidable as defined | `t13_*_colour_given_place.txt`:1173/3200sky pixels below5000. Whole-footprint13b RGB1.150/1.141/1.107bridge,1.154/1.146/1.113third,hue-1.5both, report-only. C9 is a different all-kept measure. |
+| 9,13c whole-lake colour | met | `t18_bridge_colour_all.txt`:18433pixels RGB.984900/.983597/.971809,hue-.629,P5/50/95ratios.948298/.995727/.992886. Third20824pixels RGB.981218/.979685/.968927,hue-.562,ratios.968218/.995434/.996679. Includes shore/low-alpha; no sky exclusion/5000floor. |
+| 10, targets |13b met;13c **not met as written** | `t18_*_silhouette.txt`:all8 game-to-native shares36.5709–84.6931% miss85%; reverse97.2272–100/common RGB.921708–1.114320pass. R55 own-sky/own-blur classifier fixed before figures, no erosion. Four terrain targets/no fallbacks each spot. |
+| 11, shore/near conditional | not decidable | Task14 six bounded routes726–728/730–732 found no near pixel/W3. No V-EDGE pair; slot14 stays nativezero. User check102. |
+| 12, glint conditional | not decidable | Task14 held-sun729/113949 has zeroA17D/qualifying pixels; no V-SUN/no-glint control. Earlier replay has no qualifying glint; check101. |
+| 13, sun-layer lake depth | met on13b measured plane | `t13_sun_layer.json`:99.9787% of4705lake texels at19.95–20.15,median20.10103. No new13c depth measurement claimed; D1CC cube portion struck by26, no off bound. |
+| 14, land/pools | common land met; pools **not met as written** | `t18_*_land.json`:bridge changes-.000203806/-.000360667/+.000062067/+.000248211,third+.000464624/-.000356498 within.005. Pool off/on:bridge1.029566/1.055547 and1.036011/1.041345;third1.043455/1.048152 and1.214655/1.162564. Each misses.97–1.03 on at least one side. |
+| 15, off invariants/control | source/log/flags/count parts met; old image not decidable | Task17 native41PASS/39old byte pins/off slots; Python1895pass. `t18_off_flags.txt`:741/747water off/no records,741/747/749no Water-step lines. Defaults749State12/27; third747initial11/26 with transient12/27 from other families; bridge741State rows absent. `t18_off_control.json`:EXPO/config/width mismatch, no old launch/resize/numeric acceptance. |
+| 16, error/drawn/lake gates | met in prescribed parts |13b711/712 and13c739/740,240s WARP debug before corresponding hardware,0errors/lake drawn and viewed. Warnings1328both,1008in13cdump retained;319/320dump unpaired. No timing or uninterrupted motion inferred. |
+| 17, cost/floor |13c frame cost/floor met; capture increment not decidable | `t18_timing.json`:68steady windows,min47.6fps,off17.932941/on17.928824ms,delta-.004117647;repeat.42/.118824<=1. All20shots1942wide, usual restored monitor, solo/uncapped. Capture+.1675<1/3ms not decidable; CPUmedian.077ms separately.13b floor40.6met/costnotdecidable due off-repeat2.0214ms. |
+| 18, evidence/closing | execution evidence documented; closing gates pending | Each number names evidence, inference and RUN UNCHECKED are retained. Bridge/WARP whole-freeze NOT EXCLUDED; third/timing/defaults actual guest windows/no known signature seen. Initial Task19 closing commit and two fresh whole-branch reviews still pending; no approval claimed. |
+
 User checks (from 101, in `docs/native-renderer/user-checks.md`): the lake in motion, native against
 emulated (the scroll, the glint's sparkle); the shoreline on a walk along the water; the far shore's
 reflection (after phase 13c); beams over the lake with the sun's switch on; the water in another
 region and at another time of day.
+
+## Implementation notes (deviations)
+
+**Plan departures reconciled, 2026-10-12 (Task 19 preparation).** All thirteen
+numbered departures in the plan are accounted for below. “Stood” describes the
+executed route through Task18, with each measured miss retained above. Whole-
+branch closing approvals are pending; execution review approval is distinct.
+
+| Departure | Stood or changed | As executed |
+|---|---|---|
+| 1, no-albedo branch location | stood | Observer runs inside FillMaterial's no-albedo branch; record handoff occurs under the scene mutex in RecordDraw. Task 9. |
+| 2, content dump key | stood | Task 1 adds the water row/slot rule and reflection budget beside address-based decoding. Other dumps keep their earlier policy. |
+| 3, unshadowed clip words | stood | Only available shadows are emitted; absent window/user-plane words stay absent. W1 and the measured plane fallback are disclosed. |
+| 4, flat mesh height | stood | WaterMeshHeight uses cached position bounds within 1e-3; no invented geometry read. Task 10. |
+| 5, constant slots/reservation | changed | 432 became448 then464bytes: eighteen pixel registers and indexed vertex bounds. Two surface slots per record;13b153total becomes Task17's472 =128surface+4target+84frame+256terrain. Sky112bytes and blur128bytes at offset128 share each256-byte target slot. Reservation still uses scene verdict before final sky/texture/order verdict. |
+| 6, verdict before target binding | stood | Scene rules first, remaining rules once inputs/place are known; dead twins are omitted only under the final drawn verdict. Tasks 10–12. |
+| 7, mask coordinate buffer | stood | GeometryCache::Uvs decodes the actual pair from byte 12 of the 20-byte vertex through a copied material layout. Tasks 10–12. |
+| 8, depth target timing | changed | Task11 allocates D32 and blur scratch with targets before Task17. Task17 now clears/uses D32 for complete own terrain and uses sharp scratch plus final sampled target for flagged blur;13b did not use scratch. |
+| 9, stored-scene version | changed | Version2 only with a new flag, now 8/16/32; otherwise old version 1 bytes. Separate read_dump_water keeps earlier reader unpacking. Tasks 11/12. |
+| 10, old executable comparison | changed | Ruling29 uses old 706/696 evidence; no old-folder copy/launch. The defaults 706 dimensions differ from new 724; old-image criterion 15 remains not decidable. |
+| 11, W1/W2 order | stood | Oracle completed without a game; W1/W2 are first in the water validation batch, before real-GPU water on, on the combined 11/12 build. |
+| 12, locked handoff branch | stood | One thread-local byte check remains for recorded draws; capture delta +0.010 ms is below the one-third-ms decision threshold. Task 13. |
+| 13, machine settles readings | stood; spec readings changed | Task 3 decides `sat(+(V.R))` and `sat(c131.x)`; made controls discriminate. The original opposite sign/bare factor are not used. |
+
+Phase 13b evidence and its limits are recorded in frame-map section 20,
+"Validation (13b)" and "Limits (13b)", and the water ledger's
+`task13-report.md`. Fresh full read-back pairs, logs 718–725, record binary
+`2F1980B20F7D3D11`; their driver labels remain RUN UNCHECKED. Frozen first-batch
+bridge713 is diagnostic only and is replaced by bridge718/719.
+
+[measured] Common-land changes pass criterion14's0.005 limit in both views;
+the absolute pool luminance ratios fail0.97–1.03 even in the off frames
+(bridge40/40.474 about1.04; third27.52 about1.21 off/1.30 on). This is an
+unmet bound, not an authorised change to its meaning. Criterion13's native
+first layer plane has99.9787% of4,705 lake texels at19.95–20.15 with water on.
+The main-by-value check applies ruling46's explicitly named nearer rounding;
+nearest-rounded replay still misses blue. Coverage/colour use the existing
+identical-view calibration(-0.25,-0.25), explicitly given, not a fresh fit.
+Criterion7's required off-side before figures are4.4% of18,788 bridge pixels
+and4.3% of21,103 third pixels with native placeholder depth within1% of the
+game's depth copy (`t13_*_off_gap_given_place.txt`): the research's final-depth
+footprint measure, report-only, distinct from the on-side pre-water bed plane.
+
+Ruling29's old defaults baseline706 is1944x1139 while the current defaults
+shots are1942x1136. Its image part remains not decidable as written; the new
+same-width on/off lake control is sensitive (ratio1.1470). An old-executable
+copy or launch is not made. Phase13c is required by rulings36/38, but its
+reflection build, final validation and cost are not established by these13b
+results. Ruling49 admits phase13c after the five entry conditions; Task16's
+capture passes; Task17 static/debug evidence and Task18 final quantitative
+verdicts are recorded below/above. No motion, shoreline fade or glint claim follows from
+still shots. Default remains off.
+
+[measured] Criterion 17, solo timing logs 733–736, recorded binary
+`2F1980B20F7D3D11`: all 20 shots are 1942 wide, uncapped default logged,
+POST/BLOOM/EXPO and no read-back argument; no known freeze or D3D error.
+The controller attests the usual monitor and no competing work. Of 61 steady
+150-frame native windows, none falls below 30 fps (minimum 40.6): floor met.
+The off means 18.5350 and 20.5564 ms differ by 2.0214 ms, exceeding the 1.0 ms
+agreement condition; on means 19.4131 and 18.9353 differ by 0.4778 ms.
+Cost is **not decidable** despite nominal on-minus-off -0.3715 ms. Records-on
+capture medians at native levels are 1.907 off / 1.917 on, delta +0.010 ms:
+also not decidable at the one-third-ms threshold. Water CPU readings have
+medians 0.0270 / 0.0275 ms, reported separately from GPU or frame cost.
+Evidence: `t13_timing_results.json` / `.txt`, `t13_timing_config_extract.txt`;
+original driver labels remain RUN UNCHECKED. Criterion 15's program/slot tests
+passed in sampler_fix_native_full.txt (exit0,40PASS lines); full Python1877 OK
+skipped7 in sampler_fix_python_full_escalated.txt. Controller attribution:
+sampler fix e5edbda, release build SHA256
+8A71AE4360DF0D9739579A0A2C3FC801C085DAFBC38D804B7DF963098451F612.
+The old-image comparison remains not decidable.
+
+**Task16 capture reconciliation, 2026-10-12.** Approved fresh review and
+controller runs737/738 establish214/214 exact own reflection records:55per
+bridge frame (views36/4/12/3, blur1/1/0/0),52per third frame (33/4/12/3,
+blur1/0/0/0). Water checks pass48/48 and44/44. Both runs captured
+SHA33A7E12AC139BB42ECFC3707CF52F9D4007F0BCDF3C9DACF51D6CDAD2AA05056;
+the later E3CE579D relink has no runtime capture. Endpoint clocks, scrolling,
+emulated pictures and continued draws/resolves are evidenced; viewed native
+footprints remain sky-only before Task17. Both1296x759 readback drivers are
+RUN UNCHECKED, and whole-run freeze is NOT EXCLUDED without aggregate guest
+windows. No continuous motion/input-absence claim or cost comparison with
+the differently configured1942-wide13b captures follows.
+
+Fix2 corrects the independent checker's float32-before-unary handling of JSON
+integer zero; strict bit comparisons remain and product source is unchanged.
+Six focused regressions pass. The controller's earlier combined Task8/16 full
+Python suite passes1885tests in536.686s with7skips; the final fix2 full suite
+passes1886tests in527.866s with7skips, exit0 (`t16_fix2_python_full.txt`).
+Task8/16 fresh reviews are approved; the combined ten source/test paths are
+committed as `2fcd472`. Evidence:
+`task16-report.md`, `review-task16.md`, `review-task8-continuation.md`,
+`t16_static_audit.txt`, `t16_python_full_root.txt`, `t16_fix2_*`.
+These capture/checker results alone do not close phase13c acceptance.
+
+**Task17 reconciliation, 2026-10-12.** Eight source/test paths committed
+`fb45e2b`; fresh source/runtime review approved. Complete own far-terrain views,
+own mirrored frame blocks, cull/clip and captured seven-tap blur are wired.
+Reservation472 replaces153; the eighth path fixes the stale literal assertion.
+Independent case860 was strengthened after implementation, not claimed red-first.
+Ruling53 resets the blur layout on device change; hot replacement is not tested
+at runtime. Native41PASS; final Python1888tests in539.238s,7skips, exit0;
+runtime SHA4554F15CCADD016573709ED81B6334D0888B963196F28C515B2B76C92C453768.
+
+WARP739/740 meet criterion16's zero-error/drawn/viewed-lake gate with four
+terrain targets. Warnings1328 and dump1008 remain; the latter is a nonblocking
+unattributed duplicate-barrier observation. Capture319/stored320 is not paired.
+GPU741/742 full-readback bridge pair has own same-frame437 target evidence,
+reflection110/110 and water48/48 bit equal, four terrain targets, no fallback.
+Viewed coast bands broadly match place; objects remain absent and native water
+looks smoother. These static early-look judgments precede Task18; its final
+C9met/C10not-met verdicts are recorded above. Driver labels RUN UNCHECKED and whole-run
+freeze NOT EXCLUDED remain; no continuous motion/input-absence/performance claim.
+
+Ruling54 defers four13c timing runs because current1024x768/100% inventory and
+1296-wide shots cannot attest usual1942-wide/150% setup: C17(13c) not decidable,
+no substituted cost/floor verdict. Ruling55 fixes the C10 classifier before
+actual acceptance: independently derived own-frame/view sky with own blur,
+maxRGB distance>=8/255 and exact nonblack, no horizon mask/erosion, all boundary
+and native-only content, square one-texel comparison both directions and means
+on exact common content. The tolerance is disclosed, not tuned to results.
+Evidence: `task17-report.md`, `task17-runtime-report.md`, `review-task17.md`,
+`t17_*`; the final eighteen-criterion table is above, whole-branch closing pending.
+
+**Superseding rulings56/57, 2026-10-12.** Fresh Task18 review closes the
+invalid-sky-reference issue before actual acceptance: consumed own-view
+matrix/basis/rays are checked before baseline generation, including degeneracy.
+The real-sky CLI regression is meaningful red/green; unread row2/w NaNs remain
+permitted. Final tool suite1895tests551.878s,7skips passes; ResourceWarning
+retained. No native/product/binary change. The user then identified display
+sleep as the resolution change and restored7680x2160 at144DPI/150%. Ruling57
+supersedes54's earlier deferral; four timing runs743–746 were made alone,
+all agents idle, before third747/748 and defaults749 to use the restored setup.
+All20timing shots are1942wide and viewed; uncapped pacing/guest windows audited.
+Third's6/7 and defaults'8 actual guest windows supersede no missing-window
+assumption for those runs; earlier bridge/WARP caveats remain. Final Task18
+measurements and fresh source/runtime review are approved, tool/test9e6096f.
+Whole-branch closing reviews remain pending; those approvals are not inferred.
 
 ## Limits known beforehand
 
@@ -824,6 +1044,27 @@ region and at another time of day.
 - **`43ED` / `7F65`**, which the game draws just before its water and which multiplies the picture
   from the depth copy, stays unidentified and undrawn.
 - **The native picture is the game's sampled a quarter pixel away** (roadmap 5), as for every record.
+
+**Known-limit reconciliation, 2026-10-12 (Task 19 preparation).** These rows
+refer to the historical list immediately above; final phase13c metrics are in
+the executed-criteria table, derived from Task18, not the offline proposal/early look.
+
+| Known limit | What execution showed |
+|---|---|
+| Far lake `2B09` | Stays unbuilt; earlier tiny cover is retained as background evidence, not a new far-water validation. |
+| Sky-only then terrain-only reflection | Phase 13b's sky-only lake lacks the shore as expected; mandatory13c terrain/blur is built and passes static/debug early look under Task17; Task18 final C9whole-lake colour passes, C10target cover misses on all eight. Objects/flares remain omitted under ruling 38. A4A9 is now identified as export with0% of the picture, so omitting it is not a missing colour layer. |
+| Guest still issues reflection views | Stands: Task16 captures the guest's views rather than scheduling independent native culling. Runs737/738 pass214/214 exact own reflection records; Task17 renders the guest's complete far-terrain views, and Task18 final214own rows are exact; independent native scene/culling remains follow-up. |
+| Equal-height bodies tied by order | Task 15 verifies ascending-base assignment in 10/10 frames, with 32/32 height checks; Task17 maps the k-th complete view to the k-th smallest target, with own-record matrix checks and no fallback in bridge742; third748 also has no terrain fallback; final C10target cover misses as named above. |
+| Native slot14 zero | Stands as a native substitution. Task 14 finds some nonzero guest dumps without a matching resolve; their meaning and the near branch remain unknown after six failed approaches. |
+| `b137` shadow term | Made-input formula checked; no captured row exercises it. Product refuses it as `shadow-term`; no game support claimed. |
+| In-scene `0x13401000` resolve | Task 8's own-frame pictures change (302 W1 / 2,153 W2 texels at first base), and the lake matches by ruling 35. No separate resolve-moment picture versus later in-scene picture exists, so the command-gap meaning remains unexplained. Native route does not consume it. |
+| Lake depth versus game's cube | Task 13 native layer plane has 99.9787% of 4,705 lake texels in 19.95–20.15, median 20.10103. The native surface/game cube height difference remains named; no D1CC work. |
+| Live opaque water | All82old F6D9rows satisfy dead proof. A live opaque form is unexercised and keeps the placeholder by the refusal rule. |
+| Rounded normal/LOD | Changed by ruling32: native BC5 keeps stored palette fractions and all levels; normal RG8 decoder is test-only. Native main passes the named nearer-rounding substitute, while nearest-rounded blue misses. Task 8's stored/mean census is measured; actual stored-level game-picture scene variants pass ruling 35 on four own-frame sets, with the residual still present. |
+| Picture wrap/border | Wrap follows the accepted captured fetch; no new edge-wrap game view was separately judged. Unsupported sampler states are now refused by e5edbda. |
+| One save/time/motion | Six route searches added, no near view reached; still one region at late morning. Motion and other places/times remain user checks101–105. |
+| `43ED` / `7F65` | Remains unidentified and undrawn; not silently credited to water validation. |
+| Sampling quarter-pixel difference | No MSAA/supersampling fix. Coverage/colour disclose the existing given(-0.25,-0.25)calibration; nearer-rounding selection is separately named. |
 
 ## What goes back to the roadmap
 

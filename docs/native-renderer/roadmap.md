@@ -59,10 +59,56 @@ Limits and follow-ups named here are described in `frame-map.md`, section 17, "L
      the pictures' feed are diagnostics.
    - *The cubes at depth 20.0024* are identified and leave this item: the lake's level in the sun layer's
      depth; nothing to build while the lake's meshes are drawn with depth (ledger ruling 2).
+   - **2026-10-12 water correction (ledger ruling 26):** nothing is built for these
+     cubes. The live `A17D` surface writes the lake's depth before the unchanged
+     native layer-depth place; the dead opaque twin is removed only with a whole
+     replacement surface. The game obtains that level after its earlier bed copy
+     by drawing the cubes. These are separate depth planes, measured separately
+     by water criteria 7 and 13.
    - What follows is the item as it was written before the work:
    - Far wooded ranges are 1.15 to 1.55 of the game's (no distant trees drawn natively); beams
      pass where the game's far woods stand.
-3. **Water**
+3. [x] **Water** (sub-project13, **implementation and validation done2026-10-12**;
+   initial closing commit and two fresh whole-branch reviews pending;
+   `frame-map.md` section20, "Validation (13c)", "Limits (13)", "Follow-ups (13)")
+   - *Achieved*: a native blended/depth-writing lake, with dead opaque twins removed only
+     for a whole replacement surface; native mirrored sky plus the guest's own far-terrain
+     views and seven-tap blur, with own cull/clip/light/eye. No reflection readback list or
+     SDK change. Final own water92/92 and reflection214/214records are bit equal.
+     Cover misses beyond1pixel are.36%/.14%bridge,.74%/.05%third; before-water bed
+     agrees with the game's copy on95.4%/94.9%. Off placeholder final-depth shares4.4%/4.3%
+     use a different plane/set. Sun-layer lake depth passes99.9787% of4705texels (13b).
+   - *Before/after the terrain reflection*, separate own-frame linear-scene sets:13b
+     whole-footprint RGB1.150/1.141/1.107bridge and1.154/1.146/1.113third,hue-1.5degrees
+     both;13c all-kept RGB.984900/.983597/.971809,hue-.629bridge and
+     .981218/.979685/.968927,hue-.562third.13c luminance P5/50/95 ratios
+     .948298/.995727/.992886bridge,.968218/.995434/.996679third meet the bounds.
+     Sets18428/20830before versus18433/20824after are not a common-set delta.
+     `t13_*_colour_given_place.txt`, `t18_*_colour_all.txt`; stills do not judge motion.
+   - *Cost*:13c alone on the restored usual monitor, all20shots1942wide, uncapped,
+     off/on/on/off,68steady windows, minimum47.6fps; frame delta-.004117647ms meets+.5ms,
+     repetitions.42/.118824ms meet1.0ms. This tiny negative nominal delta is not acceleration
+     proof. Capture+.1675ms is not decidable below1/3ms resolution; Water CPUmedian.077ms
+     is separate from GPU/frame cost.13b floor40.6met but frame cost not decidable from
+     off repetitions2.0214ms apart. Ruling57 supersedes54 after display sleep/restoration;
+     timing precedes third/off runs to use the restored display. `t18_timing.json`.
+   - *Not achieved as written*:C10 all eight game-to-native target cover shares
+     36.5709–84.6931% miss85%, despite reverse97.2272–100% and common RGB passing;
+     objects/flares are absent, without assigning every missed texel to that cause.
+     C14 pools miss.97–1.03 on at least one paired side (bridge1.029566/1.055547,
+     1.036011/1.041345;third1.043455/1.048152,1.214655/1.162564).
+     C4's original tiny deciding base is not decidable; ruling35's disclosed whole-lake
+     substitute passes. C5 colour passes16/16 but six horizons miss by2rows. C8's sky subset
+     lacks5000pixels; C11near/C12glint lack qualifying views after bounded searches.
+     C15old image is not decidable from EXPO/config/width mismatch; C17capture increment
+     is not decidable. All these remain named alongside the met measures.
+   - *Evidence limits*:fresh Task18 source/runtime review approved; runtime4554F15C,
+     source/test9e6096f. WARP debug gates have0errors/drawn/viewed lake;1328warnings and
+     unattributed dump1008warning remain. Bridge/WARP lack aggregate guest windows,
+     whole-run freeze NOT EXCLUDED; later third/timing/defaults have actual guest windows
+     and no known signature seen. Every driver remains RUN UNCHECKED; continuous motion,
+     glint/near-shore fade and other regions/times remain user checks101–106. Water default off.
+   - What follows is the item as it was written before the work:
    - **First, at its start: decide the route by which the native view gets pictures the game renders,
      without read-back** (follow-up of sub-project 12, below): the reflection views have the same problem
      as the far woods' pictures.
@@ -197,6 +243,27 @@ Limits and follow-ups named here are described in `frame-map.md`, section 17, "L
   timing run of `flat` and the third spot's pair; the register bounds the spec left narrow (the dissolve's
   rate, the pixel distances); a discovery capture keeps the pictures of its first 32 frames only.
 
+### Follow-ups of sub-project13 (`frame-map.md` section20, "Limits (13)", "Follow-ups (13)")
+
+- Far lake's geometry and165-instruction shader remain unbuilt; D1CC cubes are not drawn
+  under ruling26, because the live surface supplies the native layer's lake depth.
+- Reflected objects and flares remain omitted;6954/A4A9 is factor memory export,0%colour,
+  so omitting its execution is not an omitted picture draw.
+- Reflection views are still issued by the guest; move scene/culling to native with item6.
+- Other water bodies/regions/times, a live opaque form and the `b137` shadow term.
+- Slot14 meaning and a reachable near-water/shoreline view; check102.
+- In-scene resolve to0x13401000; native targets do not consume it.
+- Sun-layer copy place against other depth-writing blends; keep original depth sources explicit.
+- Normal map BC5/all stored levels is implemented; remaining host/console LOD, filtering and
+  sample-position differences stay with MSAA/supersampling item5.
+- Identify43ED/7F65 independently; it remains undrawn.
+- SDK copy interface B2 remains the user's separate decision (ruling2); no SDK edit.
+- Monitor experiments remain separate (ruling8); user display-sleep explanation and restored
+  timing ruling57 do not license changing display settings or resizing evidence.
+- Warning1008 resource attribution and real hot-device replacement remain unverified.
+- Moving water/glint, near-shore fade, omitted reflection objects, beams and other water/time:
+  checks101–105; exact off control/check106, and a comparable old-image baseline.
+
 ## Open with the user
 
 - Push of the local commits on `master`.
@@ -207,4 +274,7 @@ Limits and follow-ups named here are described in `frame-map.md`, section 17, "L
 - Default of `--fable2_native_impostors` (off; not recommended on before criterion 15 is judged on the
   closing binary and user checks 93 to 98 are done; the value `on` adds thirteen entries to a start-up list
   of the SDK and its cost depends on the monitor).
-- User checks 40 to 100 in `user-checks.md`.
+- Default of `--fable2_native_water` (off; final colour/cost measures pass, target silhouettes
+  and pools miss, motion/near branch/other regions unseen; user checks101–106 first).
+- SDK B2 copy interface and further monitor experiments remain separate user decisions.
+- User checks 40 to 106 in `user-checks.md`.

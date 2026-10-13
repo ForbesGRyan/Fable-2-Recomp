@@ -2103,7 +2103,7 @@ struct ClayConstants {
   uint32_t color;
   float uv[4];          // u * uv[0] + uv[2], v * uv[1] + uv[3]
   uint32_t textured;    // 1: sample the albedo at t3
-  uint32_t sampler;     // static sampler s0-s3 (SamplerIndex)
+  uint32_t sampler;     // SamplerBits (0..7): bits 0..1 the static sampler s0-s3, bit 2 level 0 only
   uint32_t alpha_mode;  // ClayAlpha::mode
   float alpha_ref;
   float cut[4];         // eye xyz, squared distance (DrawRecord::cut; +inf: no cut)
@@ -5789,18 +5789,18 @@ struct ClayTerrainConstants {
   float hole_ref;
   float fade[2];
   float weight_scale, weight_bias;
-  uint32_t colour_sampler;  // static sampler of the colour texture (SamplerIndex)
+  uint32_t colour_sampler;  // SamplerBits of the colour texture (0..7: bits 0..1 the register, bit 2 level 0 only)
   uint32_t weight_sampler;  // of the weights; the shader reads its clamp bit and filters linearly
   uint32_t flags;           // kTerrainFadeIn, kTerrainSteep
   // The steep-ground block (kTerrainSteep; zero without it).
-  uint32_t side_sampler;    // static sampler of the side texture
+  uint32_t side_sampler;    // SamplerBits of the side texture (0..7: bits 0..1 the register, bit 2 level 0 only)
   float side_uv[2];         // TerrainMaterialInputs::side_uv, scaled into the host texture
   float slope[2];           // TerrainMaterialInputs::slope
   float steep_threshold, steep_eps;
   uint32_t pad[2];
   // The light (SetClayTerrainLight; zero for a record drawn without it).
   float base_uv[4];         // tf3 coordinate of the world position, scaled into the host texture
-  uint32_t base_sampler;    // static sampler of the base map
+  uint32_t base_sampler;    // SamplerBits of the base map (0..7: bits 0..1 the register, bit 2 level 0 only)
   float c11x;               // pixel c11.x: layers on the ambient part, far terrain on the sun
   float facing_scale;       // layers: the literal of sat(scale * (N . c109)); far terrain: 0
   uint32_t base_gamma;      // bits 0 to 2: the base map's r, g, b are fetched with the gamma sign (TerrainBaseGamma)

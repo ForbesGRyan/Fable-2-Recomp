@@ -31,7 +31,7 @@ int main() {
       if (sampler.shader_register != i || sampler.filter != filter ||
           sampler.max_anisotropy != (overridden ? expected[setting] : 1u) ||
           sampler.address != ((i & 2) ? rhi::AddressMode::kClamp : rhi::AddressMode::kWrap)) {
-        std::printf("FAIL water sampler setting=%d register=%u\n", setting, i);
+        std::printf("FAIL clay sampler setting=%d register=%u\n", setting, i);
         return 2;
       }
     }

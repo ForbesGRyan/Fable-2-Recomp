@@ -53,7 +53,8 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
 // drops every triangle it belongs to, as the game's instancing shaders do
 // (DrawRecord::cut); cut.w is +inf for every other draw. Textured
 // draws (kClayTexturedPs) sample the albedo at t3 with static sampler
-// s<sampler_index> (bit 0 linear, bit 1 clamp) and keep a softened facet shade.
+// s<sampler_index & 3> (SamplerBits, 0..7: bit 0 linear, bit 1 clamp, bit 2
+// level 0 only) and keep a softened facet shade.
 // Their alpha (clay_logic.h, ClayAlpha) is an albedo component or 1, times
 // alpha_scale; alpha_mode says whether it is tested against alpha_ref (bits 0-2
 // the compare function, bit 3 the test), then tested as alpha-to-mask (bit 8:

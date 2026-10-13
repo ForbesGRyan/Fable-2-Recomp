@@ -483,7 +483,8 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
     mask_layout_ = nullptr;
     device_ = dev;
   } else {
-    DestroyObjects();  // retry after a partial failure
+    DestroyObjects();  // retry after a partial failure, or a filter-mode change (Ensure rebuilds the
+                       // objects; the latched sub-step failures are retried too)
     // (the F6 retry after a failure of the pass rebuilds everything, so the shadows' objects are
     // tried anew with the rest. A failure of the shadows' objects alone does not latch the renderer
     // and F6 does not come here for it: those stay off until this path, another device or a restart.)

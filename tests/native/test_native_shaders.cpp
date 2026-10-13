@@ -1447,7 +1447,8 @@ static std::string PreviousOff(std::string text) {
 }
 
 // Sub-project 15: the sampler sites' text before the level-0 bit, for the historical hash arrays (the wind's,
-// the impostors', the water's): the new select blocks replaced by the old four-line chains, nothing else touched.
+// the impostors', the water's): the new select blocks replaced by the old four-line chains. The transform restores
+// the code lines only; the new comment line in the textured text stays (the compiled bytes ignore comments).
 static std::string SamplerSelectBefore(std::string text) {
   struct Pair { const char* now; const char* before; };
   const Pair pairs[] = {

@@ -2683,7 +2683,7 @@ static void WaterTests() {
   }
   CHECK(867, FilterAnisotropy(6) == 1 && FilterAnisotropy(~0u) == 1);
   // 868: sub-project 15. The cvar's text as a mode: a whole-string integer, else 0; the rebuild rule: only a
-  // ready pass whose objects were built with another mode rebuilds (3 → 3 → 0 → 0 → 5: two rebuilds).
+  // ready pass whose objects were built with another mode rebuilds (3 -> 3 -> 0 -> 0 -> 5: two rebuilds).
   CHECK(868, ParseFilterSetting("3") == 3 && ParseFilterSetting("-1") == -1 && ParseFilterSetting("5") == 5 &&
                  ParseFilterSetting("6") == 6 && ParseFilterSetting("") == 0 && ParseFilterSetting("x") == 0 &&
                  ParseFilterSetting("3 ") == 0 && ParseFilterSetting(" 3") == 0);

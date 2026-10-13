@@ -459,6 +459,122 @@ class ConstantLoads {
   uint32_t untabled_loads_ = 0;
 };
 
+// --- the light set: the lanterns of a multi-light draw (local lights, 2026-10-13) --------------
+// One local light as the two-, four- and seven-light shaders read slot j (lighting-formulas.md, the
+// multi form; light_formulas.local_light): the position or direction c(80 + j) with its w, the colour
+// c(87 + j), and component j of c94 (blend of cone and range), c96 (range term), c105 and c107 (the
+// cone's cosine and slope), c112 (shadow strength), with the cone axis c(98 + j); slots 4 to 6 read
+// c95, c97, c106, c108, c113. 64 bytes, the layout the frame constant buffer carries (four float4).
+struct LocalLight {
+  float pos[3]; float w;
+  float col[3]; float blend;
+  float range; float cone_cos; float cone_scale; float shadow;
+  float axis[3]; float pad;
+};
+static_assert(sizeof(LocalLight) == 64);
+inline constexpr uint32_t kLightSetSlots = 7, kMaxLightSetLanterns = 6;
+// The number of distinct light sets a frame keeps (the capture's side array and the pass read it).
+inline constexpr uint32_t kMaxFrameLightSets = 16;
+enum class LightSetReason : uint8_t { kNone, kNotThisScene, kNoSun, kUnread, kUnusable, kTooMany, kCount };
+inline const char* LightSetReasonName(LightSetReason r) {
+  switch (r) {
+    case LightSetReason::kNone: return "none";
+    case LightSetReason::kNotThisScene: return "not-this-scene";
+    case LightSetReason::kNoSun: return "no-sun";
+    case LightSetReason::kUnread: return "unread";
+    case LightSetReason::kUnusable: return "unusable";
+    case LightSetReason::kTooMany: return "too-many";
+    default: return "?";
+  }
+}
+// A draw's light set as the pass needs it: the lanterns (the slots before the sun's, lit ones, in
+// slot order), the sun's slot and its direction (the pass compares it with the frame's block:
+// MakeLanternBuffer refuses a set whose sun is not the frame's). `valid` false: `reason` says why
+// and nothing else is read.
+struct LightSet {
+  LocalLight lights[kMaxLightSetLanterns];
+  uint32_t count = 0;
+  uint32_t sun_slot = 0;
+  float sun_dir[3] = {};
+  LightSetReason reason = LightSetReason::kNone;
+  bool valid = false;
+  uint8_t pad[2] = {};
+};
+static_assert(sizeof(LightSet) == 6 * 64 + 4 + 4 + 12 + 1 + 1 + 2);
+// The usable magnitudes, as the pass's rules (clay_logic.h LightValueUsable, LightPositionUsable):
+// a value at most 1,024, a position at most 65,536.
+inline constexpr float kLightSetValueMax = 1024.0f, kLightSetPositionMax = 65536.0f;
+inline bool LightSetValueUsable(float v) { return std::fabs(v) <= kLightSetValueMax; }
+inline bool LightSetPositionUsable(float v) { return std::fabs(v) <= kLightSetPositionMax; }
+// The per-slot registers: {blend, range, cone cos, cone slope, shadow} and the component, by slot.
+struct LightSetSlotRegs { uint32_t blend, range, cone_cos, cone_scale, shadow, comp; };
+constexpr LightSetSlotRegs LightSetRegsOf(uint32_t slot) {
+  return slot < 4 ? LightSetSlotRegs{94, 96, 105, 107, 112, slot} : LightSetSlotRegs{95, 97, 106, 108, 113, slot - 4};
+}
+// The sun's slot: the one component of c112.xyzw, c113.xyz that is 1 with every other 0 (one-hot).
+// kLightSetSlots when the two registers were not read or are not one-hot.
+inline uint32_t LightSetSunSlot(const float (*reg)[4], const bool* have) {
+  if (!reg || !have || !have[112] || !have[113]) return kLightSetSlots;
+  uint32_t hot = kLightSetSlots, hots = 0;
+  for (uint32_t slot = 0; slot < kLightSetSlots; ++slot) {
+    const LightSetSlotRegs r = LightSetRegsOf(slot);
+    const float v = reg[r.shadow][r.comp];
+    if (v == 1.0f) { hot = slot; ++hots; } else if (v != 0.0f) return kLightSetSlots;
+  }
+  return hots == 1 ? hot : kLightSetSlots;
+}
+inline LightSet MakeLightSet(const float (*reg)[4], const bool* have, bool light_set_this_scene) {
+  LightSet s;
+  auto refuse = [&](LightSetReason why) { LightSet r; r.reason = why; return r; };
+  if (!reg || !have) return refuse(LightSetReason::kUnread);
+  if (!light_set_this_scene) return refuse(LightSetReason::kNotThisScene);
+  const uint32_t sun = LightSetSunSlot(reg, have);
+  if (sun >= kLightSetSlots) return refuse(LightSetReason::kNoSun);
+  // The sun: a direction (w = 0) without range or cone (c94 zero there), read.
+  const LightSetSlotRegs sr = LightSetRegsOf(sun);
+  if (!have[80 + sun] || !have[sr.blend]) return refuse(LightSetReason::kUnread);
+  if (reg[80 + sun][3] != 0.0f || reg[sr.blend][sr.comp] != 0.0f) return refuse(LightSetReason::kNoSun);
+  for (int i = 0; i < 3; ++i) {
+    if (!std::isfinite(reg[80 + sun][i])) return refuse(LightSetReason::kUnusable);
+    s.sun_dir[i] = reg[80 + sun][i];
+  }
+  s.sun_slot = sun;
+  for (uint32_t slot = 0; slot < sun; ++slot) {
+    const LightSetSlotRegs r = LightSetRegsOf(slot);
+    if (!have[80 + slot] || !have[87 + slot] || !have[98 + slot] || !have[r.blend] || !have[r.range] || !have[r.cone_cos] ||
+        !have[r.cone_scale] || !have[r.shadow]) {
+      return refuse(LightSetReason::kUnread);
+    }
+    LocalLight l{};
+    for (int i = 0; i < 3; ++i) {
+      l.pos[i] = reg[80 + slot][i];
+      l.col[i] = reg[87 + slot][i];
+      l.axis[i] = reg[98 + slot][i];
+      if (!LightSetPositionUsable(l.pos[i]) || !LightSetValueUsable(l.col[i]) || !LightSetValueUsable(l.axis[i])) {
+        return refuse(LightSetReason::kUnusable);
+      }
+    }
+    l.w = reg[80 + slot][3];
+    l.blend = reg[r.blend][r.comp];
+    l.range = reg[r.range][r.comp];
+    l.cone_cos = reg[r.cone_cos][r.comp];
+    l.cone_scale = reg[r.cone_scale][r.comp];
+    l.shadow = reg[r.shadow][r.comp];
+    if (!LightSetValueUsable(l.w) || !LightSetValueUsable(l.blend) || !LightSetValueUsable(l.range) ||
+        !LightSetValueUsable(l.cone_cos) || !LightSetValueUsable(l.cone_scale) || !LightSetValueUsable(l.shadow)) {
+      return refuse(LightSetReason::kUnusable);
+    }
+    if (l.col[0] == 0.0f && l.col[1] == 0.0f && l.col[2] == 0.0f) continue;  // an unused slot
+    s.lights[s.count++] = l;
+  }
+  s.valid = true;
+  return s;
+}
+inline bool LightSetEqual(const LightSet& a, const LightSet& b) {
+  if (a.valid != b.valid || a.count != b.count || a.sun_slot != b.sun_slot || a.reason != b.reason) return false;
+  return std::memcmp(a.lights, b.lights, sizeof(LocalLight) * a.count) == 0 && std::memcmp(a.sun_dir, b.sun_dir, sizeof(a.sun_dir)) == 0;
+}
+
 // Which reads of the frame's light block the capture makes (capture.cpp,
 // RecordDraw). A read is costly (eleven ReadPixelConstant calls) and its
 // result depends on the light set in force, which the game loads once per

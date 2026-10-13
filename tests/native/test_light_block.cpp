@@ -46,6 +46,30 @@ Bank Day() {
   return b;
 }
 
+// in slots 0 and 1, the sun in slot 2, c112 one-hot at 2.
+Bank FourLight() {
+  Bank b = Day();
+  b.Set(80, 93.7503f, 161.322f, 42.3773f, 1.0f);
+  b.Set(81, 115.876f, 158.233f, 41.4589f, 1.0f);
+  b.Set(82, -0.671334f, 0.0940108f, 0.735169f, 0.0f);
+  b.Set(83, 0.0f, 0.0f, 0.0f, 1.0f);
+  b.Set(87, 1.55806f, 0.727093f, 0.0916504f, 0.998754f);
+  b.Set(88, 1.64307f, 0.766766f, 0.0966512f, 1.05325f);
+  b.Set(89, 1.00523f, 0.84597f, 0.408496f, 1.0f);
+  b.Set(90, 0.0f, 0.0f, 0.0f, 0.0f);
+  b.Set(94, 1.0f, 1.0f, 0.0f, 0.0f);
+  b.Set(96, 0.2505f, 0.2302f, 0.0f, 0.0f);
+  b.Set(98, 0.0f, 0.0f, 0.0f, 0.0f);
+  b.Set(99, 0.0f, 0.0f, 0.0f, 0.0f);
+  b.Set(100, 0.0f, 0.0f, 0.0f, 0.0f);
+  b.Set(105, -1.0f, -1.0f, -1.0f, -1.0f);
+  b.Set(107, 1.0f, 1.0f, 1.0f, 1.0f);
+  b.Set(109, -0.671334f, 0.0940108f, 0.735169f, 0.0f);
+  b.Set(112, 0.0f, 0.0f, 1.0f, 0.0f);
+  b.Set(113, 0.0f, 0.0f, 0.0f, 0.0f);
+  return b;
+}
+
 // A block made where the light set was loaded from its buffer since the scene began.
 LightBlock Make(const Bank& b) { return MakeLightBlock(b.reg, b.have, true); }
 
@@ -1053,6 +1077,61 @@ int main() {
   {
     static constinit LightBlockTries tries;
     CHECK(tries.Open(0) && tries.failed() == 0);
+  }
+  // The light set: the bridge's four-light set gives two lanterns in slot order, the sun at slot 2.
+  {
+    static_assert(sizeof(LocalLight) == 64 && sizeof(LightSet) == 6 * 64 + 4 + 4 + 12 + 1 + 1 + 2);
+    Bank b = FourLight();
+    CHECK(LightSetSunSlot(b.reg, b.have) == 2);
+    LightSet s = MakeLightSet(b.reg, b.have, true);
+    CHECK(s.valid && s.reason == LightSetReason::kNone && s.count == 2 && s.sun_slot == 2);
+    CHECK(s.lights[0].pos[0] == 93.7503f && s.lights[0].w == 1.0f && s.lights[0].col[1] == 0.727093f && s.lights[0].blend == 1.0f &&
+          s.lights[0].range == 0.2505f && s.lights[0].cone_cos == -1.0f && s.lights[0].cone_scale == 1.0f && s.lights[0].shadow == 0.0f &&
+          s.lights[0].axis[2] == 0.0f);
+    CHECK(s.lights[1].pos[0] == 115.876f && s.lights[1].range == 0.2302f && s.lights[1].col[0] == 1.64307f);
+    CHECK(s.sun_dir[0] == -0.671334f && s.sun_dir[2] == 0.735169f);
+    CHECK(LightSetEqual(s, MakeLightSet(b.reg, b.have, true)));
+    // Not loaded this scene: refused.
+    CHECK(!MakeLightSet(b.reg, b.have, false).valid && MakeLightSet(b.reg, b.have, false).reason == LightSetReason::kNotThisScene);
+    // A set whose c112 is not one-hot, or whose named slot is a position (w = 1), or has c94 = 1 there: no sun.
+    Bank two = b; two.Set(112, 1.0f, 0.0f, 1.0f, 0.0f);
+    CHECK(MakeLightSet(two.reg, two.have, true).reason == LightSetReason::kNoSun);
+    Bank pos = b; pos.Set(82, 1.0f, 2.0f, 3.0f, 1.0f);
+    CHECK(MakeLightSet(pos.reg, pos.have, true).reason == LightSetReason::kNoSun);
+    Bank blend = b; blend.Set(94, 1.0f, 1.0f, 1.0f, 0.0f);
+    CHECK(MakeLightSet(blend.reg, blend.have, true).reason == LightSetReason::kNoSun);
+    // A lantern register not read: unread; a NaN colour, a position past 1,024, an infinite range: unusable.
+    Bank unread = b; unread.have[96] = false;
+    CHECK(MakeLightSet(unread.reg, unread.have, true).reason == LightSetReason::kUnread);
+    Bank nan = b; nan.Set(88, std::numeric_limits<float>::quiet_NaN(), 0.7f, 0.1f, 1.0f);
+    CHECK(MakeLightSet(nan.reg, nan.have, true).reason == LightSetReason::kUnusable);
+    Bank far = b; far.Set(81, 100000.0f, 158.0f, 41.0f, 1.0f);
+    CHECK(MakeLightSet(far.reg, far.have, true).reason == LightSetReason::kUnusable);
+    Bank inf = b; inf.Set(96, 0.25f, std::numeric_limits<float>::infinity(), 0.0f, 0.0f);
+    CHECK(MakeLightSet(inf.reg, inf.have, true).reason == LightSetReason::kUnusable);
+    // The sun in slot 0 (a one-light set): valid, no lanterns. A dark lantern (colour zero) is dropped.
+    Bank day = Day(); day.Set(113, 0.0f, 0.0f, 0.0f, 0.0f);  // a set loads c112 and c113 together
+    LightSet none = MakeLightSet(day.reg, day.have, true);
+    CHECK(none.valid && none.count == 0 && none.sun_slot == 0);
+    Bank dark = b; dark.Set(87, 0.0f, 0.0f, 0.0f, 1.0f);
+    LightSet one = MakeLightSet(dark.reg, dark.have, true);
+    CHECK(one.valid && one.count == 1 && one.lights[0].pos[0] == 115.876f);
+    // Slots 4 to 6 read the second bank: the sun at slot 4 with lanterns in 0..3 uses c95, c97, c106, c108, c113 for none of
+    // them; a sun at slot 5 reads the lantern of slot 4 from the second bank.
+    Bank seven = b;
+    seven.Set(82, 50.0f, 60.0f, 40.0f, 1.0f); seven.Set(89, 1.0f, 0.5f, 0.1f, 1.0f);
+    seven.Set(83, 51.0f, 61.0f, 41.0f, 1.0f); seven.Set(90, 1.1f, 0.5f, 0.1f, 1.0f);
+    seven.Set(84, 52.0f, 62.0f, 42.0f, 1.0f); seven.Set(91, 1.2f, 0.5f, 0.1f, 1.0f);
+    seven.Set(85, -0.671334f, 0.0940108f, 0.735169f, 0.0f); seven.Set(92, 1.0f, 0.8f, 0.4f, 1.0f);
+    seven.Set(94, 1.0f, 1.0f, 1.0f, 1.0f); seven.Set(95, 1.0f, 0.0f, 0.0f, 0.0f);
+    seven.Set(96, 0.25f, 0.25f, 0.25f, 0.25f); seven.Set(97, 0.125f, 0.0f, 0.0f, 0.0f);
+    seven.Set(101, 0.0f, 0.0f, 0.0f, 0.0f); seven.Set(102, 0.0f, 0.0f, 1.0f, 0.0f);
+    seven.Set(106, -1.0f, -1.0f, -1.0f, 0.0f); seven.Set(108, 1.0f, 1.0f, 1.0f, 0.0f);
+    seven.Set(112, 0.0f, 0.0f, 0.0f, 0.0f); seven.Set(113, 0.0f, 1.0f, 0.0f, 0.0f);
+    LightSet s7 = MakeLightSet(seven.reg, seven.have, true);
+    CHECK(s7.valid && s7.sun_slot == 5 && s7.count == 5 && s7.lights[4].pos[0] == 52.0f && s7.lights[4].range == 0.125f &&
+          s7.lights[4].axis[2] == 1.0f && s7.lights[4].blend == 1.0f && s7.lights[4].shadow == 0.0f);
+    CHECK(std::strcmp(LightSetReasonName(LightSetReason::kTooMany), "too-many") == 0);
   }
   std::printf("PASS: light block\n");
   return 0;

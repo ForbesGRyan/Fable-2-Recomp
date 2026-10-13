@@ -1,0 +1,9 @@
+# data-processing region 0x82D40000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and twenty-eighth form). It takes a structure and checks its state, with no external sub-operations. This is a very frequently-called helper in the 0x82D4F process cluster. 42 lines. 0 callees. 323 callers.
+[functions."0x82D4F620"]
+name = "ProcessAndProcessAndProcess1728_82D4F620"

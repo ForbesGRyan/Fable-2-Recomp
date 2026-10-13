@@ -1,0 +1,168 @@
+# ui functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# Iterate an array of pointers and issue a virtual call on each one (five hundred and eighth form). It takes a structure (a: array of pointers at a->0, a->4, a->8, ...); it iterates over the array (up to 6 entries), and for each valid pointer, issues a virtual call. This is the "process this data" routine (five hundred and eighth form), part of the 0x822A2 process cluster. 148 lines. 0 callees (uses indirect calls). 4 callers (sub_829F8D30, ProcessAndProcessAndProcess506, sub_829F8028, and sub_829F7F88). Strong override in fable2_text_probe.h.
+[functions."0x822A2948"]
+name = "UITextContainer_ProcessChildren"
+
+
+# Simple thunk that forwards to UIText_FrameRender (a UI text rendering thunk). It takes no arguments and simply calls UIText_FrameRender. This is a "forward to UI text render" thunk. 7 lines. 1 callee (UIText_FrameRender). 1 caller (ThunkTo_82BFD850_822C5A18). Strong override in fable2_ui_render_probe.h.
+[functions."0x82BFD850"]
+name = "ThunkTo_UIText_FrameRender_82BFD850"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and thirty-fourth form). It takes a structure and checks its state, with no external sub-operations. Part of the UI text-rendering cluster in the 0x82C09 region. 102 lines. 0 callees. 1 caller (UIText_RenderElement).
+[functions."0x82C09018"]
+name = "UITextElement_Draw"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and eighty-fourth form). It takes a structure, checks its state, and drives sub-operations (sub_82C08F08, sub_82C09680) based on the result. Part of the UI text-rendering cluster in the 0x82C09 region. 68 lines. 2 callees. 1 caller (UIText_RenderElement).
+[functions."0x82C09870"]
+name = "UITextElement_PostQuery"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and thirty-seventh form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82B4E process cluster. 15 lines. 0 callees. 0 callers.
+[functions."0x82B4EEE0"]
+name = "UITextElement_DrawDispatch"
+
+
+# Process a large structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and three hundred and sixty-ninth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess2068, sub_82C0A1A0) based on the result. This is a frequently-called helper in the 0x82C0A process cluster. 189 lines. 2 callees. 4 callers (UIText_RenderElement, sub_82C0A590, sub_82C0A988, sub_82C0AA60).
+[functions."0x82C0A230"]
+name = "UITextElement_FieldByIndex"
+
+
+# Process a structure by checking its state and driving many sub-operations (two thousand three hundred and eighty-third form). It takes a structure (a: fields at a->64, a->72, and a->68), a value (b), and a value (c); it checks the structure's state, and drives many sub-operations (CheckedCopy, ProcessAndProcessAndProcess1942, and more) based on the result. This is the "process this data" routine (two thousand three hundred and eighty-third form), part of the 0x82C09 process cluster. 179 lines. 2 callees. 2 callers (UIText_RenderElement and sub_82C09C80).
+[functions."0x82C09B50"]
+name = "UITextElement_GrowBuffer"
+
+
+# Process a value by checking its state and driving many sub-operations (two thousand four hundred and one hundred and eighty-fifth form). It takes a value (a), a value (b), a structure (c: field at c->16), and a value (d); it checks the value's state, and drives many sub-operations (ProcessBinarySearch, Allocate_OrDbgBreak, ConstructAndIncrementCounter, and more) based on the result. This is the "process this data" routine (two thousand four hundred and one hundred and eighty-fifth form), part of the 0x82C21 process cluster. 400 lines. 16 callees. 0 callers (vtable-dispatched).
+# Get-or-create front-end UI element node: binary-searches an element table by
+# key and constructs a fresh node (with refcounted sub-objects) if absent.
+# Fires on effective menu actions (selection change / activation).
+[functions."0x82C217B8"]
+name = "FrontMenu_EnsureElement"
+
+
+
+# ============================================================================
+# UI text rendering pipeline (reverse-engineered; see TEXT_RENDERING_NOTES.md)
+# ----------------------------------------------------------------------------
+# The title prompt "Press <a_img> to start" is a live UTF-16BE string in the
+# heap (0x426690F0); <a_img> renders as the Xbox A-button icon. The per-frame
+# chain:
+#   UIText_FrameRender (0x82C03FA8)
+#     -> UIText_FrameRenderIter (0x82190760)   [iterates UI text list @ 0x83334AA0]
+#        -> UITextItem_Dispatch (0x82BFDB68)   [bctrl *(item+4)]
+#           -> UIText_RenderCurrent (0x82C0AD60)   [loads *(0x83334D2C)]
+#              -> UIText_RenderCurrentObject (0x82C0ACD0)
+#                 -> UIText_RenderSegment (0x82C0A8F8) x3  [segment glyph list]
+#                    -> UIText_RenderElement (0x82C0A6A0)  [per-glyph/element draw]
+# ============================================================================
+
+# Per-frame entry. Sets r11 = 0x83330000 (UI text manager), r3 = r11 + 19104
+# (the UI text list at 0x83334AA0), r4 = -1, then tail-calls
+# UIText_FrameRenderIter. Fires every frame during title/loading screens.
+[functions."0x82C03FA8"]
+name = "UIText_FrameRender"
+
+
+# Walks the UI text list at 0x83334AA0. For each live item it calls
+# UITextItem_Dispatch (the item's slot-4 vcall); disposed items are removed
+# via sub_82BFDB80 (destructor).
+[functions."0x82190760"]
+name = "UIText_FrameRenderIter"
+
+
+# vcall thunk: r11 = *(item + 4); if (r11) bctrl r11. Invokes a UI text
+# item's slot-4 method (its render). This is what actually runs each item's
+# draw code each frame.
+[functions."0x82BFDB68"]
+name = "UITextItem_Dispatch"
+
+
+# The title prompt's slot-4 render method (the bctrl target for the title
+# screen's single text item, object at 0x832D60F0 whose *(item+4) points
+# here). Ignores its argument: sets r31 = 0x83334E20 (UI text manager
+# 0x83330000 + 0x4E20, the prompt's element list) and loops:
+#   elem = sub_82B458C0(0x83334E20);   # fetch/advance element list
+#   while (elem) { UITextPrompt_RenderElement(elem); elem = sub_82B458C0(...); }
+# This is the function that renders the "Press <a_img> to start" prompt.
+[functions."0x82C44CF0"]
+name = "UITextPrompt_Render"
+
+
+# Per-element draw of the prompt, called in a loop by UITextPrompt_Render.
+# r3 = element (r31). Key element fields: *(elem+0x7C) = drawable pointer
+# (0 => element skipped), elem+0xAC/0xBB/0xBC = cached draw state.
+# Flow: visibility check via sub_82C44688(elem+8) (result & 0x3F), then
+# sub_82BFCB58/sub_82C50A88 bookkeeping, then the actual draw: a vcall into
+# the drawable's vtable[8] (mtctr *( *(elem+0x7C) + 0x20 ); bctrl) with the
+# drawable in r4 and a stack scratch buffer in r3.
+[functions."0x82C44B50"]
+name = "UITextPrompt_RenderElement"
+
+
+# r3 = *(0x83330000 + 19756 = 0x83334D2C)  [pointer to the "current text"
+# object], then calls UIText_RenderCurrentObject(r3).
+[functions."0x82C0AD60"]
+name = "UIText_RenderCurrent"
+
+
+# Renders the "current text" object (r3). Loads the font slot *(0x83334A08),
+# checks the visible flag *(obj + 152), then calls UIText_RenderSegment x3
+# for the object's three text segments (at +0/+12/+24).
+[functions."0x82C0ACD0"]
+name = "UIText_RenderCurrentObject"
+
+
+# Iterates one text segment's linked list (head at segment + 4) and calls
+# UIText_RenderElement for each node. Called three times per text object.
+[functions."0x82C0A8F8"]
+name = "UIText_RenderSegment"
+
+
+# The hot per-glyph/element draw. Reads the element's flags (+157/+158/+159/
+# +172) and its draw pointer (+16), then invokes that pointer's vtable slot 9
+# (+36). State cached at +92/+160/+168. This is where each visible character
+# of the prompt is actually drawn.
+[functions."0x82C0A6A0"]
+name = "UIText_RenderElement"
+
+
+# Per-item text draw used by the list iterator. Loads font slot[2]
+# (0x83334A08) and calls UIText_RenderWithFont.
+[functions."0x82BFD9E8"]
+name = "UITextItem_Render"
+
+
+# Draws a string using the given font object (called by UITextItem_Render).
+[functions."0x82C000F8"]
+name = "UIText_RenderWithFont"
+
+
+# Binary search over the font's glyph/text table to resolve a character to a
+# glyph slot (uses large float sentinels ~9.64683e14 as the search bounds).
+[functions."0x82C106A8"]
+name = "UIFont_LookupGlyph"
+
+
+# Emits one glyph quad: takes the glyph origin (position - size), transforms
+# it with the 3x3 matrix staged in r28, and writes the resulting quad.
+[functions."0x82C0CAF8"]
+name = "UIFont_EmitGlyphQuad"
+
+
+# Per-glyph draw: reads the glyph position (float at +8), derives scale and
+# final screen position, and feeds the quad emitter.
+[functions."0x82BFE948"]
+name = "UIFont_RenderGlyph"
+
+
+# Font/.bft (font texture) setup. Loads FNV-1 hash constants, the font name
+# strings (0x82008098 / 0x820080A8) and the per-slot font values.
+[functions."0x82BF7DF0"]
+name = "UIFont_Initialize"

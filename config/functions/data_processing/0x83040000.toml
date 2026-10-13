@@ -1,0 +1,13 @@
+# data-processing region 0x83040000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+[functions."0x83040FEC"]
+name = "Func_83040FEC"
+
+[functions."0x8304100C"]
+name = "Func_8304100C"
+
+[functions."0x8304101C"]
+name = "Func_8304101C"

@@ -1,0 +1,9 @@
+# data-processing region 0x83140000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# Loading Keystone and Spinnerbox pub game
+[functions."0x831465C8"]
+name = "LoadPubGames_831465C8"

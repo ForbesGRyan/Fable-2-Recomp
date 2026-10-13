@@ -1,0 +1,24 @@
+# data-processing region 0x82500000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# A chain/list operation (with a validation): validate obj->0 is non-zero (a trap if zero), and (depending on obj->4
+# ->21, a flag) process the chain (walk the chain by obj->4->8 and obj->4->0, with a ->21 flag, and a trap on an
+# invalid state).
+
+# Args: obj (r3, ->0 = a field, ->4 = a node, ->4->0 = a head, ->4->8 = a next, ->4->21 = a flag), (more). It
+# validates obj->0 is non-zero (obj->0 != 0, a trap, 22, if zero -- an invalid state). It then checks the flag (obj
+# ->4->21, a byte): if it is zero, it walks the chain (obj->4->0, the head, and its ->21 flag and ->8 next, a
+# chain/list walk); if it is non-zero, it processes obj->4->8 (a next) and (if that's also in a valid state, ->21 is
+# zero) returns, else raises a trap (an invalid state). So it's a "process a chain (validate obj->0, and (depending
+# on a flag) walk the chain by the next pointers, with a trap on an invalid state)" routine (a chain/list operation,
+# part of the 0x8250A cluster). 112 lines, no direct callees (pure data manipulation, with traps). Many callers (sub
+# _82AB7620, sub_82AA7F40, sub_8267EAD0, sub_82C82EA8, sub_8218E328, sub_8246E758, sub_82858CA0, sub_82344470, sub
+# _8267F630, sub_823775B8 -- many across the codebase). The object's class (obj, ->0 = a field, ->4 = a node, an
+# object with a node) and the chain's element type (a node, ->0 = a head, ->8 = a next, ->21 = a flag, a chain/list
+# node) aren't resolvable, so the name states the mechanism: a chain/list operation (validate and process the chain
+# by the next pointers). The "2" distinguishes it from a first chain process (if any).
+[functions."0x8250AF60"]
+name = "ProcessChain2_8250AF60"

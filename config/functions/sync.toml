@@ -1,0 +1,1175 @@
+# sync functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# Locked per-entry processing loop over a 388-byte-entry array. Args: obj
+# (r3). Guards: tail word *(obj->280 + obj->276*388 - 40) != 0 and
+# obj->692 != 0. Locks the mutex at (obj+852)->+4 via
+# MutexLock_WaitInfinite (bails without processing if the lock cannot be
+# taken). Loops i over obj->276 entries (array at obj->280, stride 388):
+# vcall entry->348 (skip entry if it returns 0), range checks over entry
+# fields 0/8/12/16/24/48/52/68, vcall entry->352 (fetch buffer info into
+# stack slots r1+80/84), then a byte transform that toggles each byte's
+# high bit (b+128 == b XOR 0x80, i.e. 8-bit signed<->unsigned conversion)
+# between the entry buffer and the obj->12 buffer with MemCpy_SdkRuntime
+# moves and entry->24 offset bookkeeping, then vcall entry->356 and
+# entry->348 again. Unlocks via MutexUnlock_ReleaseMutant. 7 call sites,
+# all sibling methods in the same 0x832B end-of-.text family, each gating
+# the call on a different non-zero object field. The XOR-0x80 byte churn is
+# the signature of 8-bit sample conversion — plausibly an audio voice/sound
+# pipeline, but the vtable contents are unresolved so the name stays
+# mechanism-based.
+[functions."0x832B3700"]
+name = "CriticalSection_ProcessEntryArray_832B3700"
+
+
+# Spin-lock acquire (test-and-set with spin). Args: addr (r3) -> a u32
+# flag where 0 = free / 1 = held. Behavior: read *addr; if 0, atomically
+# CAS it to 1 (claim) and return; if non-zero (held), spin re-reading
+# *addr until it reads 0, then claim it. Uses an lwarx/stwcx. atomic pair
+# inside the recompiler's global-lock region (mfmsr/mtmsrd MSR sync), with
+# an lwsync after the claim, and a db16cyc delay hint once the spin counter
+# passes 40 (bus-contention back-off). Returns void. Sits in the wait/
+# sync infrastructure (immediately before KeWaitForSingleObject at
+# 0x822D74A0). 15 call sites, all in a data-processing subsystem: each
+# loads a global object, adds an offset (a per-object lock word at +12/+32/
+# +36/+40/-7828 etc.), and calls this BEFORE reading that object's fields —
+# i.e. a spin-lock guard. Named SpinLock_Acquire (the matching release that
+# sets the flag back to 0 is a separate function).
+[functions."0x822D7408"]
+name = "SpinLock_Acquire_822D7408"
+
+
+# ---------------------------------------------------------------------------
+# REFERENCE-COUNTED RESOURCE RELEASE (the game's main "Release()", 2794
+# call sites) plus two sub-object vtable-slot-3 delegates.
+# ---------------------------------------------------------------------------
+
+# The game's primary reference-counted Release(). Arg: wrapper object (r3) that
+# holds a reference-counted resource at wrapper->4. Flow: if wrapper->4 is NULL,
+# just clear the wrapper and return. Otherwise ATOMICALLY decrement the
+# resource's reference count (*(wrapper->4)) using an lwarx/stwcx. loop under the
+# global lock (mfmsr/mtmsrd). If the count is still > 0, another holder remains
+# -- just clear the wrapper's fields and return. If it reaches 0 (last reference):
+# call the resource's destructor callback (resource->4, invoked with resource->8
+# as the object) and then free the resource via Free_SizeBucketed_Thunk_8221BE68
+# (the main free). Finally clear wrapper->0 and wrapper->4. A classic COM-style
+# Release(): drop one reference, and if this was the last, destroy + free.
+# 2794 call sites -- the dominant reference-release path.
+[functions."0x829FF648"]
+name = "Release_RefCounted_829FF648"
+
+
+# ---------------------------------------------------------------------------
+# A general CS enter/try-enter (270 callers), a CS-guarded handler-dispatch
+# vtable method, and a position-advancing vtable-slot-3 write.
+# ---------------------------------------------------------------------------
+
+# A general critical-section acquire: enters (blocking) or try-enters
+# (non-blocking) a CS and records whether it succeeded. Args: lock-state obj
+# (r3), CS pointer (r4), mode flag (r5). Stores the CS pointer at obj->0. If
+# the flag (low byte of r5) is 0: call __imp__RtlEnterCriticalSection(CS)
+# (blocking). If nonzero: call __imp__RtlTryEnterCriticalSection(CS) (non-
+# blocking); if it returns != 1 (failed to acquire), set the acquired flag to 0.
+# On success set obj->4 = 1 (acquired), on try-enter failure obj->4 = 0.
+# 270 call sites -- a widely-used lock-acquire helper (the matching release is
+# a direct __imp__RtlLeaveCriticalSection call at the callers). The obj is a
+# small lock-state wrapper: obj->0 = CS pointer, obj->4 = acquired flag.
+[functions."0x82200688"]
+name = "CriticalSection_EnterOrTry_82200688"
+
+
+# A major refcount Release (690 callers) -- a sibling of 
+# Release_RefCounted_829FF648, but over the obj->0 resource.
+
+# Arg: obj (r3). Loads obj->0 (a reference-counted resource pointer); if it is
+# 0, return. Otherwise atomically decrement the refcount at (obj->0 + 12) using
+# an lwarx/stwcx. retry loop under the global lock (mfmsr/mtmsrd + 
+# REX_ENTER/LEAVE_GLOBAL_LOCK). If the new count is still > 0, return (not the
+# last reference). If it reaches <= 0 (last reference), call the destructor
+# sub_82B39A30(obj->0) and then Free_SizeBucketed_Thunk_8221BE68(obj->0). Returns
+# void. 690 callers (sub_824E7BA0, sub_8328C2E0, sub_828592B0, ...) -- one of
+# the hottest release paths in the binary. The COM-style "decrement, destroy +
+# free on zero" contract is the same as Release_RefCounted_829FF648, except the
+# resource lives at obj->0 (not obj->4) and its refcount at resource+12.
+[functions."0x821C67D8"]
+name = "Release_RefCounted_821C67D8"
+
+
+# A register/init with a global counter: initialize the object, atomically increment a global
+# counter (under the global lock), and run a couple of string lookups.
+
+# Args: obj (r3, ->0 = a value, ->4 = a field), (r4), (r5). Sets obj->0 = r5 and obj->4 = 0
+# (initializing the object). Then it atomically increments a global counter (lwarx/stwcx CAS
+# loop under the global lock, REACQUIRE until success) -- the classic "register this object / assign
+# it an ID" pattern. It then calls LookupString2_8246C010 (sub_8246C010), LookupAndCompare_825D7688
+# (sub_825D7688), and CopyAssign_RefCounted2_82265160. Returns. 112 lines. 4 callers, in the
+# 0x82B7 cluster (sub_82B5C8B0, sub_82B745A0, sub_82B714A0, sub_82B80D70). The object class and
+# the exact registry semantics aren't resolvable, so the name states the mechanism: register/init
+# the object and bump a global counter.
+[functions."0x82B71020"]
+name = "RegisterWithCounter_82B71020"
+
+
+# A line parser (the 0x82B47 line-reader cluster): atomically increment a global line counter, parse the
+# line (ParseLineValue_82B46D40), and handle the refcounted result.
+
+# Args: obj (r3, the line reader), (r4), (more). Atomically increments a global counter (from a fixed
+# .data address, 0x82CCC8C0 + 28344 -- a line/record counter, incremented via an lwarx/stwcx compare-and-
+# swap under the global lock, retrying on contention). It then parses the line (ParseLineValue_82B46D40,
+# sub_82B46D40) and handles the result: it constructs a refcounted object (ConstructRefCounted_8222CF18,
+# sub_8222CF18) and destructures it on a path (DestructRefCounted_82214F08, sub_82214F08), and calls
+# sub_82B47E40 (a further line helper). So it's a "parse a line (incrementing the line counter and
+# building the value object)" routine (a log/property line reader). 162 lines. 5 callers (sub_828152D0,
+# sub_829DD350, sub_825F5238, sub_82817D28, sub_82466098). The line's content (a log, a config, a save)
+# isn't resolvable, so the name states the mechanism: parse a line.
+[functions."0x82B47218"]
+name = "ParseLine_82B47218"
+
+
+# An atomic counter increment: atomically increment a counter (obj->8) using a load-linked / store-conditional
+# loop (lwarx / stwcx) under the global lock, and return the new value.
+
+# Args: obj (r3, ->8 = a counter). Atomically increments the counter at obj->8: it takes the global lock (REX
+# _ENTER_GLOBAL_LOCK, disabling interrupts via the MSR), reads the counter (lwarx), increments it, and writes it
+# back (stwcx, a compare-and-swap); if the store fails (another thread modified the counter), it retries (a
+# load-linked / store-conditional loop). It releases the global lock and returns the new value. So it's an "atomic
+# increment of a shared counter" routine (a thread-safe counter increment, part of the 0x822C cluster). 37 lines,
+# no callees (a pure atomic operation, using the global lock). 1 caller (sub_82B4F368). The counter's meaning
+# (a shared counter at obj->8, a frame / resource / allocation counter) isn't resolvable, so the name states the
+# mechanism: atomic increment.
+[functions."0x822CBEB8"]
+name = "AtomicIncrement_822CBEB8"
+
+
+# An atomic increment (the sibling of AtomicIncrement_822CBEB8): atomically increment a value at (ptr + 4), using an
+# lwarx/stwcx. loop under the global lock (mfmsr/mtmsrd to disable interrupts), and return the new value.
+
+# Args: ptr (r3, the target is ptr + 4), (more). Atomically increments the 32-bit value at (ptr + 4): it enters the
+# global lock (REX_ENTER_GLOBAL_LOCK, with mfmsr/mtmsrd to disable interrupts), does a load-and-reserve / store-
+# conditional (lwarx/stwcx.) to read the value, increment it by 1, and write it back (retrying on a store-conditional
+# failure), leaves the global lock, and returns the new value (r3 = the incremented value). So it's an "atomically
+# increment a value (at ptr + 4, under the global lock) and return the new value" routine (an atomic increment, the
+# sibling of AtomicIncrement_822CBEB8, sub_822CBEB8). 24 lines (to the next function), no callees (pure atomic
+# arithmetic). It is registered (in the function table, fable_2_init.cpp / fable_2_register.cpp) but has no direct
+# callers in the recompiled code (a registered-but-uncalled atomic increment, likely invoked only from code outside
+# the traced region, or unused). The value's meaning (a counter at ptr + 4, a reference count / global counter) isn't
+# resolvable, so the name states the mechanism: atomically increment a value (at ptr + 4). The "2" distinguishes it
+# from AtomicIncrement_822CBEB8.
+[functions."0x82375F28"]
+name = "AtomicIncrement2_82375F28"
+
+
+# A store-with-grow (the sibling of StoreValueGrow_82A0A040, the 8-byte grow path of SetValue4_829FD7B8): atomically
+# increment a counter (src->4, an lwarx/stwcx loop under the global lock), then process (grow the buffer: allocate
+# via AllocateChecked4_82A87220, copy the data, and manage refcounts via Release_RefCounted_829FF648 / Copy
+# RefcountedArray_827F2010), freeing the old buffer (Free_SizeBucketed_Thunk_8221BE68).
+
+# Args: obj (r3), (r4), src (r6, ->0, ->4 = a counter), (more). If src->4 (a counter) is non-zero, it atomically
+# increments it (an lwarx/stwcx loop under the global lock, with mfmsr/mtmsrd to disable interrupts). It then
+# processes the data (a grow / reallocate): it allocates (AllocateChecked4_82A87220, sub_82A87220, a size-checked
+# allocation of 8-byte elements), copies the data, and manages refcounts (Release_RefCounted_829FF648, sub_829FF648,
+# and CopyRefcountedArray_827F2010, sub_827F2010), freeing the old buffer (Free_SizeBucketed_Thunk_8221BE68, sub
+# _8221BE68). It also calls sub_8284B558, sub_829FA6A0, and sub_82A97648 (siblings in the 0x8284B/0x829FA/0x82A97
+# clusters). So it's a "store values into an 8-byte-stride array (with a grow / reallocate path: atomically update a
+# counter, allocate a larger buffer, and manage refcounts)" routine (a store with a grow, part of the 0x8260B cluster,
+# the 8-byte grow path of SetValue4_829FD7B8). 369 lines, 7 callees (AllocateChecked4_82A87220, Release_RefCounted
+# _829FF648, CopyRefcountedArray_827F2010, Free_SizeBucketed_Thunk_8221BE68, sub_8284B558, sub_829FA6A0, sub_82A97648
+# ). Many callers (sub_8234FBE0, sub_82607260, sub_82769838, ...). The buffer's class (->4 = a base, ->8 = a write
+# pointer, an 8-byte-stride array) and the counter's meaning (src->4 = a refcount / counter) aren't resolvable, so
+# the name states the mechanism: store values (with a grow / reallocate, atomically updating a counter). The "2"
+# distinguishes it from StoreValueGrow_82A0A040 (the 4-byte version).
+[functions."0x8260B008"]
+name = "StoreValueGrow2_8260B008"
+
+
+# An atomic increment (the sibling of AtomicIncrement_822CBEB8 / AtomicIncrement2_82375F28): zero a field (obj->0 =
+# 0), and atomically increment a global (an lwarx/stwcx loop under the global lock).
+
+# Args: obj (r3, ->0 = a field), (more). It zeros a field (obj->0 = 0). It then atomically increments a global (a
+# fixed .data address, 0x82...28344): it enters the global lock (REX_ENTER_GLOBAL_LOCK, with mfmsr/mtmsrd to disable
+# interrupts), does a load-and-reserve / store-conditional (lwarx/stwcx.) to read the global, increment it by 1, and
+# write it back (retrying on a store-conditional failure), and leaves the global lock. So it's a "zero a field (obj->0
+# = 0) and atomically increment a global (under the global lock)" routine (an atomic increment with a field zeroing,
+# part of the 0x821F7 cluster). 41 lines (to the next function), no direct callees (the atomic increment is inline,
+# which the callee scan does not count). Many callers (DispatchVcallSequence3_82C1F380, sub_82BFE700, Dispatch_Vcall
+# Sequence2_82C1E360, ...). The field's meaning (obj->0 = a field, a reset / cleared flag) and the global's meaning (a
+# global counter, a count of an operation) aren't resolvable, so the name states the mechanism: zero a field (and
+# atomically increment a global). The "3" distinguishes it from AtomicIncrement_822CBEB8 and AtomicIncrement2_82375F
+# 28.
+[functions."0x821F7798"]
+name = "AtomicIncrement3_821F7798"
+
+
+# A dispose (a destructor with an atomic decrement, the sibling of the Dispose family): atomically decrement a
+# counter (obj->4->4, via lwarx/stwcx and a global lock, a lock-free atomic decrement), and (if the result is zero,
+# the last reference) process a destructor (on obj->0, the object's field).
+
+# Args: obj (r3, ->0 = a field, ->4 = a node), (more). It atomically decrements a counter (obj->4->4, a refcount /
+# use count): it enters a global lock (REX_ENTER_GLOBAL_LOCK, a thread fence, disabling interrupts), does a lock-free
+# atomic decrement (lwarx/stwcx, a compare-and-swap, on obj->4->4, decrementing it by one, and retrying on a CAS
+# failure), and exits the global lock (REX_LEAVE_GLOBAL_LOCK). If the result (the decremented counter) is zero (the
+# last reference), it processes a destructor (on obj->0, the object's field, a cleanup). So it's a "dispose an object
+# (atomically decrement a counter, and (if it is zero, the last reference) process a destructor on the object's
+# field)" routine (a destructor with an atomic decrement, part of the 0x82B6A cluster, a sibling of the Dispose
+# family). 80 lines, no direct callees (pure data manipulation, with a lock-free atomic decrement and a global lock --
+# the callee scan does not count the atomic / lock operations). Many callers (sub_82420D50, sub_82A580D8, sub_8233DE8
+# 0, sub_82B5D930, sub_8223F1E0, sub_8218E5F0, sub_82B827D8, sub_82B83808, sub_82A5A310, sub_8233E2A0 -- many across
+# the codebase). The object's class (obj, ->0 = a field, ->4 = a node, a refcounted object) and the field's meaning
+# (a field, a particular sub-structure) aren't resolvable, so the name states the mechanism: a destructor with an
+# atomic decrement (atomically decrement a counter and (if zero) process a destructor). The "17" distinguishes it
+# from the other Dispose* variants (Dispose through Dispose16).
+[functions."0x82B6AB20"]
+name = "Dispose17_82B6AB20"
+
+
+# A chain search (the sibling of ChainSearch_82B3D880): walk a chain (a two-key comparison: node->12 against a
+# value, following the node's next pointers, node->8 / node->0, with a ->21 flag), searching for a match, and process
+# the found node (with the list).
+
+# Args: (r3), value (r4, ->0 = a value), (more). It loads a list (a global, a fixed .data address, a list of nodes),
+# and walks the chain (from the list's node, following the ->4, ->8, and ->0 pointers): it compares the node's field
+# (node->12, a value) against the target value (r7, from r4->0), and (depending on the comparison) follows the node's
+# next pointer (node->8, a next) or the node's head (node->0, a head / prev), walking to the next node (node->4->21,
+# a flag). If the node's flag (node->21, a byte) is zero, it continues the walk; if it is non-zero, it stops (a found
+# node / a match). It then processes the found node (r9, the found node) and the list (r8, the list), storing them to
+# the stack (a result, for the caller). So it's a "search a chain (walk the chain by a comparison, node->12 against a
+# value, following the next pointers, and process the found node)" routine (a chain search, part of the 0x82B5D
+# cluster, a sibling of ChainSearch_82B3D880). 91 lines, no direct callees (pure data manipulation). 4 callers: sub
+# _827F0358, ProcessCriticalSection_82B5C758 (sub_82B5C758, a critical section process), sub_82B80C18, sub_822001F8
+# . The chain's element type (a node, ->4 = a next, ->8 = a next, ->12 = a value, ->21 = a flag, a chain/list node)
+# and the value's meaning (a searched value, a particular match) aren't resolvable, so the name states the mechanism:
+# a chain search (walk the chain by a comparison and process the found node). The "2" distinguishes it from ChainSear
+# ch_82B3D880.
+[functions."0x82B5D548"]
+name = "ChainSearch2_82B5D548"
+
+
+# A chain search (the sibling of ChainSearch2_82B5D548 / ChainSearch_82B3D880): walk a chain (a two-key comparison:
+# node->12 against a value, following the node's next pointers, node->8 / node->0, with a ->21 flag), searching for a
+# match, and (in a path) dispose (Dispose17_82B6AB20) and call a sibling (sub_82B5E330).
+
+# Args: (r3), value (r4, ->0 = a value), (more). It loads a list (a global, a fixed .data address, a list of nodes),
+# and walks the chain (from the list's node, following the ->4, ->8, and ->0 pointers): it compares the node's field
+# (node->12, a value) against the target value (r7, from r4->0), and (depending on the comparison) follows the node's
+# next pointer (node->8, a next) or the node's head (node->0, a head / prev), walking to the next node (node->4->21,
+# a flag). If the node's flag (node->21, a byte) is zero, it continues the walk; if it is non-zero, it stops (a found
+# node / a match). In a path it disposes (Dispose17_82B6AB20, sub_82B6AB20, a destructor with an atomic decrement) and
+# calls a sibling (sub_82B5E330, a sibling in the 0x82B5E cluster). So it's a "search a chain (walk the chain by a
+# comparison, node->12 against a value, following the next pointers, and (in a path) dispose and call a sibling)"
+# routine (a chain search, part of the 0x82B5D cluster, a sibling of ChainSearch2_82B5D548). 135 lines, 2 callees
+# (Dispose17_82B6AB20, sub_82B5E330). 1 caller: ProcessCriticalSection_82B5C758 (sub_82B5C758, a critical section
+# process). The chain's element type (a node, ->4 = a next, ->8 = a next, ->12 = a value, ->21 = a flag, a chain/list
+# node) and the value's meaning (a searched value, a particular match) aren't resolvable, so the name states the
+# mechanism: a chain search (walk the chain by a comparison and (in a path) dispose). The "3" distinguishes it from
+# ChainSearch2_82B5D548 and ChainSearch_82B3D880.
+[functions."0x82B5D690"]
+name = "ChainSearch3_82B5D690"
+
+
+# A process (an atomic increment, the sibling of AtomicIncrement3_821F7798 / AtomicIncrement2_82375F28): load a float
+# constant (from a fixed .data address), and atomically increment a global counter (via lwarx/stwcx and a global lock,
+# a lock-free atomic increment), and (in a path) destruct a refcounted value (DestructRefCounted_82214F08) and call
+# sibling operations.
+
+# Args: obj (r3, r31), (r4, a value), (more). It loads a float constant (from a fixed .data address, a magic constant,
+# a particular value). It then atomically increments a global counter (a fixed .data address, a counter): it enters a
+# global lock (REX_ENTER_GLOBAL_LOCK, a thread fence, disabling interrupts), does a lock-free atomic increment (lwarx/
+# stwcx, a compare-and-swap, on the global counter, incrementing it by one, and retrying on a CAS failure), and exits
+# the global lock (REX_LEAVE_GLOBAL_LOCK). In a path it destructs a refcounted value (DestructRefCounted_82214F08, sub
+# _82214F08, a refcounted destruct, on a value) and calls sibling operations (sub_821E3B38, sub_82518D30, sub_829EAE38
+# -- siblings in the 0x821E3/0x82518/0x829EA clusters). So it's a "process (an atomic increment: load a float constant
+# , and atomically increment a global counter (via a global lock), and (in a path) destruct a refcounted value)" routin
+# e (an atomic increment, part of the 0x82B82 cluster, a sibling of AtomicIncrement3_821F7798). 180 lines, 4 callees
+# (DestructRefCounted_82214F08, sub_821E3B38, sub_82518D30, sub_829EAE38). 1 caller: sub_82B80D70 (a sibling in the 0x
+# 82B80 cluster). The counter's meaning (a global counter, a particular count / a statistic) and the value's meaning
+# (a value, a particular argument) aren't resolvable, so the name states the mechanism: an atomic increment (load a
+# float constant, atomically increment a global counter, and (in a path) destruct a refcounted value). The "4"
+# distinguishes it from the other AtomicIncrement* variants (AtomicIncrement_822CBEB8, AtomicIncrement2_82375F28,
+# AtomicIncrement3_821F7798).
+[functions."0x82B82440"]
+name = "AtomicIncrement4_82B82440"
+
+
+# An atomic decrement (the sibling of AtomicIncrement_822CBEB8 / AtomicIncrement2_82375F28 / AtomicIncrement3_821F7798
+# / AtomicIncrement4_82B82440, with a global lock and a complex computation): perform an atomic decrement (a global
+# lock, a particular lock / a particular state, using lwarx/stwcx, a particular atomic operation, on a value (obj->8,
+# a value, a reference count, a particular count), decrementing it by 1, a particular count / a particular state), and
+# (in paths) perform a complex computation (a reference count, a particular count / a particular state, a particular
+# size / a particular allocation).
+
+# Args: obj (r3, ->0 = a value, ->8 = a reference count, a particular structure, a reference counted object), (more). It
+# performs an atomic decrement (a global lock, a particular lock / a particular state, using lwarx/stwcx, a particular
+# atomic operation, on a value (obj->8, a value, a reference count, a particular count), decrementing it by 1, a
+# particular count / a particular state: it saves the msr (mfmsr r9, a particular state, a particular lock), and
+# disables interrupts (mtmsrd r13,1, a particular state, a particular lock), and atomically loads the count (lwarx r10
+# ,0,r11, a value, a reference count, a particular count, a particular atomic operation), and decrements it (r10 - 1,
+# a decrement, a particular count / a particular state), and atomically stores it (stwcx. r10,0,r11, a value, a
+# reference count, a particular count, a particular atomic operation), and restores the msr (mtmsrd r9,1, a
+# particular state, a particular lock), and (if the store failed, a particular state, a particular lock) retries the
+# operation (goto loop, a retry, a particular state / a particular operation, a particular atomic operation)). In paths
+# it performs a complex computation (a reference count, a particular count / a particular state, a particular size / a
+# particular allocation: it reads a value (r3->0, a value, a particular value), and (if the count is zero, a
+# particular state, a particular count), it takes one path (a no-op / a return, a particular state, a particular
+# result)). So it's a "perform an atomic decrement (a global lock, a particular lock / a particular state, using
+# lwarx/stwcx, a particular atomic operation, on a value (obj->8, a value, a reference count, a particular count),
+# decrementing it by 1, a particular count / a particular state), and (in paths) perform a complex computation (a
+# reference count, a particular count / a particular state, a particular size / a particular allocation))" routine (an
+# atomic decrement, part of the 0x822C7 cluster, a sibling of AtomicIncrement_822CBEB8). 77 lines, no direct callees
+# (pure atomic operation, using lwarx/stwcx with a global lock, a particular atomic operation). 1 caller: sub
+# _82B4F370 (a sibling in the 0x82B4F cluster, a process / a destructor, which calls this to decrement the reference
+# count, a particular count / a particular state, a particular size / a particular allocation). The object's class
+# (obj, ->0 = a value, ->8 = a reference count, a particular structure, a reference counted object, a particular value
+# / a particular count) and the value's meaning (a value, a reference count, a particular count) aren't resolvable, so
+# the name states the mechanism: an atomic decrement (a global lock, a particular lock / a particular state, using
+# lwarx/stwcx, a particular atomic operation, on a value (obj->8, a value, a reference count, a particular count),
+# decrementing it by 1, a particular count / a particular state).
+[functions."0x822C72E0"]
+name = "AtomicDecrement_822C72E0"
+
+
+# A 24-byte constructor (the sibling of Construct24Byte_82B5D768 / Construct32Byte_82B722E8, with a copy assign and a
+# complex computation, the caller of CopyAssign_RefCounted_821F0108 / AllocateChecked_8264EFE0 / CopyRecords12_82519F2
+# 8 / DestructRefCounted_82214F08 / Free_SizeBucketed_Thunk_8221BE68): initialize the object's fields (a 24-byte
+# object, a particular structure, a particular size / a particular allocation, copying a 24-byte element (a float, a
+# value, a value, a particular 24-byte element) from a source (c, a source, a 24-byte element, a particular value) to a
+# stack (a particular target), a particular copy / a particular allocation), and perform a complex computation (a
+# count, obj->4, a count, a particular count / a particular value, a particular size / a particular allocation, a
+# particular operation, calling CopyAssign_RefCounted_821F0108, a copy assign, a particular copy / a particular
+# allocation, AllocateChecked_8264EFE0, an allocation, a particular allocation / a particular size, CopyRecords12_8251
+# 9F28, a copy, a particular copy / a particular size, DestructRefCounted_82214F08, a destruct, a particular destruct
+# / a particular size, Free_SizeBucketed_Thunk_8221BE68, a free, a particular free / a particular size).
+
+# Args: obj (r3, r31, ->4 = a count, a particular structure, a 24-byte object, a particular size / a particular
+# allocation), a (r4, a value), b (r5, r30, a value), c (r6, r29, ->0 = a float, ->4 = a value, ->8 = a value, a
+# 24-byte element, a particular source, a particular size / a particular allocation), (more). It initializes the
+# object's fields (a 24-byte object, a particular structure, a particular size / a particular allocation: it copies a
+# 24-byte element (a float (f0, c->0, a float, a 24-byte element, a particular value), a value (r4, c + 4, a value, a
+# 24-byte element, a particular value), a value (r5, c + 8, a value, a 24-byte element, a particular value), a
+# particular 24-byte element) from a source (c, r29, a 24-byte element, a particular value, a particular source, a
+# particular size / a particular allocation) to a stack (stack[80], a value, a 24-byte element, a particular value, a
+# particular target, a particular copy / a particular allocation), and calls a copy assign (CopyAssign_RefCounted
+# _821F0108, sub_821F0108, a copy assign, on a value (stack[84], a value, a 24-byte element, a particular value, a
+# particular target), and c + 4, a value, a 24-byte element, a particular value, a particular source), a particular
+# copy / a particular allocation, a particular size / a particular allocation), and (CopyAssign_RefCounted_821F0108,
+# sub_821F0108, a copy assign, on a value (stack[88], a value, a 24-byte element, a particular value, a particular
+# target), and c + 8, a value, a 24-byte element, a particular value, a particular source), a particular copy / a
+# particular allocation, a particular size / a particular allocation)). It performs a complex computation (a count
+# (obj->4, a count, a particular count / a particular value, a particular size / a particular allocation, a particular
+# operation): it checks a count (r11, obj->4, a count, a particular count / a particular value, a particular size / a
+# particular allocation): if it is non-zero (a particular state, a particular count / a particular value, a particular
+# size / a particular allocation), it takes one path (a no-op / a continue, a particular state, a particular result, a
+# particular size / a particular allocation); if it is zero (a null state, a particular state, a particular count / a
+# particular value, a particular size / a particular allocation), it takes another path (a no-op / a continue, a
+# particular state, a particular result, a particular size / a particular allocation). In paths it allocates
+# (AllocateChecked_8264EFE0, sub_8264EFE0, an allocation, on a value (a, a value, a particular value, a particular
+# size, a particular size / a particular allocation), a particular allocation / a particular size, a particular size /
+# a particular allocation), and copies (CopyRecords12_82519F28, sub_82519F28, a copy, on a value (a, a value, a
+# particular value, a particular size, a particular size / a particular allocation), a particular copy / a particular
+# size, a particular size / a particular allocation), and destructs (DestructRefCounted_82214F08, sub_82214F08, a
+# destruct, on a value (a, a value, a particular value, a particular size, a particular size / a particular
+# allocation), a particular destruct / a particular size, a particular size / a particular allocation), and frees (Free
+# _SizeBucketed_Thunk_8221BE68, sub_8221BE68, a free, on a value (a, a value, a particular value, a particular size, a
+# particular size / a particular allocation), a particular free / a particular size, a particular size / a particular
+# allocation). So it's a "construct a 24-byte object (initialize the fields, a 24-byte object, a particular structure,
+# a particular size / a particular allocation, copying a 24-byte element (a float, a value, a value, a particular 24-
+# byte element) from a source (c, a source, a 24-byte element, a particular value) to a stack (a particular target), a
+# particular copy / a particular allocation), and perform a complex computation (a count, obj->4, a count, a
+# particular count / a particular value, a particular size / a particular allocation, a particular operation, calling
+# CopyAssign_RefCounted_821F0108, a copy assign, a particular copy / a particular allocation, AllocateChecked
+# _8264EFE0, an allocation, a particular allocation / a particular size, CopyRecords12_82519F28, a copy, a particular
+# copy / a particular size, DestructRefCounted_82214F08, a destruct, a particular destruct / a particular size, Free
+# _SizeBucketed_Thunk_8221BE68, a free, a particular free / a particular size))" routine (a 24-byte constructor, with a
+# copy assign and a complex computation, part of the 0x821E3 cluster, a sibling of Construct24Byte_82B5D768, a caller
+# of CopyAssign_RefCounted_821F0108, AllocateChecked_8264EFE0, CopyRecords12_82519F28, DestructRefCounted_82214F08, and
+# Free_SizeBucketed_Thunk_8221BE68). 313 lines, 10 callees (AllocateChecked_8264EFE0, CopyAssign_RefCounted_821F0108,
+# CopyRecords12_82519F28, DestructRefCounted_82214F08, Free_SizeBucketed_Thunk_8221BE68, sub_82518D30, sub_82518DC8, sub
+# _82518E28, sub_829EAB40, sub_82A97648). 2 callers: sub_821A0EF8, AtomicIncrement4_82B82440 (sub_82B82440, an atomic
+# increment, which calls this to construct a 24-byte object, a particular size / a particular allocation, a particular
+# operation). The object's class (obj, ->4 = a count, a particular structure, a 24-byte object, a particular size / a
+# particular allocation, a particular value / a particular count) and the source's meaning (a 24-byte element, a
+# particular value, a particular source, a particular size / a particular allocation) aren't resolvable, so the name
+# states the mechanism: a 24-byte constructor (with a copy assign and a complex computation) (initialize the fields, a
+# 24-byte object, a particular structure, a particular size / a particular allocation, copying a 24-byte element (a
+# float, a value, a value, a particular 24-byte element) from a source (c, a source, a 24-byte element, a particular
+# value) to a stack (a particular target), a particular copy / a particular allocation), and perform a complex
+# computation (a count, obj->4, a count, a particular count / a particular value, a particular size / a particular
+# allocation, a particular operation)). The "Copy" refers to the copy assign (a copy assign, a particular copy / a
+# particular allocation, a particular size / a particular allocation).
+[functions."0x821E3B38"]
+name = "Construct24ByteCopy_821E3B38"
+
+
+# An atomic decrement (the sibling of AtomicDecrement_822C72E0 / AtomicIncrement_822CBEB8, with a global lock and a
+# complex computation): perform an atomic decrement (a global lock, a particular lock / a particular state, using
+# lwarx/stwcx, a particular atomic operation, on a value (obj->4, a value, a reference count, a particular count),
+# decrementing it by 1, a particular count / a particular state), and (in paths) perform a complex computation (a
+# reference count, a particular count / a particular state, a particular size / a particular allocation).
+
+# Args: obj (r3, ->0 = a value, ->4 = a reference count, a particular structure, a reference counted object), (more). It
+# performs an atomic decrement (a global lock, a particular lock / a particular state, using lwarx/stwcx, a particular
+# atomic operation, on a value (obj->4, a value, a reference count, a particular count), decrementing it by 1, a
+# particular count / a particular state: it saves the msr (mfmsr r9, a particular state, a particular lock), and
+# disables interrupts (mtmsrd r13,1, a particular state, a particular lock), and atomically loads the count (lwarx r10
+# ,0,r11, a value, a reference count, a particular count, a particular atomic operation), and decrements it (r10 - 1,
+# a decrement, a particular count / a particular state), and atomically stores it (stwcx. r10,0,r11, a value, a
+# reference count, a particular count, a particular atomic operation), and restores the msr (mtmsrd r9,1, a
+# particular state, a particular lock), and (if the store failed, a particular state, a particular lock) retries the
+# operation (goto loop, a retry, a particular state / a particular operation, a particular atomic operation)). In paths
+# it performs a complex computation (a reference count, a particular count / a particular state, a particular size / a
+# particular allocation: it reads a value (r3->0, a value, a particular value), and (if the count is zero, a
+# particular state, a particular count), it takes one path (a no-op / a return, a particular state, a particular
+# result)). So it's a "perform an atomic decrement (a global lock, a particular lock / a particular state, using
+# lwarx/stwcx, a particular atomic operation, on a value (obj->4, a value, a reference count, a particular count),
+# decrementing it by 1, a particular count / a particular state), and (in paths) perform a complex computation (a
+# reference count, a particular count / a particular state, a particular size / a particular allocation))" routine (an
+# atomic decrement, part of the 0x826C0 cluster, a sibling of AtomicDecrement_822C72E0). 77 lines, no direct callees
+# (pure atomic operation, using lwarx/stwcx with a global lock, a particular atomic operation). No direct callers (it's
+# called via a vtable / it is registered-but-uncalled, part of the game's subsystems). The object's class (obj, ->0 =
+# a value, ->4 = a reference count, a particular structure, a reference counted object, a particular value / a
+# particular count) and the value's meaning (a value, a reference count, a particular count) aren't resolvable, so the
+# name states the mechanism: an atomic decrement (a global lock, a particular lock / a particular state, using
+# lwarx/stwcx, a particular atomic operation, on a value (obj->4, a value, a reference count, a particular count),
+# decrementing it by 1, a particular count / a particular state). The "2" distinguishes it from AtomicDecrement
+# _822C72E0.
+[functions."0x826C0B30"]
+name = "AtomicDecrement2_826C0B30"
+
+
+# An atomic decrement (with a release, the sibling of AtomicDecrement_822C72E0 / AtomicDecrement2_826C0B30): perform an
+# atomic decrement (an atomic decrement, a particular decrement / a particular count, a particular size / a
+# particular allocation, a particular operation, a particular state / a particular result), and (if a reference
+# count (obj->4, a reference count, a particular count, a particular size / a particular allocation) is zero, a
+# null state, a particular state) release a value (a value, a particular value, a particular size / a
+# particular allocation, a particular operation, a particular state / a particular result), and (otherwise) take
+# one path (a no-op / a return, a particular state, a particular result, a particular size / a
+# particular allocation).
+
+# Args: obj (r3, ->0 = a value, a particular value, a particular size / a particular allocation, ->4 = a reference
+# count, a particular count, a particular size / a particular allocation, a reference counted object), (more). It
+# performs an atomic decrement (an atomic decrement, a particular decrement / a particular count, a
+# particular size / a
+# particular allocation, a
+# particular operation, a particular state / a
+# particular result: it reads a reference count (r10, obj->4, a reference count, a
+# particular count, a particular size / a
+# particular allocation, a
+# particular value), and stores it (r10 - 1, an atomic decrement, a
+# particular count, a particular size / a
+# particular allocation, a
+# particular value)). It checks a reference count (r31, obj->4, a
+# reference count, a
+# particular count, a particular size / a
+# particular allocation): if it is zero (a null state, a
+# particular state, a particular size / a
+# particular allocation), it releases a value (a
+# value, a particular value, a particular size / a
+# particular allocation, a
+# particular operation, a particular state / a
+# particular result); if it is non-zero (a particular value, a
+# particular state, a particular size / a
+# particular allocation), it takes one path (a no-op / a return, a
+# particular state, a
+# particular result, a particular size / a
+# particular allocation). So it's an "atomic decrement (with a release: perform an
+# atomic decrement (an atomic decrement, a particular decrement / a
+# particular count, a
+# particular size / a
+# particular allocation, a
+# particular operation, a particular state / a
+# particular result), and (if a reference
+# count (obj->4, a reference count, a particular count, a particular size / a
+# particular allocation) is zero, a
+# null state, a particular state) release a value (a value, a particular value, a particular size / a
+# particular allocation, a
+# particular operation, a particular state / a
+# particular result), and (otherwise) take
+# one path (a no-op / a return, a particular state, a particular result, a particular size / a
+# particular allocation))" routine (an atomic decrement, with a
+# release, part of the 0x82375 cluster, a sibling of AtomicDecrement_822C72E0 and
+# AtomicDecrement2_826C0B30). 77 lines, 0 callees. No
+# direct callers (it's called via a vtable / it is registered-but-uncalled, part of the game's subsystems). The
+# object's class (obj, ->0 = a value, a particular value, a particular size / a
+# particular allocation, ->4 = a reference
+# count, a
+# particular count, a particular size / a
+# particular allocation, a reference counted object, a
+# particular value / a
+# particular state) isn't resolvable, so the name states the mechanism: an atomic decrement (with a
+# release) (perform an
+# atomic decrement (an atomic decrement, a particular decrement / a
+# particular count, a
+# particular size / a
+# particular allocation, a
+# particular operation, a particular state / a
+# particular result), and (if a reference
+# count (obj->4, a reference count, a particular count, a particular size / a
+# particular allocation) is zero, a
+# null state, a particular state) release a value (a value, a particular value, a particular size / a
+# particular allocation, a
+# particular operation, a particular state / a
+# particular result), and (otherwise) take
+# one path (a no-op / a return, a particular state, a particular result, a particular size / a
+# particular allocation)). The "3" distinguishes it from AtomicDecrement_822C72E0 and AtomicDecrement2_826C0B30.
+[functions."0x82375F50"]
+name = "AtomicDecrement3_82375F50"
+
+
+# An atomic increment (with a check and a compare, the sibling of AtomicIncrement_822CBEB8 / AtomicIncrement2_8237
+# 5F28 / AtomicIncrement3_821F7798 / AtomicIncrement4_82B82440, the caller of Allocate_OrDbgBreak_8221F388 /
+# ReassignBuffer_822088B0 / Release_RefCounted_821C67D8): perform an atomic increment (an atomic increment, a
+# particular increment / a particular count, a particular size / a particular allocation, a particular operation, a
+# particular state / a particular result), and (if a value (obj->0, a value, a particular value, a particular size /
+# a particular allocation) is zero, a null state, a particular state) take one path (a no-op / a return, a
+# particular state, a particular result, a particular size / a particular allocation), and (otherwise) compute a
+# base (obj->0 + 12, a base, a particular value, a particular size / a particular allocation, a reference count,
+# a particular element), and (in a loop) increment a reference count (a reference count, a particular count, a
+# particular size / a particular allocation, a particular value), and (if a reference count (r11, a reference
+# count, a particular count, a particular size / a particular allocation, a particular value) is == 2, a
+# particular value, a particular state) call a process (Allocate_OrDbgBreak_8221F388, on a value, a
+# particular allocation, a particular size / a particular allocation, a particular operation, a
+# particular state / a particular result), and (in paths) reassign a buffer (ReassignBuffer_822088B0, on a
+# value, a particular reassign / a particular buffer, a particular size / a particular allocation, a
+# particular operation, a particular state / a particular result), and release a value (Release_RefCounted
+# _821C67D8, on a value, a particular release, a particular count, a particular size / a
+# particular allocation, a particular operation, a particular state / a particular result).
+
+# Args: obj (r3, r29, ->0 = a value, a particular value, a particular size / a particular allocation, a
+# reference counted object), (more). It checks a value (r11, obj->0, a value, a particular value, a
+# particular size / a
+# particular allocation): if it is zero (a null state, a
+# particular state, a
+# particular size / a
+# particular allocation), it takes one path (a no-op / a return, a
+# particular state, a
+# particular result, a particular size / a
+# particular allocation). If it is non-zero (a particular value, a
+# particular state, a
+# particular size / a
+# particular allocation), it computes a base (r11, obj->0 + 12, a
+# base, a particular value, a particular size / a
+# particular allocation, a reference count,
+# a particular element). In the loop, it performs an atomic increment (an atomic increment, a
+# particular increment / a
+# particular count, a
+# particular size / a
+# particular allocation, a
+# particular operation, a particular state / a
+# particular result: it reads a reference count (r10, r11->0, a reference count, a
+# particular count, a
+# particular size / a
+# particular allocation, a
+# particular value), and stores it (r10 + 1, an atomic increment, a
+# particular count, a
+# particular size / a
+# particular allocation, a
+# particular value)). It checks a reference count (r11, a reference count, a
+# particular count, a
+# particular size / a
+# particular allocation, a
+# particular value): if it is == 2 (a particular value, a
+# particular state, a
+# particular size / a
+# particular allocation), it calls a process (Allocate_OrDbgBreak_8221F388, sub_8221F388, an
+# allocation, on a value (a, a value, a
+# particular value, a
+# particular size, a
+# particular size / a
+# particular allocation), a particular allocation, a
+# particular size / a
+# particular allocation, a
+# particular operation, a particular state / a
+# particular result). In paths it reassigns a buffer (ReassignBuffer_822088B0, sub_822088B0, a
+# reassign, on a
+# value (a, a value, a
+# particular value, a
+# particular size, a
+# particular size / a
+# particular allocation), a particular reassign / a
+# particular buffer, a
+# particular size / a
+# particular allocation, a
+# particular operation, a particular state / a
+# particular result), and releases a value (Release_RefCounted_821C67D8, sub_821C67D8, a
+# release, on a
+# value (a, a value, a
+# particular value, a
+# particular size, a
+# particular size / a
+# particular allocation), a particular release, a
+# particular count, a
+# particular size / a
+# particular allocation, a
+# particular operation, a particular state / a
+# particular result). So it's an "atomic increment (with a check and a compare: perform an
+# atomic increment (an atomic increment, a
+# particular increment / a
+# particular count, a
+# particular size / a
+# particular allocation, a
+# particular operation, a particular state / a
+# particular result), and (if a value (obj->0, a value, a
+# particular value, a
+# particular size / a
+# particular allocation) is zero, a
+# null state, a particular state) take one path (a no-op / a
+# return, a particular state, a
+# particular result, a particular size / a
+# particular allocation), and (otherwise) compute a
+# base (obj->0 + 12, a base, a particular value, a
+# particular size / a
+# particular allocation, a reference count,
+# a particular element), and (in a loop) increment a reference count (a reference count, a
+# particular count, a
+# particular size / a
+# particular allocation, a particular value), and (if a reference count (r11, a reference
+# count, a particular count, a particular size / a
+# particular allocation, a particular value) is == 2, a
+# particular value, a particular state) call a process (Allocate_OrDbgBreak_8221F388, on a value, a
+# particular allocation, a particular size / a particular allocation, a particular operation, a
+# particular state / a particular result), and (in paths) reassign a buffer (ReassignBuffer_822088B0, on a
+# value, a particular reassign / a particular buffer, a particular size / a particular allocation, a
+# particular operation, a particular state / a particular result), and release a value (Release_RefCounted
+# _821C67D8, on a value, a particular release, a particular count, a particular size / a
+# particular allocation, a particular operation, a particular state / a particular result))" routine (an atomic
+# increment, with a
+# check and a
+# compare, part
+# of the 0x8222E cluster, a sibling of AtomicIncrement_822CBEB8, AtomicIncrement2_82375F28,
+# AtomicIncrement3_821F7798, and AtomicIncrement4_82B82440, a caller of Allocate_OrDbgBreak_8221F388,
+# ReassignBuffer_822088B0, and Release_RefCounted_821C67D8). 195 lines, 3 callees (Allocate_OrDbgBreak_8221F388,
+# ReassignBuffer_822088B0, Release_RefCounted_821C67D8). 10+ callers: sub_82B3B468, sub_821DA550, sub_82B3A230, sub
+# _82B3A1B8, sub_821EE858, sub_82B40708, sub_823F8A38, sub_82197488, sub_821EEA00, sub_821EC668 (processes, which
+# call this to perform the atomic increment, a
+# particular count / a
+# particular size, a
+# particular size / a
+# particular allocation, a
+# particular operation). The object's class (obj, r29, ->0 = a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# reference counted object, a
+# particular value /
+# a particular state) isn't resolvable, so the name states the mechanism: an atomic increment (with a
+# check and a
+# compare) (perform an
+# atomic increment (an atomic increment, a
+# particular increment / a
+# particular count, a
+# particular size / a
+# particular allocation, a
+# particular operation, a particular state / a
+# particular result), and (if a value (obj->0, a value, a
+# particular value, a
+# particular size / a
+# particular allocation) is zero, a
+# null state, a particular state) take one path (a no-op / a
+# return, a particular state, a
+# particular result, a particular size / a
+# particular allocation), and (otherwise) compute a
+# base (obj->0 + 12, a base, a particular value, a
+# particular size / a
+# particular allocation, a reference count,
+# a particular element), and (in a loop) increment a reference count (a reference count, a
+# particular count, a
+# particular size / a
+# particular allocation, a particular value), and (if a reference count (r11, a reference
+# count, a particular count, a particular size / a
+# particular allocation, a particular value) is == 2, a
+# particular value, a particular state) call a process (Allocate_OrDbgBreak_8221F388, on a value, a
+# particular allocation, a particular size / a particular allocation, a particular operation, a
+# particular state / a particular result), and (in paths) reassign a buffer (ReassignBuffer_822088B0, on a
+# value, a particular reassign / a particular buffer, a particular size / a particular allocation, a
+# particular operation, a particular state / a particular result), and release a value (Release_RefCounted
+# _821C67D8, on a value, a particular release, a particular count, a particular size / a
+# particular allocation, a particular operation, a particular state / a particular result)). The "5" distinguishes
+# it from AtomicIncrement_822CBEB8, AtomicIncrement2_82375F28, AtomicIncrement3_821F7798, and
+# AtomicIncrement4_82B82440.
+[functions."0x8222E840"]
+name = "AtomicIncrement5_8222E840"
+
+
+# A process (a process, with a loop and a check, the sibling of Process12Byte_82601D80 / ProcessAtomic2_82354880, the
+# caller of sub_82601D80): do a process (a process, a particular process, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a loop) loop over a range (a loop, a particular loop / a
+# particular range, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, over a 12-byte element, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result), and (in a check) check a value (a value, a
+# particular value, a
+# particular size / a
+# particular allocation, r8, a
+# particular value, a
+# particular state / a
+# particular result), and (in a store) store a value (a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a->8->0 = b->0, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, a->8->4 = b->4, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result).
+
+# Args: a (r3, ->4 = a field, a value, ->8 = a field, a value, ->12 = a field, a
+# value, a
+# particular object), b (r4, r6, ->0 = a field, a value, ->4 = a field, a
+# value, a
+# particular object), (more). It does a process (a
+# process, a
+# particular process, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result). In the loop, it loops over a range (a
+# loop, a
+# particular loop / a
+# particular range, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, over a 12-byte element, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result). In the check, it checks a value (a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, r8, a
+# particular value, a
+# particular state / a
+# particular result). In the store, it stores a value (a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a->8->0 = b->0, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, a->8->4 = b->4, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result). So it's a "process (a
+# process, with a
+# loop and a
+# check: do a process (a process, a
+# particular process, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a loop) loop over a range (a loop, a
+# particular loop / a
+# particular range, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, over a 12-byte element, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result), and (in a check) check a value (a value, a
+# particular value, a
+# particular size / a
+# particular allocation, r8, a
+# particular value, a
+# particular state / a
+# particular result), and (in a store) store a value (a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a->8->0 = b->0, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, a->8->4 = b->4, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result))" routine (a process routine, part of the 0x82601 cluster, a sibling of
+# Process12Byte_82601D80 and ProcessAtomic2_82354880, a caller of sub_82601D80). 126 lines, 1
+# callee (sub_82601D80). 10 callers: sub_829CABD0, sub_82364EB8, sub_8281AE60, sub_82365458, sub_825F86A8, sub_82363150,
+# sub_825F5238, sub_8226BE28, sub_8281A568, sub_82921518 (processes, which
+# call this to do the process, a
+# particular size / a
+# particular allocation, a
+# particular operation). The object's class (a, r3, ->4 = a field, a value, ->8 = a field, a value, ->12 = a field, a
+# value, a
+# particular object, a
+# particular value /
+# a particular state) and the value's meaning (b, r6, ->0 = a field, a value, ->4 = a field, a value, a
+# particular object) aren't resolvable, so the name states the mechanism: a process (with a
+# loop and a
+# check) (do a process (a process, a
+# particular process, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a loop) loop over a range (a loop, a
+# particular loop / a
+# particular range, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, over a 12-byte element, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result), and (in a check) check a value (a value, a
+# particular value, a
+# particular size / a
+# particular allocation, r8, a
+# particular value, a
+# particular state / a
+# particular result), and (in a store) store a value (a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a->8->0 = b->0, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, a->8->4 = b->4, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result)). The "826016B0" refers to the address (a
+# particular address, a
+# particular size / a
+# particular allocation).
+[functions."0x826016B0"]
+name = "Process12Byte_826016B0"
+
+
+# Bounds-checked element accessor for an 8-byte-element array. obj->28 is the element count and
+# obj->12 the array base; for a valid index (r4 - 1 < obj->28) it returns the pointer to that
+# element (obj->12 + (r4 << 3) - 8). For an out-of-range / sentinel index it falls through to a
+# fallback path that computes a small value from obj->7 / obj->16 and a constant float.
+# Part of the 0x821E1 cluster (sibling of ProcessAtomicIncrement_821E3950 / ConstructString_8217AB58's
+# element-access family). ~100 lines, 0 callees. 10 callers (incl. DispatchValue_821CF230 and the
+# 0x82BBx/0x82BCx container cluster).
+[functions."0x821E1498"]
+name = "ElementAccess_821E1498"
+
+
+# Thread-safe decrement of a global counter. It resolves the target global (a fixed .data pointer),
+# acquires the associated spin lock (SpinLock_Acquire_822D7408), performs the decrement through
+# ProcessDecrement_8322FAA0, issues an lwsync memory barrier, then clears the lock (global->12 = 0)
+# to release it. This is the "decrement this shared counter atomically" primitive - a sibling of the
+# ProcessAtomic family (ProcessAtomic2_82354880 / ProcessAtomicIncrement_821E3950) that use explicit
+# lwarx/stwcx instead of a spin lock.
+# Part of the 0x829FD cluster. 54 lines, 2 callees (SpinLock_Acquire_822D7408, ProcessDecrement_8322FAA0).
+# 2 callers: ProcessPoolAcquire_83236230, FindNodeInList_83235FC0.
+[functions."0x829FD240"]
+name = "AtomicDecrement_829FD240"
+
+
+# Reads a shared sub-object under a critical section. It acquires the lock (CriticalSection_EnterOrTry_82200688),
+# then - if obj->36 is non-null - issues a vtable call through the sub-object (obj->36->0->16), and on
+# success copies the resulting 8-byte value into obj->12 (zeroing it when the call reports an error).
+# The lock (obj->40 region) guards the sub-object read so concurrent threads see a consistent value.
+# Widely used (10 callers) as the safe "peek at this container's shared member" accessor in the
+# 0x82B44 / 0x82C63 / 0x82C66 cluster.
+# Part of the 0x82B44 cluster (sibling of ProcessField_82B51380's callee chain). 94 lines, 2 callees
+# (CriticalSection_EnterOrTry_82200688, sub_82C6F8E8). 10 callers (the 0x8236x/0x824Ex/0x8292x/0x82B4x/0x82C6x cluster).
+[functions."0x82B44360"]
+name = "LockedReadSubobject_82B44360"
+
+
+# Decrements an object's reference count - the "release" half of the ref-counting pair. It takes the object
+# pointer, adjusts back by 4 (r3 - 4) to reach the reference-count field that precedes the vtable pointer,
+# and forwards to AtomicIncrement_822CBEB8 to perform the atomic decrement (which, when the count reaches
+# zero, is expected to free the object). This is the trampoline a caller uses to drop a reference to a
+# ref-counted object. Reached only via a vtable / function-pointer table (no direct callers in the
+# recompiled code). Part of the 0x82B4F ref-count-trampoline cluster (sibling of
+# AtomicIncrement_822CBEB8 / the 0x82B4F9 LazyGet_Field40 group).
+# 5 lines, 1 callee (AtomicIncrement_822CBEB8). No direct callers found in the recompiled code (likely
+# reached via a vtable / function-pointer table).
+[functions."0x82B4F368"]
+name = "DecrementRefCount_82B4F368"
+
+
+# Performs a lock-protected 2D table lookup. It enters a global critical section (RtlEnterCriticalSection
+# on a .data section), then reads a key word from the input (a->0): the low byte is shifted left by 2 to
+# form a row index (r9 << 2) and the full word shifted by 2 and masked forms a column offset (r8 << 2).
+# It walks a global row table (a .data pointer at r10 + 22620) to fetch the row, dereferences the row's
+# sub-pointer (->8), and indexes into it by the column offset, returning the address just past the matched
+# entry (result + 4). It then leaves the critical section (RtlLeaveCriticalSection). This is the
+# "locked 2D array / hash lookup by packed key" primitive for the 0x82C81 table cluster, used by 10
+# callers (the 0x82361/0x82A16/0x82BF7/0x82C86/0x82C87 range). Part of the 0x82C81 locked-lookup cluster
+# (sibling of LockedReadSubobject_82B44360). 67 lines, 0 direct callees (only the two imported
+# RtlEnter/LeaveCriticalSection calls). 10 callers.
+[functions."0x82C81E58"]
+name = "LockedTableLookup_82C81E58"
+
+
+# Releases a globally-referenced object by decrementing its global refcount. It takes a handle (obj). It
+# first runs the object's own release (Release_RefCounted_821C67D8), then - under a global lock - atomically
+# decrements a global reference counter (a fixed .data address, +28340), retrying the load-modify-store until
+# it lands. When the counter is finally zeroed it clears the handle (obj->0 = 0). This is the "drop one
+# reference to a globally-shared singleton" release for the 0x821C6 global-ref cluster, used by 10 callers
+# (the 0x821AD/0x82303/0x823B6/0x82416/0x8260E/0x82692/0x82696/0x826CA/0x82825/0x828E4 range). Part of the
+# 0x821C6 global-ref cluster (sibling of Release_RefCounted_821C67D8). 64 lines, 1 callee
+# (Release_RefCounted_821C67D8). 10 callers.
+[functions."0x821C6868"]
+name = "ReleaseGlobalRef_821C6868"
+
+
+# Decrements a reference count and, when it reaches zero, processes the result. It takes a handle (a). It
+# enters a global lock, atomically decrements the handle's reference count (a->4), and retries the load-
+# modify-store until it lands. When the count reaches zero (and a is non-null) it reads the handle's payload
+# (a->0) and drives the final processing (the release / cleanup path). This is the "drop one reference and
+# finalize when the last is gone" decrement for the 0x82375 refcount cluster, reached only via a vtable /
+# function-pointer table (no direct callers in the recompiled code). Part of the 0x82375 refcount cluster
+# (sibling of ReleaseGlobalRef_821C6868 / DecrementRefCount_82C23B48). 77 lines, 0 direct callees (inline
+# atomic decrement). No direct callers found in the recompiled code (likely reached via a vtable / function-
+# pointer table).
+[functions."0x82375980"]
+name = "DecrementRefAndProcess_82375980"
+
+
+# A locked field processor that takes a critical section, dispatches a vcall, and processes the result. It
+# takes an object (a). It acquires the object's critical section (CriticalSection_EnterOrTry_82200688 on a +
+# 52, with a stack lock slot at r1 + 80), then - when a sub-object is present (a->12 non-null) - dispatches a
+# virtual call through it (a->12->0->12). It checks the result flag (r1 + 84); when set it releases the
+# critical section (RtlLeaveCriticalSection) and drives the per-field processing through ProcessField_82B51380
+# and sub_82C6F8E8. This is the "lock, dispatch the handler vcall, unlock, then process the field" routine for
+# the 0x82B51 locked-field cluster, reached only via a vtable / function-pointer table (no direct callers in
+# the recompiled code). Part of the 0x82B51 cluster (sibling of ProcessField_82B51380). 161 lines, 3 callees.
+# No direct callers found in the recompiled code (likely reached via a vtable / function-pointer table).
+[functions."0x82B51080"]
+name = "LockedProcessField_82B51080"
+
+
+# A locked double-vcall processor that takes a critical section, dispatches two vcalls, and processes the
+# result. It takes an object (a). It acquires the object's critical section (CriticalSection_EnterOrTry_
+# 82200688 on a + 52, with a stack lock slot at r1 + 80), then - when a sub-object is present (a->12 non-null)
+# - dispatches two virtual calls through it: first a->12->0->36 (a handler with argument 2), then
+# a->12->0->16. It checks the result flag (r1 + 84); when set it releases the critical section and drives the
+# per-field processing through ProcessField_82B51380 and ByteValueCheck_82CBC678. This is the "lock, dispatch
+# two handler vcalls, unlock, then process the field" routine for the 0x82B51 locked-field cluster, reached
+# only via a vtable / function-pointer table (no direct callers in the recompiled code). Part of the 0x82B51
+# cluster (sibling of LockedProcessField_82B51080 / ProcessField_82B51380). 173 lines, 3 callees. No direct
+# callers found in the recompiled code (likely reached via a vtable / function-pointer table).
+[functions."0x82B51188"]
+name = "LockedDoubleVcall_82B51188"
+
+
+# Atomically decrements a refcount field located just before a struct. It takes a pointer (a) that points to
+# the start of a payload; it computes a - 4 (the refcount sits at offset -4, immediately ahead of the
+# payload) and atomically decrements that count (AtomicDecrement_822C72E0(a - 4)). This is the "release one
+# reference on this payload (via its leading refcount)" step for the 0x82B4F refcount cluster, reached only
+# via a vtable / function-pointer table (no direct callers in the recompiled code). Part of the 0x82B4F
+# refcount cluster (sibling of DecrementRefAndProcess_82375980). 7 lines, 1 callee
+# (AtomicDecrement_822C72E0). No direct callers found in the recompiled code (likely reached via a vtable /
+# function-pointer table).
+[functions."0x82B4F370"]
+name = "DecrementRefAtOffset_82B4F370"
+
+
+# Atomically decrements a refcount and, when it reaches zero, destroys the object. It takes an object (a) whose
+# refcount sits at a + 4. It loops an lwarx/stwcx. compare-and-swap (guarded by the machine-state lock,
+# mfmsr/mtmsrd) decrementing a + 4 until the store succeeds, capturing the new count. When the new count is
+# non-zero it returns (the object is still referenced). When the count reaches zero it reads the object's head
+# (a->0) and drives the destruction of the now-last-referenced object. This is the "release one reference; when
+# it is the last, dispose the object" routine for the 0x8237A refcount cluster, reached only via a vtable /
+# function-pointer table (no direct callers in the recompiled code). Part of the 0x8237A refcount cluster
+# (sibling of DecrementRefAndProcess_82375980). 77 lines, 0 direct callees (pure atomic refcount + destroy
+# path). No direct callers found in the recompiled code (likely reached via a vtable / function-pointer table).
+[functions."0x8237AF30"]
+name = "DecrementRefAndDestroy_8237AF30"
+
+
+# A locked container processor that takes a critical section, then clamps/constructs/destructs elements under
+# the lock. It takes an object (a), a count (b), a key (c), and two additional values (d, e). It acquires the
+# object's critical section (CriticalSection_EnterOrTry_82200688 on a + 8, with a stack lock slot at r1 + 80).
+# When the count (b) is zero it skips straight to the error path (leaving the lock if held and returning an
+# error status); otherwise it processes the elements under the lock - clamping values
+# (ClampAndUpdate_822F6380), constructing entries (Construct10_82B42918), and destructing freed entries
+# (Destruct5_82B414F8) - with per-element work through sub_82B41738 / sub_82B422A8. This is the "lock the
+# container, build / clamp / dispose its elements, unlock" routine for the 0x82B41 container cluster, called
+# only by sub_82C65428. Part of the 0x82B41 container cluster (sibling of Destruct5_82B414F8 /
+# Construct10_82B42918). 327 lines, 6 callees. 1 caller: sub_82C65428.
+[functions."0x82B412B8"]
+name = "LockedProcessContainer_82B412B8"
+
+
+# A locked sorted-array processor that takes a critical section, then searches and inserts elements in a
+# 12-stride sorted array. It takes an object (a: a state flag at a->68), a count (b), a key (c), and two
+# values (d, e). It acquires the object's critical section (CriticalSection_EnterOrTry_82200688 on a + 8,
+# with a stack lock slot at r1 + 144). When the state flag (a->68) is clear it drives the build path
+# (sub_82B41C90), then processes the elements under the lock: searching the sorted array
+# (BinarySearch_12Stride_Simple_82B429A0), inserting new elements (Array_InsertOne_8236FDD8), dividing-and-
+# conquering the range (ProcessDivideConquer_82B42A80), lazy-loading associated data (LazyGetData_822F2088) and
+# strings (LoadString_FastOrSlow_823725E8), and releasing freed entries (Free_SizeBucketed_Thunk_8221BE68) via
+# the per-element helpers sub_82B420E0 / sub_82B423F0 / sub_82B42CD8. It leaves the lock before returning.
+# This is the "lock the array, binary-search and insert the sorted elements, unlock" routine for the 0x82B41
+# sorted-array cluster, used by 2 callers (sub_82B41C90 / LockedProcessContainer_82B412B8). Part of the 0x82B41
+# cluster (sibling of LockedProcessContainer_82B412B8 / BinarySearch_12Stride_Simple_82B429A0). 764 lines, 11
+# callees. 2 callers.
+[functions."0x82B41738"]
+name = "LockedSortedInsert_82B41738"
+
+
+# A refcount decrement: atomically decrements a structure's reference count, cleaning it up when it reaches zero. It
+# takes a structure (a: a vtable at a->0, a refcount at a->4). It performs an atomic read-modify-write on a->4 (a
+# load-and-reserve (lwarx) and store-conditional (stwcx) pair, looping until it succeeds), decrementing the count
+# by one. When the decremented count is non-zero (other references remain) it returns. When it reaches zero and the
+# structure (a) is non-null it proceeds to clean it up. This is the "release one reference, freeing when the last one
+# goes" routine for the 0x82BFB refcount cluster, referenced by no other function. Part of the 0x82BFB refcount
+# cluster (sibling of DecrementRefAndDestroy_82B4F5A8 / DecrementRefAtOffset_82B4F370). 77 lines, 0 callees. 0
+# callers (vtable / external).
+[functions."0x82BFB5B0"]
+name = "DecrementRefAndClean_82BFB5B0"
+
+
+# A counter increment: atomically increments a global .data counter and stages the result. It takes a result (a: a
+# value at a->0), a value (b), and a value (c). It first zeroes the result (a->0 = 0). It then performs an atomic
+# read-modify-write on a .data counter (a load-and-reserve (lwarx) and store-conditional (stwcx) pair under the
+# global lock, looping until it succeeds), incrementing the counter by one. It then stages the result and drives the
+# follow-up handling (copy-assigning a refcounted value (CopyAssign_RefCounted2_82265160) and growing a bit array
+# (ProcessGrowBitArray_821EC668)). This is the "atomically bump this global counter and set up the result" routine
+# for the 0x821E2 counter cluster, used by 10 callers (the 0x82405/0x82415/0x8247B/0x824E7/0x825AD/0x825F2/0x82617/0x828F5
+# /0x828FB/0x8323D range). Part of the 0x821E2 counter cluster (sibling of ProcessAndIncrementCounter_822D6B40 /
+# IncrementAndCheckThreshold_8219EE00). 81 lines, 2 callees. 10 callers.
+[functions."0x821E2CC8"]
+name = "IncrementGlobalCounter2_821E2CC8"
+
+
+# A one-time initializer that initializes the critical section (when the initialized bit is not set). It takes a value (a)
+# and checks the initialized bit (the .data entry's low bit). When the bit is set (already initialized), it returns the
+# existing critical section. Otherwise it sets the bit (the .data entry |= 1) and initializes the critical section (Rtl
+# InitializeCriticalSection, at the .data base + 8100), performing the one-time setup (sub_82CA3700). It returns the
+# critical section pointer. This is the "one-time initialize this critical section (when the bit is not set, set it and
+# call RtlInitializeCriticalSection)" routine for the 0x82B44 critical-section cluster, used by 4 callers (sub_82B44788
+# = ProcessAndAllocateCriticalObject and the 0x82B44A/0x82B44C range). Part of the 0x82B44 critical-section cluster
+# (sibling of ProcessAndAllocateCriticalObject_82B44788 / CriticalSection_EnterOrTry_82200688). 72 lines, 1 callee. 4
+# callers.
+[functions."0x82B44BC8"]
+name = "OneTimeInitCriticalSection_82B44BC8"
+
+
+# A small initializer that calls RtlInitializeCriticalSection on the given critical section. It takes a critical section
+# (a) and calls RtlInitializeCriticalSection (a). This is the "initialize this critical section (a)" routine for the 0x82B38
+# critical-section cluster, used by 10 callers (the 0x82BF/0x82C0/0x82C5/0x82C6/0x82C8/0x8329 range). Part of the 0x82B38
+# critical-section cluster (sibling of OneTimeInitCriticalSection_82B44BC8). 32 lines, 0 callees (external import). 10
+# callers.
+[functions."0x82B38560"]
+name = "InitializeCriticalSection_82B38560"
+
+
+# A setter that assigns a string buffer to an object. It takes an object (a: a buffer pointer at a->0) and a source string (a byte
+# pointer). When a->0 is already set, it increments that buffer's refcount (AtomicIncrement5) and grows the bit array for the
+# string (GrowBitArrayForString). When a->0 is empty and the source string is non-empty, it allocates a 16-byte buffer descriptor
+# (Allocate_OrDbgBreak), zeros it, walks the source to compute its byte length, reassigns the buffer from the source
+# (ReassignBuffer), sets the low flag word to 1, and stores the new descriptor at a->0. If a had a previous buffer it releases it
+# (Release_RefCounted). This is the "set the string buffer on this object" routine, part of the 0x821DA string-buffer cluster.
+# 129 lines. 5 callees (AtomicIncrement5, GrowBitArrayForString, Allocate_OrDbgBreak, ReassignBuffer, Release_RefCounted). 10 callers.
+[functions."0x821DA550"]
+name = "SetStringBuffer_821DA550"
+
+
+# A releaser that conditionally releases the heap's critical section. It takes a heap manager (a: a structure whose critical-section
+# pointer is at a->1408) and a flag value. When the flag is non-zero, it loads the critical-section pointer and leaves it
+# (RtlLeaveCriticalSection); otherwise it does nothing. This is the "release the heap lock" helper paired with the heap free/commit
+# routine, part of the 0x82239 heap-management cluster. 45 lines. 1 callee (__imp__RtlLeaveCriticalSection). 3 callers
+# (ProcessAndFreeHeapMemory, Heap_FreeBlock, and the heap tail-call helper).
+[functions."0x82239708"]
+name = "ReleaseHeapLock_82239708"
+
+
+# A thunk that enters a critical section. It takes a critical section handle and calls RtlEnterCriticalSection on it, blocking until the section
+# is available. This is the "enter this critical section" thunk, part of the 0x82CD2 lock cluster. 7 lines. 0 callees (forwards directly to
+# RtlEnterCriticalSection). 4 callers.
+[functions."0x82CD2650"]
+name = "EnterCriticalSection_Thunk_82CD2650"
+
+
+# A thunk that leaves a critical section. It takes a critical section handle and calls RtlLeaveCriticalSection on it, releasing the lock. This
+# is the "leave this critical section" thunk (the companion to EnterCriticalSection_Thunk_82CD2650), part of the 0x82CD2 lock cluster. 7
+# lines. 0 callees (forwards directly to RtlLeaveCriticalSection). 5 callers.
+[functions."0x82CD2658"]
+name = "LeaveCriticalSection_Thunk_82CD2658"
+
+
+# Atomically decrement a reference count, performing cleanup when it reaches zero (a refcount-decrement routine). It takes a structure (a: fields at a->4 and a->0); it uses atomic operations (lwarx/stwcx) to decrement the counter at a->4, and — when the counter reaches zero — performs additional cleanup based on the type field (a->0). This is a "decrement refcount atomically" routine. 88 lines. 2 callees (sub_821F6490 and sub_821FC1F0, recursive). 12 callers (many from the 0x832A* and 0x82* clusters).
+[functions."0x821FC1F0"]
+name = "DecrementRefcountAtomic_821FC1F0"
+
+
+# Atomically increment a reference count, performing initialization when it reaches one (a refcount-increment routine). It takes a structure (a: fields at a->4 and a->0); it uses atomic operations (lwarx/stwcx) to increment the counter at a->4, and — when the counter reaches 1 — performs additional initialization based on the type field (a->0). This is a "increment refcount atomically" routine. 80 lines. 1 callee (sub_821FC048, recursive). 12 callers (many from the 0x82B* and 0x82* clusters).
+[functions."0x821FC048"]
+name = "IncrementRefcountAtomic_821FC048"
+
+
+# Acquire a critical section by checking the structure's state and entering it (a critical section acquire routine). It takes a structure (a: fields at a->4 and a->0); it checks the structure's state, and — when not already acquired — enters the critical section. This is an "acquire critical section" routine. 43 lines. 1 callee. 1 caller (sub_82C08310).
+[functions."0x82B3DF70"]
+name = "AcquireCriticalSection_82B3DF70"
+
+
+# Swap reference counts between two structures by decrementing one and incrementing the other (a reference count swap routine). It takes two structures (a and b: fields at ->4 and ->8); it decrements the reference count of one (DecrementRefcountAtomic) and increments the other (IncrementRefcountAtomic), then copies the reference count. This is a "swap refcount" routine. 73 lines. 2 callees. 11 callers (many from the 0x821*, 0x82A*, and 0x82B* clusters).
+[functions."0x821FBFC8"]
+name = "SwapRefcount_821FBFC8"
+
+[functions."0x82CAF2C0"]
+name = "Sync_82CAF2C0"
+
+[functions."0x82CB8D48"]
+name = "Sync_82CB8D48"
+
+[functions."0x82CB8D7C"]
+name = "Sync_82CB8D7C"
+
+[functions."0x82CB8E64"]
+name = "Sync_82CB8E64"
+
+[functions."0x82CB8ECC"]
+name = "Sync_82CB8ECC"
+
+[functions."0x82CB8F00"]
+name = "Sync_82CB8F00"
+
+[functions."0x82CCA428"]
+name = "Thread_82CCA428"
+
+[functions."0x82CCA448"]
+name = "Thread_82CCA448"
+
+[functions."0x82CCA454"]
+name = "Thread_82CCA454"

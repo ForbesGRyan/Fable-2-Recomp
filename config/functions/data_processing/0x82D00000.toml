@@ -1,0 +1,14 @@
+# data-processing region 0x82D00000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# Process a large data structure (seven hundred and one hundred and one hundred and eighty-fifth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess626, ProcessAndProcessAndProcess886, sub_82D02240, sub_82D03B48) based on the result. Part of the 0x82D00 process cluster. 437 lines. 4 callees. 1 caller (sub_82D00C30).
+[functions."0x82D005F8"]
+name = "ProcessAndProcessAndProcess985_82D005F8"
+
+
+# Process a large data structure (seven hundred and one hundred and one hundred and eighty-sixth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess626, sub_82CD2C38, sub_82CD2CF0, ProcessAndProcessAndProcess985, sub_82D01E18, sub_82D037E0) based on the result. Part of the 0x82D00 process cluster. 215 lines. 6 callees. 1 caller (sub_82D012D8).
+[functions."0x82D00C30"]
+name = "ProcessAndProcessAndProcess986_82D00C30"

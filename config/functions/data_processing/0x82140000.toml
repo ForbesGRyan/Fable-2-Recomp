@@ -1,0 +1,723 @@
+# data-processing region 0x82140000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# Finished Game going to Bowerstone Market: from issue #32
+[functions."0x8217EFE0"]
+
+
+# KeWaitForMultipleObjects_Guest variant with the APC-retry flag (r7) forced to 0:
+# 2-insn thunk "li r7,0; b KeWaitForMultipleObjects_Guest". With r7==0 the wrapper
+# does NOT retry on STATUS_USER_APC (257 is returned to the caller) and
+# passes Restart=0 to NtWaitForMultipleObjectsEx. 4 call sites: batch
+# WaitAll locking of N mutex handles (sub_832B8C28 with a 1ms timeout,
+# sub_832B8B80 with 2 handles + variable timeout) and single-object waits
+# (sub_822BA4F0 infinite, sub_8262DDD0 variable). Note: the wrapper's
+# timeout is r6 (fed to WaitEntrySetLpWakeTime), r5 is the mode
+# (0=WaitAll, nonzero=WaitAny).
+[functions."0x82179FB0"]
+name = "KeWaitForMultipleObjects_NoApcRetry"
+
+
+# A value/state processor -- a SIBLING of ProcessValue_FlagNonZero_821A9090
+# (same structure, different thresholds and helpers). Args: obj (r3), value
+# (r4), flag (r5). Every exit path evaluates the (r11 = 0 - value; r10 = -1 +
+# carry; return r10 & 1) idiom, so the RETURN is simply (value != 0). The real
+# work is value-dependent side effects: if value > 32767 call sub_82CD11D0();
+# if obj->24 < value call sub_8217A4F8(obj, value, obj->20); else (obj->24 >=
+# value), if flag != 0 and value < 8 and value < obj->20 call a helper and do
+# bookkeeping. 7 callers (sub_826C3AA8, sub_822F6CB0, sub_822F52A8, ...), all
+# consuming the low byte as a boolean gate. Named parallel to its 0x821A sibling:
+# process a value (with side effects) and return whether it was non-zero.
+[functions."0x8217A5E0"]
+name = "ProcessValue_FlagNonZero_8217A5E0"
+
+
+# A single-character tolower (ASCII): lowercase a u16 char if it is A-Z.
+
+# Arg: char (r3, a u16 code). If the char == 0xFFFF, return it unchanged. If it is in the
+# range A-Z (65-90), add 32 (A-Z -> a-z) and return. Otherwise return the char unchanged.
+# So it's a basic ASCII tolower for one character (no table lookup). A simpler sibling of
+# ToLower_SdkRuntime_82CA4288 (which uses the ctype table). 10 callers (sub_82F70138,
+# sub_82F701F8, sub_8238E1E8, sub_82F705E8, ...), mostly in the 0x82F7 region. Named
+# ToLower_Ascii to distinguish the table-less single-char version from the SDK table-
+# based one.
+[functions."0x8217A980"]
+name = "ToLower_Ascii_8217A980"
+
+
+# A range / region update: validate a value against the region's bounds (obj->16 to obj->4 + obj->20), and
+# update the region (if in range) or reset it (if out of range / empty).
+
+# Args: obj (r3, ->4 = a base, ->12 = a count, ->16 = a min, ->20 = a size), value (r4). If obj->12 is 0
+# (the region is empty), or value < obj->16, or value > obj->4 + obj->20 (out of bounds), it resets the
+# region (obj->4 = value, obj->12 = 0, obj->16 = 0, obj->20 = 0). Otherwise it updates the region:
+# obj->4 = value (the new base), obj->20 = (obj->4 + obj->20) - value (the adjusted size), and
+# obj->12 = (obj->12 - obj->4) + value (the adjusted count). So it's a "update the region to the new base
+# (if the value is in range), else reset it" routine (a region/range update with bounds). 53 lines, no callees
+# (pure data manipulation). 4 callers (sub_82B28398, sub_822C6DE8, sub_82A1CDD8, sub_82B7E050). The region's
+# meaning (a buffer/region with a base, size, min, and count) isn't resolvable, so the name states the
+# mechanism: update the region.
+[functions."0x82175DE0"]
+name = "UpdateRegion_82175DE0"
+
+
+# A process (a range operation, with bounds checks and a complex computation, a grow, the sibling of GrowAndCopy_82
+# 370550 / the caller of CompareU16_822F85C8): (if a value, c, is non-zero) perform a range check (b against obj->20,
+# a limit, a below/above-threshold check), and (if b is in range) return b, a value; (otherwise) perform a complex
+# computation (a grow, a range check, a 16-byte element, obj->24, a size / a count, and a comparison, CompareU16_822F85
+# C8, a 16-bit comparison).
+
+# Args: obj (r3, r11, ->4 = a base, ->20 = a limit, ->24 = a size / a count, a 16-byte element), a (r4, r25, a value)
+# , b (r5, a value), c (r6, r28, a value), (more). It checks a value (c, r28, a value, a particular argument): if it
+# is non-zero (a non-empty state), it performs a range check (b, r5, a value, against obj->20, a limit, a particular
+# bound, a below/above-threshold check). If b is in range (b <= obj->20, a below-threshold check), it returns b (r3 =
+# b, a value, a particular result). If b is above the limit (b > obj->20, an above-threshold check), it performs a
+# complex computation (a grow, a range check, a 16-byte element, obj->24, a size / a count, a particular element, and
+# a comparison, CompareU16_822F85C8, sub_822F85C8, a 16-bit comparison, on a value, a particular comparison). If c is
+# zero (an empty state), it takes one path (a no-op / a return, a particular state). So it's a "process (a range
+# operation: (if a value is non-zero) perform a range check (b against obj->20, a limit), and (if b is in range)
+# return b, a value; (otherwise) perform a complex computation (a grow, a range check, a 16-byte element, obj->24, a
+# size / a count, and a comparison))" routine (a range/grow process, part of the 0x8217A allocation cluster, a
+# sibling of GrowAndCopy_82370550, a caller of CompareU16_822F85C8). 169 lines, 1 callee (CompareU16_822F85C8, sub
+# _822F85C8, a 16-bit comparison). 2 callers: sub_822F2238, sub_8217AA20 (siblings in the 0x822F2/0x8217A clusters).
+# The object's class (obj, ->4 = a base, ->20 = a limit, ->24 = a size / a count, a 16-byte element, a particular
+# structure, a range / a grow object) and the values' meaning (a, b, c, particular values, a particular range) aren't
+# resolvable, so the name states the mechanism: a range/grow process ((if a value is non-zero) perform a range check
+# (b against obj->20, a limit), and (if b is in range) return b, a value; (otherwise) perform a complex computation
+# (a grow, a range check, a 16-byte element, obj->24, a size / a count, and a comparison)).
+[functions."0x8217A858"]
+name = "ProcessRangeGrow_8217A858"
+
+
+# A process (a range/element access, with a special value and a bounds check, the caller of sub_8217A9A8 / the sibling
+# of GetIndexedPointer_82BC5448): (if a value, obj->0, is -2, a special value, a particular state) take one path, and
+# (if it is 0, a null state) raise a trap (trap 22, a particular error, a null / a particular invalid state), and
+# (otherwise) perform a range/element access (a 2-byte element stride, index * 2, with a bounds check, obj->4 and a
+# base, a particular range, a 2-byte element, a particular element).
+
+# Args: obj (r3, ->0 = a value, ->4 = a base, a pointer), index (r4, an index, a particular element), (more). It checks
+# a value (obj->0, a value, a particular state): if it is -2 (a special value, a particular state, a below-threshold / a
+# particular flag), it takes one path (a particular state, a particular result). If it is 0 (a null state, a particular
+# invalid state), it raises a trap (ppc_trap 22, a particular error, a null / a particular invalid state, a particular
+# assertion). Otherwise (a valid state), it performs a range/element access (a 2-byte element stride, rlwinm r9, r4, 1,
+# 0, 30, a left shift by 1, a multiplication by 2, a 2-byte element stride, an index (r4, an index, a particular
+# element), with a bounds check (obj->4, a base, a particular bound, and a base (r7, obj->4 or obj + 4, a base, a
+# particular offset), a particular range, a 2-byte element, a particular element). So it's a "process (a range/element
+# access: (if a value is -2, a special value) take one path, and (if it is 0, a null state) raise a trap (trap 22, a
+# particular error), and (otherwise) perform a range/element access (a 2-byte element stride, index * 2, with a bounds
+# check, obj->4 and a base, a particular range))" routine (a range/element access process, part of the 0x8217A
+# allocation cluster, a caller of sub_8217A9A8, a sibling of GetIndexedPointer_82BC5448). 79 lines, no direct callees
+# (pure data manipulation). 1 caller: sub_8217A9A8 (a sibling in the 0x8217A cluster). The object's class (obj, ->0 = a
+# value, ->4 = a base, a pointer, a particular structure, a range / a table object) and the index's meaning (an index,
+# a particular element, a particular offset) aren't resolvable, so the name states the mechanism: a range/element
+# access process ((if a value is -2, a special value) take one path, and (if it is 0, a null state) raise a trap (trap
+# 22), and (otherwise) perform a range/element access (a 2-byte element stride, index * 2, with a bounds check)).
+[functions."0x8217A400"]
+name = "ProcessElementAccess_8217A400"
+
+
+# A process (a vcall loop, with a 16-bit element, the caller of ProcessElementAccess_8217A400 / the sibling of
+# ProcessVcallSequence5_82C26940): compute a count (a range, b - a, divided by 2, a 16-bit element count, a particular
+# count), call a validation (ProcessElementAccess_8217A400, on the object, the base, and the count, a particular
+# validation), and loop (a vcall loop, calling a virtual method (d, r7, a vcall, a particular virtual method), on each
+# 16-bit element (a, a 16-bit value, lhz, a 16-bit load), and storing the result (a 16-bit value, sthx, a 16-bit
+# store)).
+
+# Args: obj (r3, r27, an object), a (r4, r31, a base, a 16-bit element array), b (r5, r30, a limit, a particular end),
+# c (r6, a value), d (r7, r29, a vcall, a particular virtual method), (more). It computes a count (a range (b - a, a
+# range, a size), divided by 2 (srawi r4, r11, 1, a right shift by 1, a division by 2, a 16-bit element count, a
+# particular count), a count, a particular number of 16-bit elements). It calls a validation (ProcessElementAccess
+# _8217A400, sub_8217A400, a range/element access, on the object (r3, r27, an object), the base (r31, a base, a
+# particular offset), and the count (r4, a count, a particular count), a particular validation). It loops (a vcall
+# loop: it reads a 16-bit element (lhz r3, a, a 16-bit value, a particular element), calls a virtual method (bctrl d, r
+# 7, a vcall, a particular virtual method, on the 16-bit value, a particular operation), and stores the result (st hx
+# r3, r28, a, a 16-bit store, a particular element, a particular result), advancing to the next 16-bit element, a
+# particular loop). So it's a "process (a vcall loop: compute a count (a range, b - a, divided by 2, a 16-bit element
+# count), call a validation (ProcessElementAccess_8217A400, on the object, the base, and the count), and loop (a vcall
+# loop, calling a virtual method (d, a vcall), on each 16-bit element (a, a 16-bit value), and storing the result))"
+# routine (a vcall loop process, part of the 0x8217A allocation cluster, a caller of ProcessElementAccess_8217A400, a
+# sibling of ProcessVcallSequence5_82C26940). 72 lines, 1 callee (ProcessElementAccess_8217A400, sub_8217A400, a
+# range/element access). 2 callers: sub_822F2238, sub_8217AA20 (siblings in the 0x822F2/0x8217A clusters). The
+# object's class (obj, an object, a particular structure, a range / a table object) and the 16-bit element's meaning (a
+# 16-bit value, a particular element, a particular quantity) aren't resolvable, so the name states the mechanism: a
+# vcall loop process (compute a count (a range, b - a, divided by 2, a 16-bit element count), call a validation
+# (ProcessElementAccess_8217A400), and loop (a vcall loop, calling a virtual method (d, a vcall), on each 16-bit
+# element, and storing the result)).
+[functions."0x8217A9A8"]
+name = "ProcessVcallLoop_8217A9A8"
+
+
+# A process (an element access, with a bounds check and a complex computation, a 2-byte element, the sibling of
+# ProcessElementAccess_8217A400 / ValidateElementAccess_8217A7F8, the caller of ProcessValue_FlagNonZero_8217A5E0 /
+# ClampAndUpdate_822F6380 / Buffer_CopyOrZero_Error_82CA3730): (if a size (obj->24, a size, a particular value) is < 8,
+# a particular threshold, a particular size) take one path (a no-op / a return, a particular state, a particular
+# result, a particular size / a particular allocation), and (otherwise) perform an element access (a bounds check, a
+# particular check / a particular state, a complex computation, a particular computation / a particular operation, a
+# 2-byte element, a particular size / a particular allocation, a particular value / a particular operation), and (in
+# paths) call a process (ProcessValue_FlagNonZero_8217A5E0, on a value, a particular process, a particular operation, a
+# particular size / a particular allocation), and clamp/update (ClampAndUpdate_822F6380, on a value, a particular
+# clamp/update, a particular size / a particular allocation, a particular operation).
+
+# Args: obj (r3, r31, ->4 = a base, ->20 = a size, ->24 = a size, a particular structure, a range / a bounds object),
+# index (r4, r28, an index, a particular value, a particular count), a (r5, r27, a value), (more). It checks a size (r9
+# , obj->24, a size, a particular value, a particular size / a particular allocation): if it is < 8 (a particular
+# threshold, a particular size, a particular value, a particular state, a particular size / a particular allocation), it
+# takes one path (a no-op / a return, a particular state, a particular result, a particular size / a particular
+# allocation); if it is >= 8 (a particular threshold, a particular size, a particular value, a particular state, a
+# particular size / a particular allocation), it performs an element access (a bounds check, a particular check / a
+# particular state, a complex computation, a particular computation / a particular operation, a 2-byte element, a
+# particular size / a particular allocation, a particular value / a particular operation: it checks an index (r28, an
+# index, a particular value, a particular count) against a base (r11, obj->4, a base, a particular value, a particular
+# base / a particular state, a particular size / a particular allocation): if the index is < the base (a particular
+# threshold, a particular size, a particular value, a particular state, a particular size / a particular allocation), it
+# takes one path (a no-op / a return, a particular state, a particular result, a particular size / a particular
+# allocation); if the index is >= the base (a particular threshold, a particular size, a particular value, a particular
+# state, a particular size / a particular allocation), it performs an element access (a complex computation, a
+# particular computation / a particular operation, a 2-byte element, a particular size / a particular allocation, a
+# particular value / a particular operation: it computes a size (r10, obj->20, a size, a particular value, a particular
+# size / a particular allocation), and a size (r10 * 2, a size, a 2-byte element, a particular size / a particular
+# allocation), and a pointer (r8, r10 + r11, a pointer, a particular value, a particular pointer / a particular state,
+# a particular size / a particular allocation), and (in paths) calls a process (ProcessValue_FlagNonZero_8217A5E0, sub
+# _8217A5E0, a process, on a value (a, a value, a particular value, a particular size / a particular allocation), a
+# particular process, a particular operation, a particular size / a particular allocation), and clamps/updates
+# (ClampAndUpdate_822F6380, sub_822F6380, a clamp/update, on a value (a, a value, a particular value, a particular size
+# / a particular allocation), a particular clamp/update, a particular size / a particular allocation, a particular
+# operation). So it's a "process (an element access, with a bounds check and a complex computation, a 2-byte element:
+# (if a size (obj->24, a size, a particular value) is < 8, a particular threshold, a particular size) take one path (a
+# no-op / a return, a particular state, a particular result, a particular size / a particular allocation), and
+# (otherwise) perform an element access (a bounds check, a particular check / a particular state, a complex
+# computation, a particular computation / a particular operation, a 2-byte element, a particular size / a particular
+# allocation, a particular value / a particular operation), and (in paths) call a process (ProcessValue_FlagNonZero
+# _8217A5E0, on a value, a particular process, a particular operation, a particular size / a particular allocation), and
+# clamp/update (ClampAndUpdate_822F6380, on a value, a particular clamp/update, a particular size / a particular
+# allocation, a particular operation))" routine (an element access process, part of the 0x8217A cluster, a sibling of
+# ProcessElementAccess_8217A400 and ValidateElementAccess_8217A7F8, a caller of ProcessValue_FlagNonZero_8217A5E0, a
+# particular process, a particular operation). 182 lines, 3 callees (Buffer_CopyOrZero_Error_82CA3730, ClampAndUpdate
+# _822F6380, ProcessValue_FlagNonZero_8217A5E0). 10 callers: sub_82C72640, sub_822F21B8, sub_82C68B50, sub_82C809C8, sub
+# _82C66A58, sub_82C7F458, sub_82C7C778, sub_82C7FB28, sub_82BFD228, sub_82C7A220 (siblings in the 0x82C72/0x822F2/0
+# x82C68/0x82C80/0x82C66/0x82C7F/0x82C7C/0x82C7F/0x82BFD/0x82C7A clusters). The object's class (obj, ->4 = a base, ->
+# 20 = a size, ->24 = a size, a particular structure, a range / a bounds object, a particular size / a particular
+# allocation, a particular value / a particular state) and the index's meaning (an index, a particular value, a
+# particular count) aren't resolvable, so the name states the mechanism: an element access process (with a bounds check
+# and a complex computation, a 2-byte element) ((if a size (obj->24, a size, a particular value) is < 8, a particular
+# threshold, a particular size) take one path (a no-op / a return, a particular state, a particular result, a
+# particular size / a particular allocation), and (otherwise) perform an element access (a bounds check, a particular
+# check / a particular state, a complex computation, a particular computation / a particular operation, a 2-byte
+# element, a particular size / a particular allocation, a particular value / a particular operation), and (in paths) call
+# a process (ProcessValue_FlagNonZero_8217A5E0, on a value, a particular process, a particular operation, a particular
+# size / a particular allocation), and clamp/update (ClampAndUpdate_822F6380, on a value, a particular clamp/update, a
+# particular size / a particular allocation, a particular operation)). The "2" distinguishes it from
+# ProcessElementAccess_8217A400.
+[functions."0x8217A6C0"]
+name = "ProcessElementAccess2_8217A6C0"
+
+
+# A process (an element access, with a check and a call, the caller of ValidateIndex_822F6EE8 / ValidateElement
+# Access_8217A7F8 / ProcessRangeGrow_8217A858 / ProcessVcallLoop_8217A9A8, the sibling of ProcessElementAccess
+# _8217A400 / ProcessElementAccess2_8217A6C0): perform an element access (an element access, a particular access / a
+# particular element, a particular size / a particular allocation, a particular operation, a particular state / a
+# particular result), and (if a count (obj->24, a count, a particular count, a particular size / a particular
+# allocation) is >= 8, a particular threshold, a particular count) take a base (obj->4, a base, a particular value, a
+# particular size / a particular allocation, a particular element), and (otherwise) take a base (obj + 4, a base, a
+# particular value, a particular size / a particular allocation, a particular element), and call a check
+# (ValidateIndex_822F6EE8, on a value (stack[88], a value, a particular value, a particular size / a
+# particular allocation, a particular target), and a base (r4, a base, a particular value, a particular size / a
+# particular allocation, a particular element), and a value (obj, a value, a particular value, a particular size /
+# a particular allocation, a particular element), a particular check / a particular index, a particular size / a
+# particular allocation, a particular operation, a particular state / a particular result), and (in paths) validate
+# (ValidateElementAccess_8217A7F8, on a value, a particular validate / a particular element, a particular size / a
+# particular allocation, a particular operation, a particular state / a particular result), and grow a range
+# (ProcessRangeGrow_8217A858, on a value, a particular grow / a particular range, a particular size / a
+# particular allocation, a particular operation, a particular state / a particular result), and perform a loop
+# (ProcessVcallLoop_8217A9A8, on a value, a particular loop / a particular vcall, a particular size / a
+# particular allocation, a particular operation, a particular state / a particular result).
+
+# Args: obj (r3, r31, ->4 = a base, ->24 = a count, a particular structure, a range object), (more). It checks a
+# count (r11, obj->24, a count, a particular count, a particular size / a particular allocation): if it is >= 8 (a
+# particular threshold, a particular count, a particular value, a particular state, a particular size / a
+# particular allocation), it takes a base (r4, obj->4, a base, a particular value, a particular size / a
+# particular allocation, a particular element); if it is < 8 (a particular threshold, a particular count, a
+# particular value, a particular state, a particular size / a particular allocation), it takes a base (r4, obj + 4, a
+# base, a particular value, a particular size / a particular allocation, a particular element). It calls a check
+# (ValidateIndex_822F6EE8, sub_822F6EE8, a check, on a value (stack[88], a value, a particular value, a
+# particular size / a particular allocation, a particular target), and a base (r4, a base, a particular value, a
+# particular size / a particular allocation, a particular element), and a value (obj, a value, a particular value, a
+# particular size / a particular allocation, a particular element), a particular check / a particular index, a
+# particular size / a particular allocation, a particular operation, a particular state / a particular result). In
+# paths it validates (ValidateElementAccess_8217A7F8, sub_8217A7F8, a validate, on a value (obj, a value, a
+# particular value, a particular size, a particular size / a particular allocation), a particular validate / a
+# particular element, a particular size / a particular allocation, a particular operation, a particular state / a
+# particular result), grows a range (ProcessRangeGrow_8217A858, sub_8217A858, a range grow, on a value (obj, a
+# value, a particular value, a particular size, a particular size / a particular allocation), a particular grow / a
+# particular range, a particular size / a particular allocation, a particular operation, a particular state / a
+# particular result), and performs a loop (ProcessVcallLoop_8217A9A8, sub_8217A9A8, a vcall loop, on a value (obj, a
+# value, a particular value, a particular size, a particular size / a particular allocation), a particular loop / a
+# particular vcall, a particular size / a particular allocation, a particular operation, a particular state / a
+# particular result). So it's a "process (an element access, with a check and a call: perform an element access (an
+# element access, a particular access / a particular element, a particular size / a particular allocation, a
+# particular operation, a particular state / a particular result), and (if a count (obj->24, a count, a
+# particular count, a particular size / a particular allocation) is >= 8, a particular threshold, a
+# particular count) take a base (obj->4, a base, a particular value, a particular size / a particular allocation, a
+# particular element), and (otherwise) take a base (obj + 4, a base, a particular value, a particular size / a
+# particular allocation, a particular element), and call a check (ValidateIndex_822F6EE8, on a value (stack[88], a
+# value, a particular value, a particular size / a particular allocation, a particular target), and a base (r4, a
+# base, a particular value, a particular size / a particular allocation, a particular element), and a value (obj, a
+# value, a particular value, a particular size / a particular allocation, a particular element), a particular check /
+# a particular index, a particular size / a particular allocation, a particular operation, a particular state / a
+# particular result), and (in paths) validate (ValidateElementAccess_8217A7F8, on a value, a particular validate / a
+# particular element, a particular size / a particular allocation, a particular operation, a particular state / a
+# particular result), and grow a range (ProcessRangeGrow_8217A858, on a value, a particular grow / a
+# particular range, a particular size / a particular allocation, a particular operation, a particular state / a
+# particular result), and perform a loop (ProcessVcallLoop_8217A9A8, on a value, a particular loop / a
+# particular vcall, a particular size / a particular allocation, a particular operation, a particular state / a
+# particular result))" routine (an element access process, part of the 0x8217A cluster, a sibling of
+# ProcessElementAccess_8217A400, a caller of ValidateIndex_822F6EE8, ValidateElementAccess_8217A7F8,
+# ProcessRangeGrow_8217A858, and ProcessVcallLoop_8217A9A8). 156 lines, 5 callees (ProcessRangeGrow_8217A858,
+# ProcessVcallLoop_8217A9A8, ValidateElementAccess_8217A7F8, ValidateIndex_822F6EE8, sub_822F52A8). 10+ callers: sub
+# _822F27C0, sub_82C68B50, sub_82368830, sub_8217AB58, sub_822F38B0, LoadString_FastOrSlow_823725E8, sub_82372758, sub
+# _82C69318, sub_82B3E560, sub_82B3EDD0 (processes, which call this to perform the element access, a
+# particular size / a
+# particular allocation, a
+# particular operation). The object's class (obj, ->4 = a base, ->24 = a count, a
+# particular structure, a range object, a particular size / a
+# particular allocation, a particular value /
+# a particular state) isn't resolvable, so the name states the mechanism: an element access process (with a
+# check and a call) (perform an element access (an
+# element access, a particular access / a particular element, a particular size / a
+# particular allocation, a
+# particular operation, a particular state / a
+# particular result), and (if a count (obj->24, a count, a
+# particular count, a particular size / a
+# particular allocation) is >= 8, a particular threshold, a
+# particular count) take a base (obj->4, a base, a particular value, a
+# particular size / a
+# particular allocation, a
+# particular element), and (otherwise) take a base (obj + 4, a
+# base, a particular value, a particular size / a
+# particular allocation, a
+# particular element), and call a check (ValidateIndex_822F6EE8, on a value (stack[88], a
+# value, a particular value, a particular size / a
+# particular allocation, a
+# particular target), and a base (r4, a base, a particular value, a
+# particular size / a
+# particular allocation, a
+# particular element), and a value (obj, a
+# value, a particular value, a particular size / a
+# particular allocation, a
+# particular element), a particular check / a
+# particular index, a particular size / a
+# particular allocation, a particular operation, a particular state / a
+# particular result), and (in paths) validate (ValidateElementAccess_8217A7F8, on a
+# value, a particular validate / a
+# particular element, a particular size / a
+# particular allocation, a particular operation, a particular state / a
+# particular result), and grow a range (ProcessRangeGrow_8217A858, on a
+# value, a particular grow / a
+# particular range, a particular size / a
+# particular allocation, a particular operation, a particular state / a
+# particular result), and perform a loop (ProcessVcallLoop_8217A9A8, on a
+# value, a particular loop / a
+# particular vcall, a particular size / a
+# particular allocation, a particular operation, a particular state / a
+# particular result)). The "3" distinguishes it from ProcessElementAccess_8217A400 and ProcessElementAccess2
+# _8217A6C0.
+[functions."0x8217AA20"]
+name = "ProcessElementAccess3_8217AA20"
+
+
+# A trampoline (a trampoline, with a call, the caller of sub_822D7068, the sibling of ProcessElementAccess3_8217AA
+# 20 / ProcessVcallLoop_8217A9A8): forward a call (a trampoline, a particular forward / a
+# particular call, a particular size / a particular allocation, a particular operation, a
+# particular state / a
+# particular result, calling sub_822D7068, on a value (a, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular target), and a value (b, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular source), a particular process, a
+# particular operation, a particular size / a
+# particular allocation, a particular state / a
+# particular result), and return the result (a
+# result, a
+# particular result, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result).
+
+# Args: a (r3, a value, a particular value, a particular size / a
+# particular allocation, a
+# particular target), b (r4, a value, a particular value, a
+# particular size / a
+# particular allocation, a
+# particular source), (more). It forwards a call (a
+# trampoline, a particular forward / a
+# particular call, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, calling sub_822D7068, sub_822D7068, a process, on a
+# value (a, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular target), and a value (b, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular source), a particular process, a
+# particular operation, a particular size / a
+# particular allocation, a particular state / a
+# particular result). It returns the result (a
+# result, a
+# particular result, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result). So it's a "trampoline (a
+# trampoline, with a
+# call: forward a call (a
+# trampoline, a particular forward / a
+# particular call, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, calling sub_822D7068, on a value (a, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular target), and a value (b, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular source), a particular process, a
+# particular operation, a particular size / a
+# particular allocation, a particular state / a
+# particular result), and return the result (a
+# result, a
+# particular result, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result))" routine (a trampoline, part of the 0x8217A cluster, a sibling of
+# ProcessElementAccess3_8217AA20 and ProcessVcallLoop_8217A9A8, a caller of sub_822D7068). 9
+# lines, 1
+# callee (sub_822D7068). 5 callers: sub_822F21B8, sub_8217AB58, sub_82BFD228, sub_82B3EB30, sub_82C68B50
+# (processes, which
+# call this to forward the call, a
+# particular size / a
+# particular allocation, a
+# particular operation). The values' meanings (a, r3, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular target, b, r4, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular source) aren't resolvable, so the name states the mechanism: a trampoline (with a
+# call) (forward a call (a
+# trampoline, a particular forward / a
+# particular call, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, calling sub_822D7068, on a value (a, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular target), and a value (b, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular source), a particular process, a
+# particular operation, a particular size / a
+# particular allocation, a particular state / a
+# particular result), and return the result (a
+# result, a
+# particular result, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result)). The "Trampoline" refers to the trampoline (a
+# trampoline, a particular forward / a
+# particular call, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result).
+[functions."0x8217A978"]
+name = "Trampoline_8217A978"
+
+
+# A processor that validates a condition and, when it fails, runs an abort / trap sequence. It takes a result (a: a
+# value at a->0), a value (b), and a value (c). When the result (a) is null and the value (b) is also null it runs the
+# abort path: it logs the failure (sub_82CAB770), stores a status code (a->0 = 22), and raises the fault (sub_82CAB630
+# with a zeroed argument set), then returns 22. When the result is present but the value (b) is non-zero it handles the
+# present-but-invalid case (zeroing the low byte of a). This is the "validate this condition, aborting with status 22
+# when it fails" routine for the 0x82170 abort cluster, used by 10 callers (sub_82170DA8 and the 0x822EF/0x822FC/0x82373
+# /0x82BF1/0x82BF2/0x82BF3/0x83000/0x83003 range). Part of the 0x82170 abort cluster (sibling of Allocate_OrDbgBreak
+# _8221F388 / sub_82CAB630). 134 lines, 2 callees. 10 callers.
+[functions."0x82170CC8"]
+name = "ProcessAndAbort_82170CC8"
+
+
+# A processor that, when the count is below the minimum, calls the grow handler, and clamps the value. It takes a
+# structure (a: a count at a->20, a type at a->24), a minimum (b), a bound (c), a value (d), and a cap (e). When the
+# count (a->20) is below the minimum (b) it invokes the grow handler (sub_82CD12C8). It then computes the clamped
+# value: (a->20 - b), clamped to the bound (c) and the cap (e) - using the minimum of the difference and the bound,
+# then the minimum of that and the cap. It then proceeds with the clamped value (checking the type at a->24 for the
+# 16-byte path). This is the "grow the count when below the minimum, and clamp the value" routine for the 0x8217C
+# clamp-grow cluster, used by 10 callers (the 0x8236A/0x82BF9/0x82C6A/0x82C6B/0x82C6C/0x82C6E/0x82C84 range). Part of
+# the 0x8217C clamp-grow cluster (sibling of sub_82CD12C8 / ClampRange_822F6480). 129 lines, 1 callee. 10 callers.
+[functions."0x8217CBE8"]
+name = "ProcessAndClampGrow_8217CBE8"
+
+
+# A processor that queries and processes the data. It takes a structure (a: fields at a->0 and a->4), a value (b), and a count (c). When c is non-zero it iterates: when a->0 is zero it
+# queries an index (ProcessAndQueryIndex_82BCD8A8, with a), and when the result is not -1 it updates a->0 (increment) and a->4 (decrement). It then reads a byte from a->4 and performs
+# processing (MemCpy_SdkRuntime_82CA2C60). This is the "query and process this data" routine, part of the 0x82179 process cluster. 112 lines. 2 callees (ProcessAndQueryIndex, MemCpy).
+# 7 callers (sub_82BF58B8, sub_82BF5470, sub_82BF4E00, sub_82BF51D8, sub_82BF59A0, sub_82A36390, and sub_82A36910).
+[functions."0x82179420"]
+name = "ProcessAndQueryAndProcess_82179420"
+
+
+# A processor that processes the data. It takes a structure (a: fields at a->324, a->368, a->372, and a->376). It processes the data (a, with a->324, a->368, a->372, and a->376). This is the "process this data" routine, part of the 0x82174 process cluster. 266 lines. 6 callees (GetSingleton, ProcessIndexedRegion, sub_82BA9938, sub_82BA9988, sub_82BA9B40, and sub_82BAC4E8). 1 caller (sub_822AC668).
+[functions."0x82174D38"]
+name = "ProcessAndProcessAndProcess_82174D38"
+
+
+# A processor that accesses and processes the data (sixth form). It takes a pointer (a). It accesses the data (a->873). It then processes the data (a->873). This is the "access and process this data" routine (sixth form), part of the 0x8217F process cluster. 8 lines. 0 callees (leaf function — performs raw memory operations). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x8217F248"]
+name = "ProcessAndAccessAndProcess6_8217F248"
+
+
+# A freer that frees the data (ninth form). It takes a structure (a: fields at a->4, a->20, and a->24). It frees the data (a). This is the "free this data" routine (ninth form), part of the 0x82171 free cluster. 49 lines. 1 callee (Free_SizeBucketed_Thunk). 12 callers (sub_82684BB0, sub_82BE3F30, sub_825507A0, sub_8292C840, sub_82773520, sub_82AA39D8, ProcessNodeString, sub_82395330, sub_828A4738, sub_82B4CDE0, sub_82B5FEB0, and sub_82AAD4D8).
+[functions."0x82171810"]
+name = "ProcessAndFreeAndProcess9_82171810"
+
+
+# Process a structure by allocating fresh memory (seven hundred and one hundred and one hundred and thirty-eighth form). It takes a structure, allocates fresh memory (ProcessAndAllocateAndProcess2), and drives a sub-operation (sub_822EFF58) based on the result. This is a frequently-called allocator in the 0x8217E process cluster. 72 lines. 2 callees. 43 callers.
+[functions."0x8217E3F8"]
+name = "ProcessAndProcessAndProcess938_8217E3F8"
+
+
+# Destruct a refcounted object by releasing it (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and sixteenth form). It takes a structure, frees size-bucketed memory (Free_SizeBucketed), frees and shrinks (ProcessAndFreeAndShrink), releases a refcounted object (Release_RefCounted), and drives sub-operations (sub_829FF3E8, sub_82B800A0) based on the result. Part of the 0x8217D process cluster. 352 lines. 5 callees. 8 callers.
+[functions."0x8217DAD8"]
+name = "ProcessAndProcessAndProcess1216_8217DAD8"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and thirty-second form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82172 process cluster. 15 lines. 0 callees. 0 callers.
+[functions."0x82172390"]
+name = "ProcessAndProcessAndProcess1232_82172390"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and eightieth form). It takes a structure and drives a sub-operation (sub_829FA2E0) based on the result. Part of the 0x82172 process cluster. 13 lines. 1 callee. 0 callers.
+[functions."0x82172ED0"]
+name = "ProcessAndProcessAndProcess1280_82172ED0"
+
+
+# Process a large data structure by clearing memory (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and eighty-first form). It takes a structure, clears its memory (MemSet), checks for success (ProcessAndCheckSuccess), and drives sub-operations (sub_82172EE8, sub_822EF9B8, sub_8230F690, sub_82334B98, sub_82334DA8, sub_82334E80, sub_82334F88, sub_82CBC490) based on the result. Part of the 0x82177 process cluster. 233 lines. 10 callees. 1 caller (sub_82184D38).
+[functions."0x82177590"]
+name = "ProcessAndProcessAndProcess1281_82177590"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and eighty-second form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82179 process cluster. 112 lines. 0 callees. 4 callers (sub_822B36F8, sub_82BE3B78, sub_82BE3D50, sub_82BE3E80).
+[functions."0x82179FB8"]
+name = "ProcessAndProcessAndProcess1282_82179FB8"
+
+
+# Process a large data structure by allocating checked memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and thirty-sixth form). It takes a structure, allocates checked memory (AllocateChecked3), frees size-bucketed memory (Free_SizeBucketed), and drives sub-operations (ProcessAndProcessAndProcess1136, sub_8272EF00, ProcessAndProcessAndProcess1327, ProcessAndProcessAndProcess1337, sub_82A6CDC8, sub_82A97648) based on the result. Part of the 0x8217F process cluster. 362 lines. 8 callees. 1 caller (ProcessAndProcessAndProcess1331).
+[functions."0x8217FAB8"]
+name = "ProcessAndProcessAndProcess1336_8217FAB8"
+
+
+# Process a structure by freeing size-bucketed memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and fiftieth form). It takes a structure and frees size-bucketed memory (Free_SizeBucketed). Part of the 0x8217B free-and-process family. 68 lines. 1 callee. 2 callers (ProcessAndProcessAndProcess1426 and sub_832AE110).
+[functions."0x8217BCC8"]
+name = "ProcessAndProcessAndProcess1420_8217BCC8"
+
+
+# Process a structure by freeing size-bucketed memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and fifty-first form). It takes a structure and frees size-bucketed memory (Free_SizeBucketed). Part of the 0x8217B free-and-process family. 68 lines. 1 callee. 2 callers (sub_8217C0C8 and sub_832AE230).
+[functions."0x8217BD40"]
+name = "ProcessAndProcessAndProcess1421_8217BD40"
+
+
+# Process a structure by freeing size-bucketed memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and fifty-second form). It takes a structure and frees size-bucketed memory (Free_SizeBucketed). Part of the 0x8217B free-and-process family. 68 lines. 1 callee. 2 callers (sub_8217C1F8 and sub_832AE1A0).
+[functions."0x8217BDB8"]
+name = "ProcessAndProcessAndProcess1422_8217BDB8"
+
+
+# Process a structure by freeing size-bucketed memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and fifty-third form). It takes a structure and frees size-bucketed memory (Free_SizeBucketed). Part of the 0x8217B free-and-process family. 68 lines. 1 callee. 2 callers (sub_8217C328 and sub_832AE278).
+[functions."0x8217BE30"]
+name = "ProcessAndProcessAndProcess1423_8217BE30"
+
+
+# Process a structure by freeing size-bucketed memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and fifty-fourth form). It takes a structure and frees size-bucketed memory (Free_SizeBucketed). Part of the 0x8217B free-and-process family. 68 lines. 1 callee. 2 callers (sub_8217C458 and sub_832AE1E8).
+[functions."0x8217BEA8"]
+name = "ProcessAndProcessAndProcess1424_8217BEA8"
+
+
+# Process a structure by freeing size-bucketed memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and fifty-fifth form). It takes a structure and frees size-bucketed memory (Free_SizeBucketed). Part of the 0x8217B free-and-process family. 68 lines. 1 callee. 2 callers (sub_8217C588 and sub_832AE158).
+[functions."0x8217BF20"]
+name = "ProcessAndProcessAndProcess1425_8217BF20"
+
+
+# Process a large structure by freeing size-bucketed memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and fifty-sixth form). It takes a structure, frees size-bucketed memory (Free_SizeBucketed), and drives a sub-operation (ProcessAndProcessAndProcess1420) based on the result. This is the largest function in the 0x8217B free-and-process family. 175 lines. 2 callees. 2 callers (sub_8217C6B8 and sub_82A9AA00).
+[functions."0x8217BF98"]
+name = "ProcessAndProcessAndProcess1426_8217BF98"
+
+
+# Process a large structure by freeing size-bucketed memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and forty-seventh form). It takes a structure, frees size-bucketed memory (Free_SizeBucketed), and drives a sub-operation (ProcessAndProcessAndProcess1421) based on the result. Part of the 0x8217B free-and-process family. 175 lines. 2 callees. 2 callers (including ProcessAndProcessAndProcess1432).
+[functions."0x8217C0C8"]
+name = "ProcessAndProcessAndProcess1427_8217C0C8"
+
+
+# Process a large structure by freeing size-bucketed memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and forty-eighth form). It takes a structure, frees size-bucketed memory (Free_SizeBucketed), and drives a sub-operation (ProcessAndProcessAndProcess1422) based on the result. Part of the 0x8217B free-and-process family. 175 lines. 2 callees. 2 callers (including ProcessAndProcessAndProcess1432).
+[functions."0x8217C1F8"]
+name = "ProcessAndProcessAndProcess1428_8217C1F8"
+
+
+# Process a large structure by freeing size-bucketed memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and forty-ninth form). It takes a structure, frees size-bucketed memory (Free_SizeBucketed), and drives a sub-operation (ProcessAndProcessAndProcess1423) based on the result. Part of the 0x8217B free-and-process family. 175 lines. 2 callees. 2 callers (including ProcessAndProcessAndProcess1432).
+[functions."0x8217C328"]
+name = "ProcessAndProcessAndProcess1429_8217C328"
+
+
+# Process a large structure by freeing size-bucketed memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and fiftieth form). It takes a structure, frees size-bucketed memory (Free_SizeBucketed), and drives a sub-operation (ProcessAndProcessAndProcess1424) based on the result. Part of the 0x8217B free-and-process family. 175 lines. 2 callees. 1 caller (ProcessAndProcessAndProcess1432).
+[functions."0x8217C458"]
+name = "ProcessAndProcessAndProcess1430_8217C458"
+
+
+# Process a large structure by freeing size-bucketed memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and fifty-first form). It takes a structure, frees size-bucketed memory (Free_SizeBucketed), and drives a sub-operation (ProcessAndProcessAndProcess1425) based on the result. Part of the 0x8217B free-and-process family. 175 lines. 2 callees. 2 callers (including ProcessAndProcessAndProcess1432).
+[functions."0x8217C588"]
+name = "ProcessAndProcessAndProcess1431_8217C588"
+
+
+# Process a large data structure by driving the free-and-process family (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and fifty-second form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess1426, ProcessAndProcessAndProcess1427, ProcessAndProcessAndProcess1428, ProcessAndProcessAndProcess1429, ProcessAndProcessAndProcess1430, ProcessAndProcessAndProcess1431) based on the result. This is a dispatcher for the 0x8217B free-and-process family. 181 lines. 6 callees. 1 caller (ProcessAndProcessAndProcess1438).
+[functions."0x8217C6B8"]
+name = "ProcessAndProcessAndProcess1432_8217C6B8"
+
+
+# Process a structure by destructing and freeing (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and fifty-third form). It takes a structure, destructs (Destruct4), and frees size-bucketed memory (Free_SizeBucketed). Part of the 0x8217C process cluster. 63 lines. 2 callees. 3 callers (sub_82197D00, sub_82A66888, sub_832ACA58).
+[functions."0x8217C870"]
+name = "ProcessAndProcessAndProcess1433_8217C870"
+
+
+# Process a large data structure by allocating size-bucketed memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and fifty-fourth form). It takes a structure, allocates size-bucketed memory (Allocate_SizeBucketed), destructs (Destruct4), and drives sub-operations (sub_82A665B8, sub_82A666A8, sub_82A66888, sub_82B87160, sub_82CBBB58) based on the result. Part of the 0x8217C process cluster. 457 lines. 7 callees. 1 caller (sub_82197D00).
+[functions."0x8217C8D8"]
+name = "ProcessAndProcessAndProcess1434_8217C8D8"
+
+
+# Process a structure by allocating fresh memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and fifty-fifth form). It takes a structure, allocates fresh memory (Allocate_OrDbgBreak), and drives a sub-operation (sub_82A676C0) based on the result. Part of the 0x8217C process cluster. 123 lines. 2 callees. 2 callers (sub_8217DD18 and sub_82A677A0).
+[functions."0x8217CF78"]
+name = "ProcessAndProcessAndProcess1435_8217CF78"
+
+
+# Process a large structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and fifty-sixth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x8217E process cluster. 199 lines. 0 callees. 1 caller (ProcessAndProcessAndProcess929).
+[functions."0x8217ECD8"]
+name = "ProcessAndProcessAndProcess1436_8217ECD8"
+
+
+# Process a very large data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and twenty-fifth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess1435, ProcessAndProcessAndProcess504) based on the result. Part of the 0x8217D process cluster. 874 lines. 2 callees. 1 caller (ProcessAndProcessAndProcess1478).
+[functions."0x8217DD18"]
+name = "ProcessAndProcessAndProcess1525_8217DD18"
+
+
+# Process a structure by copying memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and eighth form). It takes a structure and copies memory (MemCpy_SdkRuntime). Part of the 0x82171 process cluster. 51 lines. 1 callee. 0 callers.
+[functions."0x82171A50"]
+name = "ProcessAndProcessAndProcess1608_82171A50"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and eighteenth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82178 process cluster. 15 lines. 0 callees. 0 callers.
+[functions."0x821781C8"]
+name = "ProcessAndProcessAndProcess1618_821781C8"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and fifty-seventh form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82173 process cluster. 40 lines. 0 callees. 0 callers.
+[functions."0x82173E78"]
+name = "ProcessAndProcessAndProcess1757_82173E78"
+
+
+# Process a structure by freeing size-bucketed memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and sixty-fourth form). It takes a structure, frees size-bucketed memory (Free_SizeBucketed), and releases a refcounted object (Release_RefCounted). This is a frequently-called helper in the 0x8217A process cluster. 96 lines. 2 callees. 3 callers.
+[functions."0x8217AE48"]
+name = "ProcessAndProcessAndProcess1764_8217AE48"
+
+
+# Process a very large data structure by copying memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and sixty-ninth form). It takes a structure, copies memory (MemCpy_SdkRuntime), aborts (ProcessAndAbort), and drives a sub-operation (sub_82CAB678) based on the result. This is one of the largest functions in the binary in the 0x82170 process cluster. 1765 lines. 3 callees. 1 caller (ProcessAndProcessAndProcess1770).
+[functions."0x82170050"]
+name = "ProcessAndProcessAndProcess1769_82170050"
+
+
+# Process a structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and seventieth form). It takes a structure, aborts (ProcessAndAbort), and drives sub-operations (ProcessAndProcessAndProcess1769, ProcessAndProcessAndProcess1771, sub_82CAB678) based on the result. Part of the 0x82170 process cluster. 92 lines. 4 callees. 3 callers.
+[functions."0x82170DA8"]
+name = "ProcessAndProcessAndProcess1770_82170DA8"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and seventy-first form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82170 process cluster. 126 lines. 0 callees. 1 caller (ProcessAndProcessAndProcess1770).
+[functions."0x82170E48"]
+name = "ProcessAndProcessAndProcess1771_82170E48"
+
+
+# Process a large data structure by moving memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and seventy-second form). It takes a structure, moves memory (MemMove_SdkRuntime), and drives sub-operations (sub_82CAB630, sub_82CAB770) based on the result. Part of the 0x82171 process cluster. 227 lines. 3 callees. 3 callers.
+[functions."0x82171010"]
+name = "ProcessAndProcessAndProcess1772_82171010"
+
+
+# Process a large data structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and seventy-third form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess1770, ProcessAndProcessAndProcess1772, sub_82CAB630, sub_82CAB770, sub_82CABAE8, sub_82CAC1A8) based on the result. Part of the 0x82171 process cluster. 191 lines. 6 callees. 2 callers (sub_82278A90 and sub_82CAC370).
+[functions."0x821712B0"]
+name = "ProcessAndProcessAndProcess1773_821712B0"
+
+
+# Process a very large data structure by allocating fresh memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and one hundred and twentieth form). It takes a structure, allocates fresh memory (Allocate_OrDbgBreak), sets a string (SetString), and drives sub-operations (ProcessAndFreeAndProcess9, sub_822F1F00, sub_826C3EF0, sub_826C3FA8, sub_829FDF90, sub_829FE010) based on the result. Part of the 0x8217F process cluster. 343 lines. 8 callees. 1 caller (ProcessAndProcessAndProcess1821).
+[functions."0x8217F708"]
+name = "ProcessAndProcessAndProcess1820_8217F708"
+
+
+# Process a large structure by finding a chain root (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and one hundred and twenty-first form). It takes a structure, finds a chain root (FindChainRoot5), and drives a sub-operation (ProcessAndProcessAndProcess1820) based on the result. Part of the 0x8217F process cluster. 185 lines. 2 callees. 1 caller (ProcessAndProcessAndProcess1627).
+[functions."0x8217F978"]
+name = "ProcessAndProcessAndProcess1821_8217F978"
+
+
+# Process a large structure by copy-assigning a refcounted object (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and four hundred and twenty-first form). It takes a structure, copy-assigns a refcounted object (CopyAssign_RefCounted), and drives a sub-operation (sub_823076D8) based on the result. This is a frequently-called helper in the 0x82175 process cluster. 109 lines. 2 callees. 22 callers.
+[functions."0x82175020"]
+name = "ProcessAndProcessAndProcess2121_82175020"
+
+
+# Process a structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and four hundred and twenty-ninth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess313, ProcessAndProcessAndProcess314, ProcessAndProcessAndProcess503, ProcessAndProcessAndProcess560, ProcessAndProcessAndProcess783) based on the result. This is a frequently-called helper in the 0x82175 process cluster. 95 lines. 5 callees. 18 callers.
+[functions."0x821756E0"]
+name = "ProcessAndProcessAndProcess2129_821756E0"
+
+
+# Process a structure by freeing size-bucketed memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and four hundred and fifty-fifth form). It takes a structure, frees size-bucketed memory (Free_SizeBucketed), and drives a sub-operation (sub_822D6A80) based on the result. Part of the 0x82171 process cluster. 50 lines. 2 callees. 0 callers.
+[functions."0x82171698"]
+name = "ProcessAndProcessAndProcess2155_82171698"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and four hundred and fifty-sixth form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess2129). Part of the 0x82175 process cluster. 100 lines. 1 callee. 0 callers.
+[functions."0x82175780"]
+name = "ProcessAndProcessAndProcess2156_82175780"
+
+
+# Process a structure by freeing size-bucketed memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and four hundred and fifty-seventh form). It takes a structure, frees size-bucketed memory (Free_SizeBucketed), and drives a sub-operation (sub_8321C478) based on the result. Part of the 0x8217A process cluster. 50 lines. 2 callees. 0 callers.
+[functions."0x8217A160"]
+name = "ProcessAndProcessAndProcess2157_8217A160"
+
+
+# Process a structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and five hundred and fifty-fourth form). It takes a structure, checks its state, and drives sub-operations (sub_82170010, sub_82CA46E8) based on the result. This is a frequently-called helper in the 0x82172 process cluster. 68 lines. 2 callees. 87 callers.
+[functions."0x82172EE8"]
+name = "ProcessAndProcessAndProcess2254_82172EE8"
+
+
+# Process a structure by checking its state and driving sub-operations (two thousand four hundred and eighty-third form). It takes a structure (a: fields at a->480, a->0, and a->484); it checks the structure's state, and drives sub-operations (Release_RefCounted, ProcessAndProcessAndProcess2171, and more) based on the result. This is the "process this data" routine (two thousand four hundred and eighty-third form), part of the 0x8217A process cluster. 126 lines. 2 callees. 1 caller (sub_82A00530).
+[functions."0x8217AD80"]
+name = "ProcessAndProcessAndProcess2482_8217AD80"

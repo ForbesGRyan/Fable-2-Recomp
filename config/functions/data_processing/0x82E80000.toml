@@ -1,0 +1,31 @@
+# data-processing region 0x82E80000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# Process a value by checking its state and driving sub-operations (two thousand four hundred and eighty-fourth form). It uses global state to check its state, and drives sub-operations (ProcessAndAllocateAndProcess2) based on the result. This is the "process this data" routine (two thousand four hundred and eighty-fourth form), part of the 0x82E80 process cluster. 69 lines. 1 callee. 4 callers (sub_82E824A0, sub_82E814F8, sub_82E81128, and sub_82E820D8).
+[functions."0x82E80FA8"]
+name = "ProcessAndProcessAndProcess2533_82E80FA8"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand four hundred and one hundred and two hundred and eleventh form). It takes a structure (a: fields at a->12, a->1024, and a->0); it checks the value's state, and drives sub-operations (ProcessAndProcessAndProcess2533) based on the result, looping over elements. This is the "process this data" routine (two thousand four hundred and one hundred and two hundred and eleventh form), part of the 0x82E82 process cluster. 116 lines. 1 callee. 1 caller (sub_82E824A0).
+[functions."0x82E820D8"]
+name = "ProcessAndProcessAndProcess2660_82E820D8"
+
+
+# Process a value by checking its state and driving many sub-operations (two thousand four hundred and one hundred and two hundred and twelfth form). It takes a structure (a: fields at a->12 and a->0), a value (b), a value (c), a value (d), a value (e), and a value (f); it checks the value's state, and drives many sub-operations (ProcessAndProcessAndProcess2660, ProcessAndProcessAndProcess2533, and more) based on the result. This is the "process this data" routine (two thousand four hundred and one hundred and two hundred and twelfth form), part of the 0x82E82 process cluster. 118 lines. 3 callees. 3 callers.
+[functions."0x82E824A0"]
+name = "ProcessAndProcessAndProcess2661_82E824A0"
+
+[functions."0x82E86188"]
+name = "Func_82E86188"
+
+[functions."0x82E87A10"]
+name = "Func_82E87A10"
+
+[functions."0x82E8F9E8"]
+name = "RetAddr_82E8F9E8"
+
+[functions."0x82EB7ED0"]
+name = "RetAddr_82EB7ED0"

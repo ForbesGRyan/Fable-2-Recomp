@@ -1,0 +1,87 @@
+# texture_morph functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# =====================================================================
+# Texture morph system (per-appearance skin texture build: hero/dog age,
+# morality, scars, makeup)
+# =====================================================================
+#
+# The hero/dog skin is not a plain file texture: each frame of appearance change
+# rebuilds it. The pipeline (top -> down, verified from the recompiled call
+# graph):  TextureMorph_CreateJob  ->  [orchestrator sub_82A56CA0, called from
+# fable_2_recomp.284.cpp:2324]  ->  TextureMorph_SelectFormat  ->
+# [render driver sub_82A56428: retry-in-a-loop under a critical section]  ->
+# TextureMorph_Render, which for the Baked path calls TextureCompress_Quantized
+# and for the Realtime path calls TextureMips_BuildGPU. A per-request mode byte
+# (the "realtime" flag) is what selects the two paths. See
+# plans/hero-dog-realtime-texture-morphing.md.
+
+# Texture morph -- job creation (per-request dispatcher). For each request (r30)
+# it calls vtable[1]; when the result is 18 (the texture-morph request type) it
+# builds a job object (r31) carrying the source width/height (r30+8/+12) and a
+# data pointer (via sub_82A57AC8 on r30+16), and copies the per-request
+# "realtime mode" byte from request+0x20 into job+0x60 -- exactly at 0x82A7607C
+# (lbz r9,32(r30) / stb r9,96(r31)). That copy is the hook point the
+# force-realtime-texture-morphing patch targets. Named TextureMorph_CreateJob
+# for the morph job it constructs. PDB: __imp__sub_82A76018, 1815 bytes.
+[functions."0x82A76018"]
+name = "TextureMorph_CreateJob_82A76018"
+
+
+# Texture morph -- output format selection. Chosen by the orchestrator
+# (sub_82A56CA0) before rendering; it returns a byte that gates whether the
+# texture is rendered at all. The format-choice itself is at
+# 0x82A56088..0x82A560E4: cmpwi r31,40, then it derives the target D3D format id
+# from a source-format byte (obj+36) with bit-masks and adds 40/37/35 (the
+# A8R8G8B8 / X8R8G8B8 / DXT-family choices). The plan attributes an engine
+# format table at 0x8331D988 (stride 0x70) to this step; the 0x83310000 format
+# page is referenced by the renderer, but that exact offset/stride is not
+# visible in the recompiled form. Named TextureMorph_SelectFormat for the
+# output-format decision. PDB: __imp__sub_82A55EC0, 14768 bytes.
+[functions."0x82A55EC0"]
+name = "TextureMorph_SelectFormat_82A55EC0"
+
+
+# Texture morph -- the renderer (the large texture builder). A width x height
+# texel loop (blt back to loc_82A69D50) that sets D3D render state (the
+# 0x821fXXXX API family), calls GetTimebase_8221EB58 six times, and references
+# the engine format page (0x83310000). It draws the morph, then for the BAKED
+# path compresses the result on the CPU via TextureCompress_Quantized (bl at
+# 0x82A6A3F4) while for the REALTIME path builds the mip chain on the GPU via
+# TextureMips_BuildGPU (bl at 0x82A6A554, gated on mip count > 0). The mode is
+# threaded in as the 4th arg (stb 959(r1)); it ultimately comes from the job
+# built by TextureMorph_CreateJob. Named TextureMorph_Render for the texture
+# build it performs. PDB: __imp__sub_82A69728, 46456 bytes.
+[functions."0x82A69728"]
+name = "TextureMorph_Render_82A69728"
+
+
+# Texture morph -- CPU-side texture compressor (Baked path). Called by
+# TextureMorph_Render (bl at 0x82A6A3F4); it takes the resolved source pixels
+# and packs them into a compact block format on the CPU (a 4-iteration block
+# loop feeding sub_8300BDF8 -> sub_8300BB78). NOTE: the recompiled body shows a
+# quantized/palette-style encode -- many 3-6 bit field extracts and 3 indexed
+# table lookups, and NO 5-bit (0x1F) DXT color masks -- so the plan's
+# "D3DFMT_DXT1/DXT2_3/DXN" label is an inference, not something the code spells
+# out; the safe description is a CPU quantizing texture compressor. This is the
+# step that reads GPU-resolved memory back on the CPU, which is why the
+# split-memory host shows black when it is not hooked. Named
+# TextureCompress_Quantized for the CPU quantizing compression. PDB:
+# __imp__sub_83008E98, 18173 bytes.
+[functions."0x83008E98"]
+name = "TextureCompress_Quantized_83008E98"
+
+
+# Texture morph -- GPU mip-chain builder (Realtime path). Called by
+# TextureMorph_Render (bl at 0x82A6A554); it takes a texture object, reads the
+# D3D texture at +4, gets the level count from ((tex+44)>>26)&0xF, and loops
+# over levels halving width/height ((w+1)>>1) while managing an 8200-byte-stride
+# mip-surface array -- i.e. it (re)generates the mip levels on the GPU. This is
+# the path the realtime mode takes instead of the CPU compress, so no CPU
+# readback of GPU-resolved memory is needed. Named TextureMips_BuildGPU for the
+# GPU mip generation. PDB: __imp__sub_821FC4A0, 6505 bytes.
+[functions."0x821FC4A0"]
+name = "TextureMips_BuildGPU_821FC4A0"

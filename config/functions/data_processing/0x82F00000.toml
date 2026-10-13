@@ -1,0 +1,21 @@
+# data-processing region 0x82F00000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# Process a very frequently-used structure (seven hundred and one hundred and one hundred and ninety-first form). It takes a structure and checks its state, with no external sub-operations. This is one of the most frequently-called helpers in the recompiled binary. 6 lines. 0 callees. 16 callers.
+[functions."0x82F279E0"]
+name = "ProcessAndProcessAndProcess991_82F279E0"
+
+[functions."0x82F279D8"]
+name = "RetConst1_82F279D8"
+
+[functions."0x82F04430"]
+name = "RetConst0_82F04430"
+
+[functions."0x82F2C2E8"]
+name = "Func_82F2C2E8"
+
+[functions."0x82F2C3C0"]
+name = "Func_82F2C3C0"

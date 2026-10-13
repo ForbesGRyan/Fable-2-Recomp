@@ -1,0 +1,1120 @@
+# data-processing region 0x82800000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# A process (a grow/allocate, with a size check and a complex computation, the sibling of ProcessSizeCompute_825BBAD0
+# / the caller of AllocateChecked_8264EFE0): (if a size (a value, a particular value, a particular size / a particular
+# allocation) is > a threshold (a constant, from a fixed .data address, a particular value, a particular threshold, a
+# particular size / a particular allocation), a particular threshold, a particular size) call a complex computation
+# (sub_82A97648, a complex computation, a particular computation / a particular operation, a particular size / a
+# particular allocation), and (otherwise) grow/allocate (a size, a particular size / a particular allocation, a
+# particular size / a particular allocation, a particular operation, calling AllocateChecked_8264EFE0, an allocation, a
+# particular allocation / a particular size, a particular size / a particular allocation), and store the result (a
+# value, a particular value, a particular size / a particular allocation, a particular operation, obj->4, obj->8, a
+# store, a particular value / a particular state, a particular size / a particular allocation, obj->12, a size, a
+# particular size / a particular allocation, a particular value / a particular state).
+
+# Args: obj (r3, r31, ->4 = a value, ->8 = a value, ->12 = a size, a particular structure, a grow / a range object, a
+# particular size / a particular allocation), size (r4, r30, a value, a particular value, a particular size / a
+# particular allocation), (more). It checks a size (r30, a value, a particular value, a particular size / a particular
+# allocation) against a threshold (r10, a constant, from a fixed .data address, a particular value, a particular
+# threshold, a particular size / a particular allocation): if the size is > the threshold (a particular threshold, a
+# particular size, a particular value, a particular state, a particular size / a particular allocation), it calls a
+# complex computation (sub_82A97648, a complex computation, a particular computation / a particular operation, a
+# particular size / a particular allocation, a particular state / a particular result); if the size is <= the
+# threshold (a particular threshold, a particular size, a particular value, a particular state, a particular size / a
+# particular allocation), it grows/allocates (a size, a particular size / a particular allocation, a particular size /
+# a particular allocation, a particular operation: it calls an allocation (AllocateChecked_8264EFE0, sub_8264EFE0, an
+# allocation, on a value (obj, r31, a particular structure, a grow / a range object, a particular size / a particular
+# allocation), and a (r30, a value, a particular value, a particular size / a particular allocation), a particular
+# allocation / a particular size, a particular size / a particular allocation), and computes a size (r10, a value, a
+# particular value, a particular size / a particular allocation, a particular size / a particular allocation), and a
+# size (r9, a value, a particular value, a particular size / a particular allocation, a particular size / a
+# particular allocation), and stores the result (obj->4, a store, a particular value / a particular state, a
+# particular size / a particular allocation, obj->8, a store, a particular value / a particular state, a particular
+# size / a particular allocation, obj->12, a size, a particular size / a particular allocation, a particular value / a
+# particular state). So it's a "process (a grow/allocate, with a size check and a complex computation: (if a size (a
+# value, a particular value, a particular size / a particular allocation) is > a threshold (a constant, from a fixed
+# .data address, a particular value, a particular threshold, a particular size / a particular allocation), a
+# particular threshold, a particular size) call a complex computation (sub_82A97648, a complex computation, a
+# particular computation / a particular operation, a particular size / a particular allocation), and (otherwise)
+# grow/allocate (a size, a particular size / a particular allocation, a particular size / a particular allocation, a
+# particular operation, calling AllocateChecked_8264EFE0, an allocation, a particular allocation / a particular size, a
+# particular size / a particular allocation), and store the result (a value, a particular value, a particular size / a
+# particular allocation, a particular operation, obj->4, obj->8, a store, a particular value / a particular state, a
+# particular size / a particular allocation, obj->12, a size, a particular size / a particular allocation, a
+# particular value / a particular state))" routine (a grow/allocate process, part of the 0x8282E cluster, a sibling of
+# ProcessSizeCompute_825BBAD0, a caller of AllocateChecked_8264EFE0). 73 lines, 2 callees (AllocateChecked_8264EFE0,
+# sub_82A97648). 10 callers: sub_82B13410, ProcessCount_82B728D8, sub_82B5EC80, sub_82832020, Construct16Byte2
+# _82A11180, sub_8217A1E0, sub_82A112B8, sub_821F01B8, sub_82214528, sub_82B13BB0 (siblings in the 0x82B13/0x82B72/0
+# x82B5E/0x82832/0x82A11/0x8217A/0x82A11/0x821F0/0x82214/0x82B13 clusters). The object's class (obj, ->4 = a value, ->
+# 8 = a value, ->12 = a size, a particular structure, a grow / a range object, a particular size / a particular
+# allocation, a particular value / a particular state) and the size's meaning (a value, a particular value, a
+# particular size / a particular allocation) aren't resolvable, so the name states the mechanism: a grow/allocate
+# process ((if a size (a value, a particular value, a particular size / a particular allocation) is > a threshold (a
+# constant, from a fixed .data address, a particular value, a particular threshold, a particular size / a particular
+# allocation), a particular threshold, a particular size) call a complex computation (sub_82A97648, a complex
+# computation, a particular computation / a particular operation, a particular size / a particular allocation), and
+# (otherwise) grow/allocate (a size, a particular size / a particular allocation, a particular size / a particular
+# allocation, a particular operation, calling AllocateChecked_8264EFE0, an allocation, a particular allocation / a
+# particular size, a particular size / a particular allocation), and store the result (a value, a particular value, a
+# particular size / a particular allocation, a particular operation, obj->4, obj->8, a store, a particular value / a
+# particular state, a particular size / a particular allocation, obj->12, a size, a particular size / a particular
+# allocation, a particular value / a particular state)).
+[functions."0x8282EFD8"]
+name = "ProcessGrowAllocate_8282EFD8"
+
+
+# A process (a dispatch, with a switch and a call, the sibling of AtomicDecrement3_82375F50 / ProcessDispatch
+# _82BCD7B0, the caller of sub_82815CB0 / sub_82188B88 / sub_82815E00): perform a dispatch (a dispatch, a
+# particular dispatch / a particular value, a particular size / a particular allocation, a particular operation, a
+# particular state / a particular result), and (in a switch, on a value (a->10, a type, a particular value, a
+# particular state, a particular size / a particular allocation), a switch on a type) take a path (a no-op / a
+# return, a particular state, a particular result, a particular size / a particular allocation), and (in paths) call
+# a process (sub_82815CB0, on a value, a particular process, a particular operation, a particular size / a
+# particular allocation, a particular state / a particular result), and a process (sub_82188B88, on a value, a
+# particular process, a particular operation, a particular size / a particular allocation, a particular state / a
+# particular result), and a process (sub_82815E00, on a value, a particular process, a particular operation, a
+# particular size / a particular allocation, a particular state / a particular result).
+
+# Args: obj (r3, a value), a (r4, ->10 = a type, a particular value, a particular state, a particular size / a
+# particular allocation, a dispatch object), (more). It performs a dispatch (a dispatch, a particular dispatch / a
+# particular value, a particular size / a particular allocation, a particular operation, a particular state / a
+# particular result). In the switch, on a value (r11, a->10, a type, a particular value, a particular state, a
+# particular size / a particular allocation), it takes a path: if the type is 6 (a particular state, a
+# particular value, a particular size / a particular allocation), it calls a process (sub_82815CB0, sub_82815CB0, a
+# process, on a value (obj, a value, a particular value, a particular size, a particular size / a
+# particular allocation), a particular process, a particular operation, a particular size / a
+# particular allocation, a particular state / a particular result); if the type is 2 (a particular state, a
+# particular value, a particular size / a particular allocation), it calls a process (sub_82188B88, sub_82188B88, a
+# process, on a value (obj, a value, a particular value, a particular size, a particular size / a
+# particular allocation), a particular process, a particular operation, a particular size / a
+# particular allocation, a particular state / a particular result); if the type is 7 (a particular state, a
+# particular value, a particular size / a particular allocation), it calls a process (sub_82815E00, sub_82815E00, a
+# process, on a value (obj, a value, a particular value, a particular size, a particular size / a
+# particular allocation), a particular process, a particular operation, a particular size / a
+# particular allocation, a particular state / a particular result); if the type is other (a particular state, a
+# particular value, a particular size / a particular allocation), it takes one path (a no-op / a return, a
+# particular state, a particular result, a particular size / a particular allocation). So it's a "process (a
+# dispatch, with a switch and a call: perform a dispatch (a dispatch, a particular dispatch / a
+# particular value, a particular size / a particular allocation, a particular operation, a
+# particular state / a
+# particular result), and (in a switch, on a value (a->10, a type, a
+# particular value, a
+# particular state, a particular size / a
+# particular allocation), a switch on a type) take a path (a no-op / a
+# return, a particular state, a
+# particular result, a particular size / a
+# particular allocation), and (in paths) call
+# a process (sub_82815CB0, on a value, a
+# particular process, a
+# particular operation, a particular size / a
+# particular allocation, a particular state / a
+# particular result), and a process (sub_82188B88, on a
+# value, a particular process, a
+# particular operation, a particular size / a
+# particular allocation, a particular state / a
+# particular result), and a process (sub_82815E00, on a
+# value, a particular process, a
+# particular operation, a particular size / a
+# particular allocation, a particular state / a
+# particular result))" routine (a dispatch process, part of the 0x82815 cluster, a sibling of
+# AtomicDecrement3_82375F50 and ProcessDispatch_82BCD7B0, a caller of sub_82815CB0, sub_82188B88, and
+# sub_82815E00). 29 lines, 3 callees (sub_82188B88, sub_82815CB0, sub_82815E00). No
+# direct callers (it's called via a vtable / it is registered-but-uncalled, part of the game's subsystems). The
+# object's class (obj, r3, a value, a particular value, a particular size / a
+# particular allocation, a
+# particular structure, a dispatch object, a
+# particular value /
+# a particular state) and the value's meaning (a, r4, ->10 = a type, a
+# particular value, a
+# particular state, a
+# particular size / a
+# particular allocation, a
+# dispatch object) aren't resolvable, so the name states the mechanism: a dispatch process (with a
+# switch and a call) (perform a dispatch (a dispatch, a particular dispatch / a
+# particular value, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a switch, on a value (a->10, a type, a
+# particular value, a
+# particular state, a
+# particular size / a
+# particular allocation), a switch on a type) take a path (a no-op / a
+# return, a particular state, a
+# particular result, a particular size / a
+# particular allocation), and (in paths) call
+# a process (sub_82815CB0, on a value, a
+# particular process, a
+# particular operation, a particular size / a
+# particular allocation, a particular state / a
+# particular result), and a process (sub_82188B88, on a
+# value, a particular process, a
+# particular operation, a particular size / a
+# particular allocation, a particular state / a
+# particular result), and a process (sub_82815E00, on a
+# value, a particular process, a
+# particular operation, a particular size / a
+# particular allocation, a particular state / a
+# particular result)). The "3" distinguishes it from ProcessDispatch_82BCD7B0 and ProcessDispatch2_82BCD9E8.
+[functions."0x82815C28"]
+name = "ProcessDispatch3_82815C28"
+
+
+# A process (a process, with a switch and a lookup, the sibling of ProcessDispatch_82BCD7B0 / ProcessDispatch3_82815C28,
+# the caller of ConstructRefCounted_8222CF18 / DestructRefCounted_82214F08 / ProcessToLower_821EEA00): do a process (a
+# process, a particular process, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a switch) switch on a type (a switch, a
+# particular switch / a
+# particular type, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, over type, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result), and (in a lookup) do a lookup (a lookup, a
+# particular lookup / a
+# particular value, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, over a table, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result), and store a value (obj->524 = r9->r7, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result).
+
+# Args: obj (r3, r31, ->524 = a field, a value, a particular value, a particular size / a
+# particular allocation, a
+# particular object), type (r4, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), (more). It does a process (a
+# process, a
+# particular process, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result). In the switch, it switches on a type (a
+# switch, a
+# particular switch / a
+# particular type, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, over type, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result). In the lookup, it does a lookup (a
+# lookup, a
+# particular lookup / a
+# particular value, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, over a table, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result). It stores a value (obj->524 = r9->r7, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result). So it's a "process (a
+# process, with a
+# switch and a
+# lookup: do a process (a process, a
+# particular process, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a switch) switch on a type (a switch, a
+# particular switch / a
+# particular type, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, over type, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result), and (in a lookup) do a lookup (a lookup, a
+# particular lookup / a
+# particular value, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, over a table, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result), and store a value (obj->524 = r9->r7, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result))" routine (a process routine, part of the 0x82816 cluster, a sibling of
+# ProcessDispatch_82BCD7B0 and ProcessDispatch3_82815C28, a caller of ConstructRefCounted_8222CF18, DestructRefCounted_82214F08,
+# and ProcessToLower_821EEA00). 172 lines, 5
+# callees (ConstructRefCounted_8222CF18, DestructRefCounted_82214F08, ProcessToLower_821EEA00, sub_821EC668, sub_82BFD780).
+# 2 callers: sub_82188B88, sub_828152D0 (processes, which
+# call this to do the process, a
+# particular size / a
+# particular allocation, a
+# particular operation). The object's class (obj, r31, ->524 = a field, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular object, a
+# particular value /
+# a particular state) and the value's meaning (type, r4, a value, a
+# particular value, a
+# particular size / a
+# particular allocation) aren't resolvable, so the name states the mechanism: a process (with a
+# switch and a
+# lookup) (do a process (a process, a
+# particular process, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a switch) switch on a type (a switch, a
+# particular switch / a
+# particular type, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, over type, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result), and (in a lookup) do a lookup (a lookup, a
+# particular lookup / a
+# particular value, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, over a table, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result), and store a value (obj->524 = r9->r7, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result)). The "4" distinguishes it from ProcessDispatch_82BCD7B0 and ProcessDispatch3_82815C28.
+[functions."0x828164E8"]
+name = "ProcessDispatch4_828164E8"
+
+
+# A process (a process, with a float operation, the sibling of ProcessFloatOp_82814A38 / Construct8_82814A38):
+# do a process (a process, a particular process, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a compute) do a compute (a
+# compute, a
+# particular compute / a
+# particular float, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, a float add, f10 = f2 + f4, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, f11 = f1 + f3, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a float sub, f13 = f12 - f4, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, f7 = f8 - f3, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, f6 = f9 - f13, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a float abs, f5 = fabs(f7), a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, f12 = f12 - f10, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation).
+
+# Args: a (r3, ->48 = a field, a value, a
+# particular object), f1 (a float), f2 (a float), f3 (a float), f4 (a float), (more). It does a process (a
+# process, a
+# particular process, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result). In the compute, it does a compute (a
+# compute, a
+# particular compute / a
+# particular float, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, a float add, f10 = f2 + f4, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, f11 = f1 + f3, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a float sub, f13 = f12 - f4, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, f7 = f8 - f3, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, f6 = f9 - f13, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a float abs, f5 = fabs(f7), a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, f12 = f12 - f10, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation). So it's a "process (a
+# process, with a
+# float operation: do a process (a process, a
+# particular process, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a compute) do a compute (a
+# compute, a
+# particular compute / a
+# particular float, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, a float add, f10 = f2 + f4, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, f11 = f1 + f3, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a float sub, f13 = f12 - f4, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, f7 = f8 - f3, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, f6 = f9 - f13, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a float abs, f5 = fabs(f7), a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, f12 = f12 - f10, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation))" routine (a process routine, part of the 0x82814 cluster, a sibling of
+# ProcessFloatOp_82814A38 and Construct8_82814A38). 234
+# lines, 0 callees. 3 callers: sub_82841120, sub_82815E00, sub_828152D0 (processes, which
+# call this to do the process, a
+# particular size / a
+# particular allocation, a
+# particular operation). The object's class (a, r3, ->48 = a field, a value, a
+# particular object, a
+# particular value /
+# a particular state) and the value's meaning (f1, a float; f2, a float; f3, a float; f4, a float) aren't
+# resolvable, so the name states the mechanism: a process (with a
+# float operation) (do a process (a process, a
+# particular process, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a compute) do a compute (a
+# compute, a
+# particular compute / a
+# particular float, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, a float add, f10 = f2 + f4, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, f11 = f1 + f3, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a float sub, f13 = f12 - f4, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, f7 = f8 - f3, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, f6 = f9 - f13, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a float abs, f5 = fabs(f7), a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, f12 = f12 - f10, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation)). The "82814BA8" refers to the address (a
+# particular address, a
+# particular size / a
+# particular allocation).
+[functions."0x82814BA8"]
+name = "ProcessFloatOp_82814BA8"
+
+
+# A process (a process, with a loop and a check, the sibling of ProcessVector_82814F40 / ProcessFloatOp_82814BA8):
+# do a process (a process, a particular process, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a loop) loop over a range (a loop, a particular loop / a
+# particular range, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, over a value (obj->64, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular loop / a
+# particular range, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a check) check a value (a value, a
+# particular value, a
+# particular size / a
+# particular allocation, obj->552, a
+# particular value, a
+# particular state / a
+# particular result), and (in a vector operation) do a vector operation (a
+# vector operation, a particular vector operation, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, lvx128, a
+# particular size / a
+# particular allocation, a
+# particular operation).
+
+# Args: obj (r3, ->552 = a field, a value, ->64 = a field, a value, a
+# particular object), a (r4, ->0 = a byte, ->1 = a byte, ->2 = a byte, ->3 = a
+# byte, a
+# particular object), (more). It does a process (a
+# process, a
+# particular process, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result). In the loop, it loops over a range (a
+# loop, a
+# particular loop / a
+# particular range, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, over a value (obj->64, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular loop / a
+# particular range, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result). In the check, it checks a value (a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, obj->552, a
+# particular value, a
+# particular state / a
+# particular result). In the vector operation, it does a vector operation (a
+# vector operation, a
+# particular vector operation, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, lvx128, a
+# particular size / a
+# particular allocation, a
+# particular operation). So it's a "process (a
+# process, with a
+# loop and a
+# check: do a process (a process, a
+# particular process, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a loop) loop over a range (a loop, a
+# particular loop / a
+# particular range, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, over a value (obj->64, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular loop / a
+# particular range, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a check) check a value (a value, a
+# particular value, a
+# particular size / a
+# particular allocation, obj->552, a
+# particular value, a
+# particular state / a
+# particular result), and (in a vector operation) do a vector operation (a
+# vector operation, a particular vector operation, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, lvx128, a
+# particular size / a
+# particular allocation, a
+# particular operation))" routine (a process routine, part of the 0x82814 cluster, a sibling of
+# ProcessVector_82814F40 and ProcessFloatOp_82814BA8). 269
+# lines, 0 callees. 2 callers: sub_828152D0, sub_823F80F0 (processes, which
+# call this to do the process, a
+# particular size / a
+# particular allocation, a
+# particular operation). The object's class (obj, r3, ->552 = a field, a value, ->64 = a field, a value, a
+# particular object, a
+# particular value /
+# a particular state; a, r4, ->0 = a byte, ->1 = a byte, ->2 = a byte, ->3 = a
+# byte, a
+# particular object) isn't resolvable, so the name states the mechanism: a process (with a
+# loop and a
+# check) (do a process (a process, a
+# particular process, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a loop) loop over a range (a loop, a
+# particular loop / a
+# particular range, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, over a value (obj->64, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular loop / a
+# particular range, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a check) check a value (a value, a
+# particular value, a
+# particular size / a
+# particular allocation, obj->552, a
+# particular value, a
+# particular state / a
+# particular result), and (in a vector operation) do a vector operation (a
+# vector operation, a
+# particular vector operation, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, lvx128, a
+# particular size / a
+# particular allocation, a
+# particular operation)). The "82814F40" refers to the address (a
+# particular address, a
+# particular size / a
+# particular allocation).
+[functions."0x82814F40"]
+name = "ProcessVector_82814F40"
+
+
+# A process (a process, with a loop and a check, the sibling of ProcessParse_82814F40 / ProcessVector_82814F40, the
+# caller of ScanLineLength_82B477F0 / ProcessLine_82B470D0 / Destruct4_8264EDF8): do a process (a process, a
+# particular process, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a loop) loop over a range (a loop, a particular loop / a
+# particular range, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, over b->0, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, b->36, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular loop / a
+# particular range, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a check) check a value (a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a value (r31, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), a
+# particular value, a
+# particular state / a
+# particular result), and (in a call) call a process (ScanLineLength_82B477F0, on a
+# value (b, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular call / a
+# particular process, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result).
+
+# Args: a (r3, r30, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), b (r4, r31, ->0 = a field, a value, ->36 = a field, a
+# value, a
+# particular object), c (r6, r27, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), d (r7, r26, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), (more). It does a process (a
+# process, a
+# particular process, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result). In the loop, it loops over a range (a
+# loop, a
+# particular loop / a
+# particular range, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, over b->0, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, b->36, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular loop / a
+# particular range, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result). In the check, it checks a value (a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a value (r31, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), a
+# particular value, a
+# particular state / a
+# particular result). In the call, it calls a process (ScanLineLength_82B477F0, on a
+# value (b, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular call / a
+# particular process, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result). So it's a "process (a
+# process, with a
+# loop and a
+# check: do a process (a process, a
+# particular process, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a loop) loop over a range (a loop, a
+# particular loop / a
+# particular range, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, over b->0, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, b->36, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular loop / a
+# particular range, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a check) check a value (a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a value (r31, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), a
+# particular value, a
+# particular state / a
+# particular result), and (in a call) call a process (ScanLineLength_82B477F0, on a
+# value (b, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular call / a
+# particular process, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result))" routine (a process routine, part of the 0x82815 cluster, a sibling of
+# ProcessParse_82814F40 and ProcessVector_82814F40, a caller of ScanLineLength_82B477F0, ProcessLine_82B470D0, and
+# Destruct4_8264EDF8). 596 lines, 19
+# callees (ConstructRefCounted_8222CF18, CopyAssign_RefCounted2_82265160, Ctype_Pred_Bit2_82CA6B10, Destruct4_8264EDF8,
+# DestructRefCounted_82214F08, HashLookupCompare_823F9620, HashLookup_823F74D0, ParseLine_82B47218,
+# ProcessAtomic2_82354880, ProcessDispatch4_828164E8, ProcessHashLookup2_823F75A0, ProcessLineParse_82B47148,
+# ProcessLine_82B470D0, ProcessVector2_8223BD98, ScanLineLength_82B477F0, ScanQuoteParity_82B47A40,
+# SkipCtypeChars_82B47610, ProcessFloatOp_82814BA8, ProcessVector_82814F40). No
+# direct callers (it's called via a vtable / it is registered-but-uncalled, part of the game's subsystems). The
+# object's class (a, r30, a value, a
+# particular value, a
+# particular size / a
+# particular allocation; b, r31, ->0 = a field, a value, ->36 = a field, a
+# value, a
+# particular object, a
+# particular value /
+# a particular state; c, r27, a value, a
+# particular value, a
+# particular size / a
+# particular allocation; d, r26, a value, a
+# particular value, a
+# particular size / a
+# particular allocation) isn't resolvable, so the name states the mechanism: a process (with a
+# loop and a
+# check) (do a process (a process, a
+# particular process, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a loop) loop over a range (a loop, a
+# particular loop / a
+# particular range, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, over b->0, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, b->36, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular loop / a
+# particular range, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a check) check a value (a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a value (r31, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), a
+# particular value, a
+# particular state / a
+# particular result), and (in a call) call a process (ScanLineLength_82B477F0, on a
+# value (b, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular call / a
+# particular process, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result)). The "828152D0" refers to the address (a
+# particular address, a
+# particular size / a
+# particular allocation).
+[functions."0x828152D0"]
+name = "ProcessParse_828152D0"
+
+
+# Processes a named-value payload. It reads the descriptor at b->4 and bails early when it is null or
+# its validity byte (->31) is zero; otherwise it loads a set of constant keys / a float from .data tables
+# and walks the payload starting at (b->4) + 32 (r29), hashing the name through HashCstring_82188CF0 and
+# routing the decoded fields through the 0x82816 sub-procedures (sub_82815F28 / sub_82816098 / sub_82816208
+# / sub_82816378). It is the heavier sibling of HashNamedEntry_82188B88 - both are driven by
+# ProcessDispatch3_82815C28 as the two branches of "process this named value" (name-hash vs. full payload
+# decode). Part of the 0x82815 dispatch cluster. 201 lines, 5 callees. 1 caller: ProcessDispatch3_82815C28.
+[functions."0x82815CB0"]
+name = "ProcessNamedValue_82815CB0"
+
+
+# Processes a named-value payload (the lighter twin of ProcessNamedValue_82815CB0). It reads the
+# descriptor at b->4 and bails when it is null or its validity count (->31) is not positive; otherwise
+# it reads the 16-bit field at ->28, tests its sign bit (r28 = value & 1), loads a small block of
+# constants from a .data table, and walks the payload starting at (b->4) + 32, routing values through
+# GetFlag_82226ED8 and ProcessFloatOp_82814BA8 (plus sub_823F8158). This is the second "decode this
+# named value" branch driven by ProcessDispatch3_82815C28.
+# Part of the 0x82815 dispatch cluster (sibling of ProcessNamedValue_82815CB0 / ProcessDispatch3_82815C28).
+# 174 lines, 3 callees (GetFlag_82226ED8, ProcessFloatOp_82814BA8, sub_823F8158). 1 caller:
+# ProcessDispatch3_82815C28.
+[functions."0x82815E00"]
+name = "ProcessNamedValue2_82815E00"
+
+
+# A float-distance threshold checker that measures a value against a reference, caches a vector, and sets a
+# flag. It takes an object (a) and a floating-point value (f1). It caches a 128-bit vector from a->64
+# (lvx/stvx128 through a stack slot) and a working float on the stack, then computes the absolute difference
+# between a reference float (f0, a .data constant / prior value) and the incoming value f1
+# (fabs(ref - value)). When that distance is within the .data threshold it leaves a "matched" flag set;
+# otherwise it clears it. Finally - when the flag is set - it records a->548 = 1 (a matched / in-range byte).
+# This is the "measure this float against the reference, cache the vector, flag it as in-range" routine for
+# the 0x82815 float-distance cluster, called only by ProcessNamedValue_82815CB0. Part of the 0x82815
+# float-distance cluster (sibling of ProcessNamedValue_82815CB0 / ProcessValueRange_82828E58). 229 lines, 0
+# direct callees (pure float + vector math). 1 caller: ProcessNamedValue_82815CB0.
+[functions."0x82815F28"]
+name = "ProcessFloatDistance_82815F28"
+
+
+# A processor that constructs a 12-byte value, then resets the structure's fields. It takes a structure (a: a
+# index at a->544, a flag at a->548, a value at a->560). When the index (a->544) is -1 it skips the construction.
+# Otherwise it resolves a .data entry and constructs the 12-byte value (Construct12Byte_825F7B10, using the entry's
+# offset + 144 and + 148 fields). It then resets the structure's fields (a->544 = -1, a->560 = -1, a->548 = 1). This
+# is the "construct this 12-byte value (when the index is valid) and reset the fields" routine for the 0x82814
+# construct cluster, used by 7 callers (HashNamedEntry_82188B88 and the 0x821C9/0x82283/0x823FB/0x82814/0x828F6 range).
+# Part of the 0x82814 construct cluster (sibling of Construct12Byte_825F7B10 / ConstructVectorStruct_8323F1B8). 65
+# lines, 1 callee. 7 callers.
+[functions."0x82814B38"]
+name = "ProcessAndResetFields_82814B38"
+
+
+# A processor that resolves the handler (from the .data entries, handling the different layouts), then finds the tree
+# leaf. It takes a value (a) and a value (b). It resolves the handler from the .data entries: when the primary handler
+# (the .data entry at the fixed address) is set and its flag is non-zero, it uses that handler (reading the value at
+# handler + 12 -> 96); otherwise it uses the alternate handler (the .data base + 8). When the resolved handler is null,
+# it takes the error path. It then performs the locked tree-leaf find (ProcessAndFindTreeLeafLocked_821F5B90). This is
+# the "resolve this handler (handling the primary-vs-alternate layout) and find the tree leaf" routine for the 0x82816
+# handler cluster, used by 3 callers (sub_82816EC0 and the 0x828186/0x828187 range). Part of the 0x82816 handler cluster
+# (sibling of ProcessAndFindTreeLeafLocked_821F5B90). 107 lines, 1 callee. 3 callers.
+[functions."0x82816E08"]
+name = "ProcessAndResolveHandler_82816E08"
+
+
+# A processor that computes with floating-point and vector operations. It takes a value. It loads floating-point constants from .data, sets up
+# local vector/float slots on the stack, and performs a series of floating-point and vector (lvlx/stvx) computations. It then resolves a handler
+# (ProcessAndResolveHandler_82816E08) and manages the associated refcounts and disposal (ProcessAndDecrementRefCount_8218DFF0,
+# ProcessAndDecrementDispose_821DE318, and sub_827DEAE0 / ProcessAndReplaceValue). This is the "compute this vector/floating-point value"
+# routine, part of the 0x82816 compute cluster. 417 lines. 4 callees (ProcessAndResolveHandler, ProcessAndDecrementRefCount, ProcessAndDecrementDispose,
+# sub_827DEAE0). 2 callers.
+[functions."0x82816EC0"]
+name = "ProcessAndComputeVector_82816EC0"
+
+
+# A processor that atomically increments a counter and parses/processes lines. It takes four values. It atomically increments a global
+# counter (a lwarx/stwcx. loop with the MSR saved and restored to guard the critical section), then performs a large amount of line and string
+# processing (ParseLine_82B47218, ProcessLineParse_82B47148, ProcessLine_82B470D0, ProcessString2_82B3A448, ProcessString3_82B3A560,
+# ScanLineLength_82B477F0, HashLookupCompare_823F9620, StrCmp_Signed_8226D7A8) and manages the associated refcounted objects (Construct16Byte,
+# ConstructRefCounted, CopyAssign_RefCounted2, Destruct4, DestructRefCounted). This is the "increment the counter and parse/process these lines"
+# routine, called only via the vtable (0 direct callers), part of the 0x82817 parse cluster. 554 lines. 16 callees. 0 direct callers (vtable
+# dispatch).
+[functions."0x82817D28"]
+name = "ProcessAndParseLines_82817D28"
+
+
+# A processor that computes a floating-point value into a structure. It takes a structure (a: fields at a->88, a->92, and a->188) and a value.
+# It stores a floating-point constant from .data into a->92 and the value into a->188. When the value is less than 18 it performs a series of
+# floating-point computations (sign-extending the value, converting to a double, rounding, and multiplying by another .data constant) and stores
+# the result into a->88; otherwise it skips that computation. It then resolves a handler (ProcessAndResolveHandler_82816E08) and manages the
+# associated refcounts and disposal (ProcessAndDecrementRefCount_8218DFF0, ProcessAndDecrementDispose_821DE318). This is the "compute this
+# floating-point value into the structure" routine, part of the 0x82818 compute cluster. 142 lines. 3 callees (ProcessAndResolveHandler,
+# ProcessAndDecrementRefCount, ProcessAndDecrementDispose). 3 callers.
+[functions."0x82818638"]
+name = "ProcessAndComputeFloat_82818638"
+
+
+# A processor that checks a type and dispatches processing. It takes a structure (a: a field at a->144) and a structure (b: fields at b->4,
+# b->8, and b->10). When b->10 is not 5 it takes a default path. When b->10 is 5 it checks b->8; when b->8 is non-zero it reads b->4 and
+# a->144 and performs further processing, otherwise it calls sub_82270B68 (a simple step) and returns. The processing involves hashing a string
+# (HashCstring_82188CF0), a linear search (LinearSearch_82284448), computing a float (ProcessAndComputeFloat_82818638), and managing the
+# associated refcounted objects (ConstructRefCounted_8222CF18, DestructRefCounted_82214F08). This is the "check this type and dispatch
+# processing" routine, called only via the vtable (0 direct callers), part of the 0x82818 process cluster. 450 lines. 9 callees. 0 direct
+# callers (vtable dispatch).
+[functions."0x828180A8"]
+name = "ProcessAndDispatch_828180A8"
+
+
+# A processor that performs linear searches and copies data. It takes two structures (a: a field at a->4, and b: a field at b->4). It reads b->4
+# and performs a linear search (LinearSearch_82284448) against a .data table; when the search succeeds it reads the result's +4 field. It then
+# checks the low byte of that value and performs a second linear search. It uses the results to copy data (ProcessAndCopyFloats_82BB42A0). This
+# is the "search these tables and copy the data" routine, part of the 0x82819 search-and-copy cluster. 334 lines. 2 callees (LinearSearch,
+# ProcessAndCopyFloats). 1 caller (ProcessAndDispatch_828180A8).
+[functions."0x82819130"]
+name = "ProcessAndSearchAndCopy_82819130"
+
+
+# A processor that constructs a node. It takes a value, a structure (a: a field at a->8), and three more values. It reads a->8; when the field
+# exceeds a threshold (0xFFFF | 65534) it sets a string (SetString_822F2020), processes the data (sub_826C3EF0 and sub_826C3FA8), and stores a .data
+# descriptor. It then constructs and inserts a list node (Allocate_OrDbgBreak_8221F388, ListNodeInsert_8234D268, and SpliceListNode_82301AE0),
+# performing further processing (sub_82171810 and sub_822F1F00). This is the "construct this node" routine, part of the 0x8282E node-construct
+# cluster. 340 lines. 8 callees (SetString, sub_826C3EF0, sub_826C3FA8, Allocate_OrDbgBreak, ListNodeInsert, SpliceListNode, sub_82171810,
+# sub_822F1F00). 3 callers.
+[functions."0x8282ED70"]
+name = "ProcessAndConstructNode_8282ED70"
+
+
+# A processor that processes the data (twenty-ninth form). It takes a value (a), a value (b), and a value (c). It processes the data (a, b, and c). This is the "process this data" routine (twenty-ninth form), part of the 0x8281A process cluster. 1270 lines. 31 callees (Allocate_OrDbgBreak, Allocate_SizeBucketed_Thunk, ChainSearch4, ChainSearch, Construct12Byte, Construct8, ConstructRefCounted, Destruct4, Free_SizeBucketed_Thunk, IsNonZero, Process12Byte, ProcessAndComputeVector, ProcessAndVcallAndDestruct3, ProcessAtomic2, ProcessLineParse, ProcessRecursive, ProcessString2, ProcessString3, Release_RefCounted, Release_RefCounted, ScanLineLength, StrCmp_Signed, ProcessAndAllocateAndProcess16, sub_8235E278, sub_823F89B0, sub_8246E8B0, sub_8254C780, sub_82A3B298, sub_82C62A88, sub_82C63FB8, and sub_82CBBB58). 1 caller (ProcessAndProcessAndProcess18).
+[functions."0x8281A568"]
+name = "ProcessAndProcessAndProcess29_8281A568"
+
+
+# A processor that processes the data (two hundred and seventy-eighth form). It takes a value (a). It processes the data (a). This is the "process this data" routine (two hundred and seventy-eighth form), part of the 0x8281A process cluster. 1687 lines. 5 callees (ConstructLinkedNode, ConstructRefCounted, CopyAssign_RefCounted, DestructRefCounted, and ProcessAndSearchAndProcess). 1 caller (ProcessAndProcessAndProcess271).
+[functions."0x8281AFB0"]
+name = "ProcessAndProcessAndProcess278_8281AFB0"
+
+
+# Process a structure by performing float operations (six hundred and thirty-third form). It takes a structure (a: fields at a->80 and a->548) and a float (b); it performs float operations on the structure's fields. This is the "process this data" routine (six hundred and thirty-third form), part of the 0x82815 process cluster. 58 lines. 0 callees. 0 callers.
+[functions."0x82815C58"]
+name = "ProcessAndProcessAndProcess633_82815C58"
+
+
+# Process a large data structure (seven hundred and eightieth form). It takes a structure, checks its state, and drives many sub-operations (CompareString, CopyStructure, Destruct4, DestructRefCounted, ProcessAndProcessAndProcess565, ProcessAndProcessAndProcess765, and more) based on the result. Part of the 0x82815 process cluster. 845 lines. 14 callees. 1 caller (ProcessAndProcessAndProcess631).
+[functions."0x828156B8"]
+name = "ProcessAndProcessAndProcess780_828156B8"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and thirtieth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82818 process cluster. 248 lines. 0 callees. 2 callers (ProcessAndProcessAndProcess814 and sub_82818398).
+[functions."0x82818FA0"]
+name = "ProcessAndProcessAndProcess1130_82818FA0"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and thirty-first form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess1130). Part of the 0x82818 process cluster. 332 lines. 1 callee. 0 callers.
+[functions."0x82818398"]
+name = "ProcessAndProcessAndProcess1131_82818398"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and thirty-second form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82818 process cluster. 88 lines. 0 callees. 0 callers.
+[functions."0x828185B0"]
+name = "ProcessAndProcessAndProcess1132_828185B0"
+
+
+# Process a structure by driving sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and twenty-sixth form). It takes a structure and drives sub-operations (ProcessAndProcessAndProcess640, sub_8229B5D0) based on the result. Part of the 0x82817 process cluster. 77 lines. 2 callees. 2 callers (sub_82817538 and sub_82817748).
+[functions."0x82817BC8"]
+name = "ProcessAndProcessAndProcess1226_82817BC8"
+
+
+# Destruct a refcounted object by dispatching (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and forty-third form). It takes a structure, decrements and disposes (ProcessAndDecrementDispose), releases a global reference (ReleaseGlobalRef), releases a refcounted object (Release_RefCounted), dispatches by type code (SwitchDispatch), and drives sub-operations (ProcessAndProcessAndProcess565, ProcessAndProcessAndProcess1226, ProcessAndProcessAndProcess1244) based on the result. This is a refcounted-object destroy/dispatch routine in the 0x82817 cluster. 316 lines. 7 callees. 1 caller (ProcessAndProcessAndProcess815).
+[functions."0x82817538"]
+name = "ProcessAndProcessAndProcess1243_82817538"
+
+
+# Destruct a refcounted object (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and forty-seventh form). It takes a structure, drives a sub-operation (ProcessAndProcessAndProcess1217), and releases a refcounted object (Release_RefCounted) based on the result. Part of the 0x82817 refcounted-object cluster. 271 lines. 2 callees. 1 caller (ProcessAndProcessAndProcess815).
+[functions."0x82817370"]
+name = "ProcessAndProcessAndProcess1247_82817370"
+
+
+# Process a structure by replacing a refcounted object (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and sixty-eighth form). It takes a structure, replaces a refcounted object (ProcessAndReplaceRefCounted), and drives a sub-operation (ProcessAndProcessAndProcess1666) based on the result. Part of the 0x82817 process cluster. 52 lines. 2 callees. 1 caller (ProcessAndProcessAndProcess1669).
+[functions."0x82817318"]
+name = "ProcessAndProcessAndProcess1668_82817318"
+
+
+# Process a large structure by copy-assigning a refcounted object (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and sixty-ninth form). It takes a structure, copy-assigns a refcounted object (CopyAssign_RefCounted), frees size-bucketed memory (Free_SizeBucketed), increments a counter (ProcessAndIncrementCounter), releases a global reference (ReleaseGlobalRef), and drives sub-operations (sub_82301D40, ProcessAndProcessAndProcess1667, sub_82816D20, ProcessAndProcessAndProcess1668) based on the result. Part of the 0x82817 process cluster. 126 lines. 8 callees. 2 callers (ProcessAndDispatch and ProcessAndParseLines).
+[functions."0x82817C50"]
+name = "ProcessAndProcessAndProcess1669_82817C50"
+
+
+# Process a structure by allocating fresh memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and one hundred and third form). It takes a structure, allocates fresh memory (Allocate_OrDbgBreak), and drives a sub-operation (ProcessAndProcessAndProcess1695) based on the result. This is a frequently-called helper in the 0x82816 process cluster. 133 lines. 2 callees. 9 callers.
+[functions."0x82816D20"]
+name = "ProcessAndProcessAndProcess1803_82816D20"
+
+
+# Process a very large data structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and one hundred and seventh form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess1009). Part of the 0x82816 process cluster. 324 lines. 1 callee. 1 caller (ProcessAndProcessAndProcess632).
+[functions."0x828167A0"]
+name = "ProcessAndProcessAndProcess1807_828167A0"
+
+
+# Process a very large data structure by constructing a 9-byte object (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and two hundred and fifteenth form). It takes a structure, constructs a 9-byte object (Construct9), copies a refcounted object (CopyAssign_RefCounted), copies a structure (CopyStructure), destructs a refcounted object (DestructRefCounted), constructs a string (ProcessConstructString), processes a lower-case string (ProcessToLower), processes a vector (ProcessVector2), releases a refcounted object (Release_RefCounted), sets a string buffer (SetStringBuffer), and drives sub-operations (ProcessAndProcessAndProcess1226, ProcessAndProcessAndProcess565) based on the result. Part of the 0x82817 process cluster. 699 lines. 11 callees. 1 caller (ProcessAndProcessAndProcess815).
+[functions."0x82817748"]
+name = "ProcessAndProcessAndProcess1922_82817748"
+
+
+# Process a structure by checking its state and driving many sub-operations (two thousand four hundred and forty-eighth form). It takes a structure (a: fields at a->108, a->180, and a->80); it checks the structure's state, and drives many sub-operations (ReleaseGlobalRef, ProcessAndDecrementRefCount, ProcessAndDecrementDispose, ProcessAndIncrementAndProcess, ProcessAndIncrementCounter, ProcessAndReplaceValue, ProcessAndResolveHandler, ProcessAndProcessAndProcess2256, and more) based on the result. This is the "process this data" routine (two thousand four hundred and forty-eighth form), part of the 0x82818 process cluster. 371 lines. 10 callees. 1 caller (ProcessAndProcessAndProcess814).
+[functions."0x82818728"]
+name = "ProcessAndProcessAndProcess2447_82818728"
+
+
+# Process a structure by checking its state and driving many sub-operations (two thousand four hundred and forty-ninth form). It takes a structure (a: fields at a->108, a->180, a->160, a->168, a->164, and a->112); it checks the structure's state, and drives many sub-operations (ConstructRefCounted, ReleaseGlobalRef, ProcessAndFindSubstring, ProcessAndIncrementAndProcess, ProcessAndIncrementCounter, ProcessAndReplaceValue, GetSubObjField4, ProcessAndProcessAndProcess1726, ProcessAndProcessAndProcess1837, ProcessAndProcessAndProcess1958, ProcessAndProcessAndProcess2256, and more) based on the result. This is the "process this data" routine (two thousand four hundred and forty-ninth form), part of the 0x82818 process cluster. 951 lines. 16 callees. 1 caller (ProcessAndProcessAndProcess814).
+[functions."0x82818988"]
+name = "ProcessAndProcessAndProcess2448_82818988"

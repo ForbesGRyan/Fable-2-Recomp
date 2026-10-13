@@ -1,0 +1,83 @@
+# camera functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# ===========================================================================
+# Camera system (per-frame camera update)
+#
+# The runtime "Camera" object is the C++ class CECCamera (registration block
+# at 0x820B28E4 in the guest image carries the class name and the full method
+# list: GetFOV/SetFOV/SetFOVCut, GetRoll/SetRoll/SetRollCut, GetBlur/SetBlur/
+# SetBlurCut, SetFullScreenMotionBlurCut, SetAngles/SetAnglesCut, MoveTo/
+# MoveToCut, AddCameraShake, SetDOF, ...). The per-frame step below eases the
+# camera's current values toward their targets and hands the result to the
+# renderer; the PDB only has __imp__ thunks (no real names), so these are
+# best-effort names from reading the recompiled code + the image's class data.
+# ===========================================================================
+
+# The camera's per-frame update. Args: camera (r3, the CECCamera object),
+# flag (r4 low byte, a computed clz bit, not a plain bool). Body is a textbook
+# eased-camera frame step, all "current -> target" pairs scaled by a per-frame
+# coefficient (camera +0xE4):
+#   - vector lerp  result = lerp(cam+0x60, cam+0x90, cam+0xE4), then
+#     sub_822CBDC8(result)  -- a transform/interface op on the lerped vector
+#   - CECCameraUpdateRoll_822A4A68 advances the rotation state (cam+0xA0..0xB8)
+#     each frame using the 0xE4 coefficient (see that entry below)
+#   - 11 dt-integrated scalar channels: current += (target - current)*0xE4
+#     for (24/28),(32/56),(36/60),(40/64),(44/68),(48/72),(52/76),(80/84),
+#     (196/200),(204/208),(212/216)  -- angles, position, zoom, DOF, blur
+#   - ease/snap split: a channel snaps straight to its target when 0xE4 >= 1.0
+#     (global constant at 0x820994C0, image value 1.0) else it eases -- the
+#     "...Cut" vs plain setter semantics
+#   - renderer hand-off (gated by the flag): copies the integrated values to
+#     the global app hub *(0x8221B620): 6+1 floats into a state object,
+#     vtable[5] update call, and 3 floats into the render object at
+#     0x74/0x78/0x7C (the 0x7C write IS the full-screen motion blur; the
+#     disable-motion-blur hook zeroes the lfs at 0x822A49E8 inside this fn)
+#   - frame ramp: decrements an integer frame counter (cam+0xDC) each call and
+#     recomputes 0xE4 = cam+0xE8 / (cam+0xE8 - remaining) -- a per-frame
+#     countdown for multi-frame camera moves (MoveTo(duration) style)
+# The counter-decrement + dt-integration on every call is the "per-frame" tell:
+# a frame-countdown ramp is only correct if this runs exactly once per frame
+# per camera. Named CECCameraUpdateFrame (not just Update/Lerp/Tween) because
+# it is the stateful per-frame step of the specific CECCamera class; see the
+# section header for the class-name evidence.
+[functions."0x822A47C0"]
+name = "CECCameraUpdateFrame_822A47C0"
+
+
+# Rotation/roll easing sub-step called by CECCameraUpdateFrame. Args: camera
+# (r3). Reads the 32-byte rotation state at cam+0xA0..0xB8 and advances it with
+# the same 1.0 threshold used for the scalar channels (global at 0x820994C0),
+# i.e. it eases the view roll/rotation toward its target each frame. Named
+# CECCameraUpdateRoll for the rotation channel it advances.
+[functions."0x822A4A68"]
+name = "CECCameraUpdateRoll_822A4A68"
+
+
+# Camera-controller update (one of two per-frame camera drivers). Args: r3 =
+# the controller. Computes the frame delta-time from GetTimebase_8221EB58
+# ((timebase - t0)/t1), resolves the active camera from the manager's object
+# array (entries are {tag, obj} pairs; tag >= 87 == camera; picked by an active
+# slot byte or a binary search for the last tag-87 entry), adds the dt to
+# cam+0xC0, and calls CECCameraUpdateFrame on up to two cameras (two call
+# sites: active + secondary/interesting). Named UpdateCamerasTimebase to reflect
+# that it derives the frame dt from the timebase clock before stepping the
+# cameras (its twin sub_824246F0 derives dt differently -- see
+# UpdateCamerasGlobalDt). PDB: __imp__sub_821B9320, 12234 bytes.
+[functions."0x821B9320"]
+name = "UpdateCamerasTimebase_821B9320"
+
+
+# Camera-controller update (the other of the two per-frame camera drivers). Same
+# shape as UpdateCamerasTimebase but sources the frame delta-time from the
+# global dt float at 0x820994B4 (image initial value 0.0) instead of
+# GetTimebase: it copies that dt into this+84/this+88, primes the camera's frame
+# ramp (stfs 0xE4; stb 0x5C; stw 0xDC/0xE8), then calls CECCameraUpdateFrame on
+# up to two cameras (tag-87 active + secondary selection). Named
+# UpdateCamerasGlobalDt for the dt source that distinguishes it from its twin.
+# PDB: __imp__sub_824246F0, 8869 bytes.
+[functions."0x824246F0"]
+name = "UpdateCamerasGlobalDt_824246F0"

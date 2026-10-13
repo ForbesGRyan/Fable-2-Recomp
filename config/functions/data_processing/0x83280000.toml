@@ -1,0 +1,276 @@
+# data-processing region 0x83280000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# Vtable method of the 0x832B family (NO static call sites — reached only
+# through virtual dispatch). Args: r3 = the sub-object at base+852, r4 = a
+# 32-bit value. base = r3 - 852. If base->276 (the entry count) is non-zero
+# it runs CriticalSection_ProcessEntryArray_832B3700(base), then unconditionally
+# stores r4 into base->848 (a result/status word — no in-family reader found,
+# so it is likely consumed by the same family's other vtable methods or
+# exported state). ~15 insns.
+[functions."0x832B3D90"]
+name = "EntryArray_ProcessAndStoreResult_832B3D90"
+
+
+# Time-gated tick of a ring-buffer object (vtable method, NO static call
+# sites — invoked through virtual dispatch). Args: obj (r3). Guards:
+# obj->212 == 0, obj->56 != 0, obj->208 != 0. Layout: obj->188 = capacity,
+# obj->216 = write cursor, obj->228 = read cursor, obj->192 = watermark W,
+# obj->184 = buffer pointer P, obj->244 = fill byte, obj->236 = last tick
+# time, obj->240 = tick rate limit (ms), obj->92 = consumer sub-object S.
+# Flow: now = GetElapsedMsSinceStart(); if (now - obj->236 > 12) skip the
+# space check (starvation override). free = (write - read) mod capacity
+# (standard formula, both branches verified). If free >= 1024 the candidate
+# length is (free - 1024) & ~3 (keeps a 1024-byte reserve, 4-aligned), else
+# 0. Watermark gates vs obj->192/obj->232 (flag obj->220 bypasses). When it
+# passes: obj->84 = 1, then MemSet (sub_82CA3190) fills 2*W bytes at
+# P + write with byte obj->244 (two chunks if it wraps capacity), and the
+# write cursor advances 2*W mod capacity. Then a probe loop calls
+# sub_82CD2DF8(S, &out) (three probes, looping while the out-difference is
+# >= 1024) and stores the final probe result into the READ cursor (obj->228)
+# plus now into obj->236; if (now - old236 >= obj->240) it re-enters the
+# fill step, else re-checks free space. Returns 1 (acted) or 0 (skipped).
+# Hypothesis: 8-bit audio silence padding (fill byte would be 0x80 = signed
+# silence; the sibling family does XOR-0x80 sample conversion and the 12 ms
+# / 1024-byte constants fit sample streaming) — but the fill byte and the
+# consumer probe are runtime values, so the name stays mechanism-based.
+[functions."0x832B68A0"]
+name = "RingBuffer_TickPadWithFillByte_832B68A0"
+
+
+# Priority-ordered multi-mutex arbitration loop. Args: manager M (r3).
+# Layout: M->0 = state (must be 1 to accept requests), M->24 = pending-list
+# head, M->28 = monotonically increasing generation counter (incremented
+# once per entry). Node layout (16-byte stride vtable at node->0..20, next
+# at node->8): node->4 = mutex handle, node->12 = priority, node->16 =
+# "prepare" vtable slot, node->20 = "granted" vtable slot. Loop: while
+# M->0 == 1 and the pending list is non-empty, drain every pending node
+# (linked through node->0): priority = vcall node->16(node, M->28);
+# node->12 = priority; priority 0 = skip; otherwise insert the node into an
+# acquired list sorted by DESCENDING priority (higher priority toward the
+# head, linked through node->8). After each drain pass, build stack arrays
+# (cap 64): handles[i] = node->4, objs[i] = node, then
+# ret = KeWaitForMultipleObjects_NoApcRetry(count, handles, mode=0
+# (WaitAll), timeout=1ms). If ret >= count (timeout/APC) the loop drains
+# again; on success (ret = 0) it runs the "granted" callback vcall
+# objs[ret]->20(objs[ret]) and immediately MutexUnlock_ReleaseMutant
+# (handles[ret]) — the highest-priority requester is notified and its gate
+# released, while the remaining acquired mutexes stay held (released by
+# sibling family methods). Sole caller: sub_832B8DA8, a sibling method that
+# first locks M->8 and M->20 (MutexLock_WaitInfinite) and gates the call on
+# M->24 != 0, i.e. the pending head — confirming the layout.
+[functions."0x832B8C28"]
+name = "PriorityArbitrate_PendingMutexRequests_832B8C28"
+
+
+# A consumer that advances a read position by a given amount. It takes a structure (a: a total size at a->188, a flag at a->208, an
+# extra field at a->212, an offset at a->216, and a remaining length at a->220) and an amount. It advances the offset by the amount
+# (wrapping around past the total size when it goes past the end) and decrements the remaining length by the amount. When the remaining
+# length reaches zero (and the a->208 and a->212 fields are clear), it performs a follow-up through sub_832B6A98. This is the
+# "consume this many bytes and advance the read position" routine, called only via the vtable (0 direct callers), part of the 0x832B6
+# data-access cluster. 1 callee (sub_832B6A98). 0 direct callers (vtable dispatch).
+[functions."0x832B6C38"]
+name = "ConsumeAndAdvance_832B6C38"
+
+
+# A processor that processes the data (two hundred and fourth form). It takes a structure (a: fields at a->0, a->4, a->8, and a->20). It processes the data (a). This is the "process this data" routine (two hundred and fourth form), part of the 0x832B8 process cluster. About 100 lines. 3 callees (MutexLock_WaitInfinite, MutexUnlock_ReleaseMutant, and PriorityArbitrate_PendingMutexRequests). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x832B8DA8"]
+name = "ProcessAndProcessAndProcess204_832B8DA8"
+
+
+# Issue a virtual call on a structure, then store a value in field 248 (a setter routine). It takes a structure (a: fields at a->-596, a->-244, and a->248) and a value (b); it issues a virtual call on the structure (via a->-244) and then stores b in a->248. This is a "set a field after a virtual call" routine. 46 lines. 0 callees (uses an indirect call). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x832B3C88"]
+name = "SetFieldAfterVirtualCall_832B3C88"
+
+
+# Unlock a mutex-protected flag by releasing the mutex (a mutex-unlock routine). It takes a structure (a: fields at a->260 and a->264); if the pointer (a->260) is valid and the flag (a->264) is nonzero, it releases the mutex (MutexUnlock_ReleaseMutant). This is the "unlock a mutex-protected flag" routine, counterpart to CheckMutexFlag. 19 lines. 1 callee (MutexUnlock_ReleaseMutant). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x832B3D50"]
+name = "UnlockMutexFlag_832B3D50"
+
+
+# Large processor that issues a virtual call on a structure and drives initialization (four hundred and ninety-fifth form). It takes a structure (a: fields at a->44, a->32, a->80, and a->248); it checks the structure's state, and — when ready — issues a virtual call on a->248, then drives the initialization routine. This is the "process this data" routine (four hundred and ninety-fifth form), part of the 0x832B8 process cluster. 368 lines. 2 callees (ProcessAndInitializeAndProcess and sub_832B8168). 1 caller (sub_832B8960).
+[functions."0x832B86F8"]
+name = "ProcessAndProcessAndProcess495_832B86F8"
+
+
+# Process an entry array in a critical section with mutex protection (four hundred and ninety-ninth form). It takes a structure (a: fields at a->692, a->236, a->28, and a->704); it checks the structure's state, and — when ready — locks the mutex, processes the entry array in a critical section, and unlocks the mutex. This is the "process this data" routine (four hundred and ninety-ninth form), part of the 0x832B6 process cluster. 263 lines. 3 callees (CriticalSection_ProcessEntryArray, MutexLock_WaitInfinite, and MutexUnlock_ReleaseMutant). 1 caller (sub_82A3BC58).
+[functions."0x832B6110"]
+name = "ProcessAndProcessAndProcess499_832B6110"
+
+
+# Process two structures by performing bit shifting and OR operations (five hundred and thirty-sixth form). It takes a structure (a: fields at a->0, a->4, and a->40), a structure (b: fields at b->8, b->0, and b->4), and a value (c); it performs bit shifting and OR operations on the structures, combining their bit fields. This is the "process this data" routine (five hundred and thirty-sixth form), part of the 0x832B9 process cluster. 419 lines. 1 callee (MemSet_SdkRuntime). 1 caller (sub_832BB018).
+[functions."0x832B9DB8"]
+name = "ProcessAndProcessAndProcess536_832B9DB8"
+
+
+# Process two structures by performing bit shifting and OR operations (five hundred and thirty-seventh form). It takes a structure (a: fields at a->0, a->4, and a->40), a structure (b: fields at b->8, b->0, and b->4), and a value (c); it performs bit shifting and OR operations on the structures, combining their bit fields. This is the "process this data" routine (five hundred and thirty-seventh form), part of the 0x832BA process cluster. 364 lines. 1 callee (MemSet_SdkRuntime). 1 caller (sub_832BB018).
+[functions."0x832BAA28"]
+name = "ProcessAndProcessAndProcess537_832BAA28"
+
+
+# Process two structures by performing bit shifting and AND/OR operations (five hundred and thirty-eighth form). It takes a structure (a: fields at a->0, a->4, and a->40) and a structure (b: fields at b->8, b->0, and b->4); it performs bit shifting and AND/OR operations on the structures, combining their bit fields. This is the "process this data" routine (five hundred and thirty-eighth form), part of the 0x832BA process cluster. 477 lines. 0 callees. 1 caller (sub_832BB018).
+[functions."0x832BACB8"]
+name = "ProcessAndProcessAndProcess538_832BACB8"
+
+
+# Process structures by performing complex bit manipulation operations (five hundred and eighty-second form). It takes a structure (a: fields at a->0, a->4, and a->40), a structure (b: fields at b->8, b->0, and b->4), and a value (c); it performs complex bit manipulation operations on the structures. This is the "process this data" routine (five hundred and eighty-second form), part of the 0x832BA process cluster. Large. 1 callee (MemSet_SdkRuntime). 0 callers.
+[functions."0x832BA368"]
+name = "ProcessAndProcessAndProcess582_832BA368"
+
+
+# Process structures by performing complex bit manipulation operations (five hundred and eighty-third form). It takes a structure (a: fields at a->0, a->4, and a->40), a structure (b: fields at b->8, b->0, and b->4), and a value (c); it performs complex bit manipulation operations on the structures. This is the "process this data" routine (five hundred and eighty-third form), part of the 0x832BA process cluster. Large. 1 callee (MemSet_SdkRuntime). 1 caller (sub_832BB018).
+[functions."0x832BA608"]
+name = "ProcessAndProcessAndProcess583_832BA608"
+
+
+# Process structures by performing complex bit manipulation operations (five hundred and eighty-fourth form). It takes a structure (a: fields at a->0, a->4, and a->40) and a structure (b: fields at b->8, b->0, and b->4); it performs complex bit manipulation operations on the structures. This is the "process this data" routine (five hundred and eighty-fourth form), part of the 0x832BA process cluster. Large. 0 callees. 1 caller (sub_832BB018).
+[functions."0x832BA838"]
+name = "ProcessAndProcessAndProcess584_832BA838"
+
+
+# Process a structure by performing float operations (six hundred and thirty-ninth form). It takes a structure (a: fields at a->72, a->8, a->104, a->40, a->76, a->12, a->108, a->44, and a->4) and a structure (b: fields at b->4 and b->8); it performs float operations on the structures. This is the "process this data" routine (six hundred and thirty-ninth form), part of the 0x832BF process cluster. Large. 0 callees. 3 callers (sub_832BFA70, sub_832BDC90, and sub_832BF9D0).
+[functions."0x832BFB18"]
+name = "ProcessAndProcessAndProcess639_832BFB18"
+
+
+# Process a structure by performing bit manipulation (six hundred and fifty-fourth form). It takes a structure (a: fields at a->0, a->4, and a->8) and a value (b); it performs bit manipulation on the structure's fields. This is the "process this data" routine (six hundred and fifty-fourth form), part of the 0x832B9 process cluster. Large. 1 callee. 1 caller (sub_832BB018).
+[functions."0x832B95B0"]
+name = "ProcessAndProcessAndProcess654_832B95B0"
+
+
+# Process a large data structure (seven hundred and ninety-seventh form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x832BF process cluster. 778 lines. 0 callees. 2 callers (sub_832BF9D0 and sub_832BFA70).
+[functions."0x832BFF28"]
+name = "ProcessAndProcessAndProcess797_832BFF28"
+
+
+# Process a large data structure (seven hundred and one hundred and fifty-third form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x832BF process cluster. 537 lines. 0 callees. 3 callers.
+[functions."0x832BF218"]
+name = "ProcessAndProcessAndProcess853_832BF218"
+
+
+# Process a structure by driving sub-operations (seven hundred and one hundred and seventy-ninth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess639, ProcessAndProcessAndProcess797, sub_832C0440, sub_832C05C8) based on the result. Part of the 0x832BF process cluster. 97 lines. 4 callees. 3 callers.
+[functions."0x832BF9D0"]
+name = "ProcessAndProcessAndProcess879_832BF9D0"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and thirty-first form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x832B9 process cluster. 89 lines. 0 callees. 1 caller (ProcessAndProcessAndProcess654).
+[functions."0x832B9518"]
+name = "ProcessAndProcessAndProcess931_832B9518"
+
+
+# Process a large data structure (seven hundred and one hundred and one hundred and sixty-third form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x832BF process cluster. 629 lines. 0 callees. 3 callers (sub_832BECC0, sub_832BED90, sub_832BEFC0).
+[functions."0x832BF5A0"]
+name = "ProcessAndProcessAndProcess963_832BF5A0"
+
+
+# Process a structure by driving sub-operations (seven hundred and one hundred and one hundred and one hundred and sixth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess639, ProcessAndProcessAndProcess797, sub_832C0440, sub_832C05C8) based on the result. Part of the 0x832BF process cluster. 101 lines. 4 callees. 2 callers (sub_832BED90 and sub_832BEFC0).
+[functions."0x832BFA70"]
+name = "ProcessAndProcessAndProcess1006_832BFA70"
+
+
+# Process a structure by driving sub-operations (seven hundred and one hundred and one hundred and one hundred and ninety-sixth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess853, sub_832BECC0, ProcessAndProcessAndProcess1097) based on the result. Part of the 0x832BE process cluster. 128 lines. 3 callees. 2 callers (sub_832BDC90 and sub_832BECC0).
+[functions."0x832BEBE8"]
+name = "ProcessAndProcessAndProcess1096_832BEBE8"
+
+
+# Process a large data structure (seven hundred and one hundred and one hundred and one hundred and ninety-seventh form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess1006, ProcessAndProcessAndProcess853, ProcessAndProcessAndProcess879, ProcessAndProcessAndProcess963) based on the result. Part of the 0x832BE process cluster. 316 lines. 4 callees. 2 callers (sub_832BDC90 and ProcessAndProcessAndProcess1096).
+[functions."0x832BED90"]
+name = "ProcessAndProcessAndProcess1097_832BED90"
+
+
+# Process an enormous data structure by dispatching (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and fifty-third form). It takes a structure, checks its state, and drives many sub-operations (ProcessAndProcessAndProcess509, ProcessAndProcessAndProcess535, ProcessAndProcessAndProcess536, ProcessAndProcessAndProcess537, ProcessAndProcessAndProcess538, ProcessAndProcessAndProcess539, ProcessAndProcessAndProcess542, ProcessAndProcessAndProcess583, ProcessAndProcessAndProcess584, ProcessAndProcessAndProcess654, sub_832C23A8) based on the result. This is the third-largest function in the recompiled binary, a massive dispatcher in the 0x832BB/0x832C cluster. 4766 lines. 11 callees. 1 caller (sub_832BD3E8).
+[functions."0x832BB018"]
+name = "ProcessAndProcessAndProcess1253_832BB018"
+
+
+# Process a large data structure by zeroing memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and ninety-fifth form). It takes a structure, zeroes memory (MemSet_SdkRuntime), and checks its state. Part of the 0x832B7 process cluster. 441 lines. 1 callee. 1 caller (sub_832B7620).
+[functions."0x832B7318"]
+name = "ProcessAndProcessAndProcess1595_832B7318"
+
+
+# Process a large structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and ninety-sixth form). It takes a structure, checks its state, and drives sub-operations (sub_832BD9B0, sub_832BDBA0, ProcessAndProcessAndProcess1597, ProcessAndProcessAndProcess1602) based on the result. Part of the 0x832BD process cluster. 309 lines. 4 callees. 1 caller (sub_832B7620).
+[functions."0x832BD7B0"]
+name = "ProcessAndProcessAndProcess1596_832BD7B0"
+
+
+# Process a very large data structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and ninety-seventh form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess1096, ProcessAndProcessAndProcess1097, ProcessAndProcessAndProcess639, ProcessAndProcessAndProcess879, ProcessAndProcessAndProcess1598, ProcessAndProcessAndProcess1599, ProcessAndProcessAndProcess1600, sub_832C0440) based on the result. This is a dispatcher in the 0x832BD process cluster. 557 lines. 8 callees. 1 caller (ProcessAndProcessAndProcess1596).
+[functions."0x832BDC90"]
+name = "ProcessAndProcessAndProcess1597_832BDC90"
+
+
+# Process a very large data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and ninety-eighth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x832BD process cluster. 812 lines. 0 callees. 1 caller (ProcessAndProcessAndProcess1597).
+[functions."0x832BDFD8"]
+name = "ProcessAndProcessAndProcess1598_832BDFD8"
+
+
+# Process a very large data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and ninety-ninth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x832BE process cluster. 1052 lines. 0 callees. 1 caller (ProcessAndProcessAndProcess1597).
+[functions."0x832BE4F8"]
+name = "ProcessAndProcessAndProcess1599_832BE4F8"
+
+
+# Process a structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundredth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess1096, ProcessAndProcessAndProcess963, ProcessAndProcessAndProcess1601) based on the result. Part of the 0x832BE process cluster. 124 lines. 3 callees. 2 callers (ProcessAndProcessAndProcess1096 and ProcessAndProcessAndProcess1597).
+[functions."0x832BECC0"]
+name = "ProcessAndProcessAndProcess1600_832BECC0"
+
+
+# Process a large structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and first form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess1006, ProcessAndProcessAndProcess853, ProcessAndProcessAndProcess879, ProcessAndProcessAndProcess963) based on the result. Part of the 0x832BE process cluster. 339 lines. 4 callees. 1 caller (ProcessAndProcessAndProcess1600).
+[functions."0x832BEFC0"]
+name = "ProcessAndProcessAndProcess1601_832BEFC0"
+
+
+# Process a structure by processing an entry array (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and seventy-first form). It takes a structure, processes an entry array (CriticalSection_ProcessEntryArray), and gets the elapsed milliseconds since start (GetElapsedMsSinceStart). This is a frequently-called helper in the 0x832B3 process cluster. 173 lines. 2 callees. 3 callers.
+[functions."0x832B39F8"]
+name = "ProcessAndProcessAndProcess1671_832B39F8"
+
+
+# Process a structure by zeroing memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and seventy-third form). It takes a structure, zeroes memory (MemSet_SdkRuntime), and drives a sub-operation (sub_832B64D0) based on the result. Part of the 0x832B5 process cluster. 172 lines. 2 callees. 1 caller (ProcessAndProcessAndProcess1675).
+[functions."0x832B50C0"]
+name = "ProcessAndProcessAndProcess1673_832B50C0"
+
+
+# Process a large structure by processing an entry array (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and seventy-fourth form). It takes a structure, processes an entry array (CriticalSection_ProcessEntryArray), and gets the elapsed milliseconds since start (GetElapsedMsSinceStart). Part of the 0x832B5 process cluster. 265 lines. 2 callees. 1 caller (ProcessAndProcessAndProcess1675).
+[functions."0x832B51F0"]
+name = "ProcessAndProcessAndProcess1674_832B51F0"
+
+
+# Process a large data structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and seventy-fifth form). It takes a structure, delays (DelayZero), gets the current time (GetCurrentTimeMs), waits on a mutex (MutexLock_WaitInfinite), releases a mutex (MutexUnlock_ReleaseMutant), and drives sub-operations (GetElapsedMsSinceStart, ProcessAndProcessAndProcess1673, ProcessAndProcessAndProcess1674, sub_832B53E0, ProcessAndProcessAndProcess1676) based on the result. This is a dispatcher in the 0x832B5 process cluster. 385 lines. 9 callees. 2 callers (ProcessAndProcessAndProcess1672 and sub_832B5C18).
+[functions."0x832B5530"]
+name = "ProcessAndProcessAndProcess1675_832B5530"
+
+
+# Process a very large data structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and seventy-sixth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess1253, ProcessAndProcessAndProcess878) based on the result. Part of the 0x832BD process cluster. 510 lines. 2 callees. 2 callers (ProcessAndProcessAndProcess1675 and sub_832B57E8).
+[functions."0x832BD3E8"]
+name = "ProcessAndProcessAndProcess1676_832BD3E8"
+
+
+# Process a structure by getting the elapsed time (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and seventy-seventh form). It takes a structure and gets the elapsed milliseconds since start (GetElapsedMsSinceStart). This is a frequently-called helper in the 0x832B4 process cluster. 168 lines. 1 callee. 2 callers (ProcessAndProcessAndProcess1672 and ProcessAndProcessAndProcess1678).
+[functions."0x832B4F98"]
+name = "ProcessAndProcessAndProcess1677_832B4F98"
+
+
+# Process a large data structure by processing an entry array (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and seventy-eighth form). It takes a structure, processes an entry array (CriticalSection_ProcessEntryArray), gets the elapsed milliseconds since start (GetElapsedMsSinceStart), releases a mutex (MutexUnlock_ReleaseMutant), and drives sub-operations (ProcessAndProcessAndProcess1671, ProcessAndProcessAndProcess1677, sub_832B64D0, sub_832B8B80) based on the result. Part of the 0x832B5 process cluster. 291 lines. 7 callees. 2 callers (ProcessAndProcessAndProcess1672 and sub_832B5C18).
+[functions."0x832B5A18"]
+name = "ProcessAndProcessAndProcess1678_832B5A18"
+
+
+# Process a very large data structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and ninetieth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess1595, ProcessAndProcessAndProcess1596) based on the result. Part of the 0x832B7 process cluster. 991 lines. 2 callees. 1 caller (sub_832B7F28).
+[functions."0x832B7620"]
+name = "ProcessAndProcessAndProcess1690_832B7620"
+
+
+# Process a structure by copying memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and ninety-first form). It takes a structure, copies memory (MemCpy_SdkRuntime), and drives a sub-operation (ProcessAndProcessAndProcess1690) based on the result. Part of the 0x832B7 process cluster. 173 lines. 2 callees. 1 caller (ProcessAndProcessAndProcess1699).
+[functions."0x832B7F28"]
+name = "ProcessAndProcessAndProcess1691_832B7F28"
+
+
+# Process a large structure by copying memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and ninety-ninth form). It takes a structure, copies memory (MemCpy_SdkRuntime), and drives a sub-operation (ProcessAndProcessAndProcess1691) based on the result. Part of the 0x832B5 process cluster. 190 lines. 2 callees. 2 callers (ProcessAndProcessAndProcess1675 and sub_832B57E8).
+[functions."0x832B53E0"]
+name = "ProcessAndProcessAndProcess1699_832B53E0"
+
+
+# Process a value by checking its state and driving many sub-operations (two thousand four hundred and one hundred and forty-sixth form). It takes a value (a) and a value (b); it checks the value's state, and drives many sub-operations (sub_82BE36E0, MemCpy_SdkRuntime, ProcessAndLookupWithDefaultInit, and more) based on the result, performing a bounds check. This is the "process this data" routine (two thousand four hundred and one hundred and forty-sixth form), part of the 0x832B9 process cluster. ~100 lines. 3 callees. 1 caller (sub_832B3EB8).
+[functions."0x832B93F8"]
+name = "ProcessAndProcessAndProcess2595_832B93F8"

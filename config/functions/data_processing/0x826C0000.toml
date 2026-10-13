@@ -1,0 +1,184 @@
+# data-processing region 0x826C0000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# A value-at-position processor (in the 0x826C value-processing cluster): guard the
+# position, process the value via ProcessValue_FlagNonZero, and memset as needed.
+
+# Args: obj (r3, ->20 = a length), pos (r4), (r5). Guards the position (calls
+# sub_82CD11D0 -- the high-value guard helper -- if pos is out of range). If pos == 0,
+# returns. Otherwise it calls ProcessValue_FlagNonZero_821A9090 (sub_821A9090) with obj and
+# (obj->20 + pos); if the result's top byte is nonzero it does further processing (memset via
+# MemSet_SdkRuntime_82CA3190, and more). So it's a "process the value at a given position in
+# the buffer" operation. 130 lines. 4 callers (ProcessObject_82C669C0 -- a processor in the
+# 0x82C66 cluster -- plus sub_82C76100, sub_82C7AE40, sub_826C2250). The buffer class and
+# exact value semantics aren't resolvable, so the name states the mechanism.
+[functions."0x826C2FF8"]
+name = "ProcessValueAtPos_826C2FF8"
+
+
+# A trivial constant-return stub: always returns 8.
+
+# Args: (none used). Sets r3 = 8 and returns. 2 lines. 0 direct callers -- so it's most likely a
+# virtual method reached via a vtable (a "get the size / count / type" getter that always yields
+# 8), or otherwise-dead code. The constant 8's meaning (an element size, a count, a type tag, ...)
+# can't be determined from the body alone. The name states the mechanism: a stub that returns the
+# constant 8.
+[functions."0x826EB210"]
+name = "ReturnConstant8_826EB210"
+
+
+# A process (a hash table lookup, with a construct and a comparison, and a recursive call): construct a refcounted
+# value (ConstructRefCounted_8222CF18), call a hash lookup (HashLookup_823F74D0, on a value and obj->20), destruct the
+# refcounted value (DestructRefCounted_82214F08), compare strings (CompareString_8229AD78), and (in a path) perform a
+# complex computation (a large stack frame, calling GetSingleton_82BA8718, GrowRegion_823F9AE0, ProcessIndexedRegion
+# _82BA9068, Serialize_82CA3EB8, VcallProcess_823F8D30, and recursively calling itself).
+
+# Args: obj (r3, r29, ->20 = a field), value (r4, r31, a value), (more). It constructs a refcounted value
+# (ConstructRefCounted_8222CF18, sub_8222CF18, a refcounted constructor, on a key (r5 = -1, a key, a hash), and a
+# string (r4, a constant, from a fixed .data address, a particular key)). It calls a hash lookup (HashLookup_823F74D0
+# , sub_823F74D0, a hash table lookup, on the refcounted value (r6), a field (r5 = obj->20), and the value (r4 = value
+# ), storing the result to the stack (r3)). It destructs the refcounted value (DestructRefCounted_82214F08, sub
+# _82214F08, a refcounted destruct, on the value). It compares strings (CompareString_8229AD78, sub_8229AD78, a string
+# comparison, on a constant (r4) and the result (r3), comparing the looked-up string against a particular key). In a
+# path it performs a complex computation (a large stack frame (192 bytes), and calls to GetSingleton_82BA8718, sub
+# _82BA8718, a singleton getter; GrowRegion_823F9AE0, sub_823F9AE0, a region grower; ProcessIndexedRegion_82BA9068,
+# sub_82BA9068, an indexed region process; Serialize_82CA3EB8, sub_82CA3EB8, a serialize operation; VcallProcess
+# _823F8D30, sub_823F8D30, a vcall process; and sub_826CAFA8 -- itself, a recursive call). So it's a "process (a hash
+# table lookup: construct a refcounted value, call a hash lookup, destruct the value, compare strings, and (in a path)
+# perform a complex computation (recursively calling itself))" routine (a hash lookup process, part of the 0x826CA
+# cluster). 262 lines, 16 callees (ConstructRefCounted_8222CF18, HashLookup_823F74D0, DestructRefCounted_82214F08,
+# CompareString_8229AD78, Allocate_OrDbgBreak_8221F388, GetSingleton_82BA8718, GrowRegion_823F9AE0, ProcessIndexedReg
+# ion_82BA9068, Serialize_82CA3EB8, VcallProcess_823F8D30, Release_RefCounted_821C67D8, Release_RefCounted_829FF648,
+# SetValue4_829FD7B8, sub_8254C780, sub_826CAFA8 -- itself, a recursive call, sub_828C9450). 4 callers: sub_826C69B0,
+# sub_82378FA0, sub_826C63D8, sub_826CAF30 (siblings in the 0x826CA/0x826C6/0x82378 clusters). The value's meaning (a
+# value, a particular lookup key) and the key's meaning (a key, a particular string) aren't resolvable, so the name
+# states the mechanism: a hash lookup process (construct a refcounted value, call a hash lookup, destruct the value,
+# compare strings, and (in a path) perform a complex computation (recursively calling itself)).
+[functions."0x826CAFA8"]
+name = "ProcessHashLookup_826CAFA8"
+
+
+# A large transform routine that reads a 16-byte descriptor, derives a value from an object's fields, and
+# reconstructs the resulting array. It takes an object (a), a context (b), and a pointer to a 16-byte
+# descriptor (c). It copies the descriptor into a stack-local copy (r1 + 80, four words). It reads a->4;
+# when non-zero it computes (a->12 - a->4) >> 4 (a count of 16-byte elements) and otherwise uses 0. It then
+# drives the reconstruction: building the 16-byte element array (ConstructArray16_82512640), releasing the
+# old storage (Free_SizeBucketed_Thunk_8221BE68), and populating the per-element data through sub_82A97648.
+# This is the "apply a descriptor to rebuild this object's element array" transform for the 0x826FA
+# transform cluster, used by 2 callers (sub_826FA0D8 / sub_832402B8). Part of the 0x826FA transform cluster.
+# 520 lines, 3 callees (ConstructArray16_82512640, Free_SizeBucketed_Thunk_8221BE68, sub_82A97648). 2
+# callers.
+[functions."0x826FAFD0"]
+name = "ProcessTransform_826FAFD0"
+
+
+# A processor that compares two byte sequences (the first 16 bytes, then the remainder). It takes a value (a) and a source
+# (b: bytes at b->0, with a limit at b->16). It reads a constant byte sequence (the .data reference) and walks the source
+# bytes (b->0, advancing up to b->16), comparing each against the constant. When a byte differs, it exits and performs a
+# second comparison (the remaining bytes). This is the "compare these two byte sequences (the first 16 bytes, then the
+# remainder)" routine for the 0x826C0 compare cluster, called only via the vtable (0 direct callers). Part of the 0x826C0
+# compare cluster. 114 lines, 0 callees. 0 direct callers (vtable dispatch).
+[functions."0x826C0BA0"]
+name = "ProcessAndCompareBytes_826C0BA0"
+
+
+# A processor that appends and processes the data (second form). It takes a value (a), a value (b), and a value (c). It validates that c is not zero (triggering a trap when it is) and that c is not equal
+# to b (unless it is -2). It then performs processing (sub_826C3AA8, with a and a computed value). It then appends (ProcessAppend_823712D8). This is the "append and process this data" routine (second form),
+# part of the 0x826C3 process cluster. 167 lines. 2 callees (ProcessAppend and sub_826C3AA8). 2 callers (sub_82C69318 and sub_826C00C0).
+[functions."0x826C3908"]
+name = "ProcessAndAppendAndProcess2_826C3908"
+
+
+# A processor that checks and processes the data (third form). It takes a structure (a: fields at a->4, a->20, and a->24) and a value (b). It reads a->20 (a value) and a->24 (a value). When a->20 is less
+# than or equal to b and a->24 is not equal to b it performs processing (ProcessValue_FlagNonZero_8217A5E0, with a and 1). When the result's low byte is non-zero it stores a->20 back into a->20 and reads
+# a->24. When a->24 is at least 8 it reads a->4; otherwise it uses a+4. This is the "check and process this data" routine (third form), part of the 0x826C3 process cluster. 77 lines. 1 callee
+# (ProcessValue_FlagNonZero). 1 caller (ProcessAndAppendAndProcess2_826C3908).
+[functions."0x826C3AA8"]
+name = "ProcessAndCheckAndProcess3_826C3AA8"
+
+
+# A processor that validates and stores the data (third form). It takes a value (a) and a structure (b: fields at b->4 and b->24). It reads b->24 (a count). When the count is at least 16 it reads b->4
+# (a pointer); otherwise it uses the address of b->4. This is the "validate and store this data" routine (third form), part of the 0x826C0 process cluster. 50 lines. 1 callee
+# (ValidateAndStorePointer_8236F008). 2 callers (sub_82BF69A0 and sub_82C69318).
+[functions."0x826C09B8"]
+name = "ProcessAndValidateAndStore3_826C09B8"
+
+
+# A processor that validates and processes the data (third form). It takes a value (a) and a structure (b: fields at b->4, b->20, and b->24). It reads b->24 (a size); when the size is at least 16 it reads b->4 (a pointer), otherwise it uses
+# b+4 (a local buffer). It then validates and stores a pointer (ValidateAndStorePointer_8236F008, with a local buffer, b->20 plus the pointer, and b). This is the "validate and process this data" routine (third form), part of the 0x826C0
+# process cluster. 99 lines. 3 callees (ProcessAndAppendAndProcess2, ReadStringElement, and ValidateAndStorePointer). 3 callers (sub_82C6DE30, sub_82C6A3A8, and sub_826C0628).
+[functions."0x826C00C0"]
+name = "ProcessAndValidateAndProcess3_826C00C0"
+
+
+# A processor that processes the data (one hundred and thirty-sixth form). It takes a structure (a: fields at a->0, a->8, a->12, a->16, a->20, a->24, a->32, a->36, a->40, a->44, a->48, a->52, and a->56). It processes the data (a). This is the "process this data" routine (one hundred and thirty-sixth form), part of the 0x826CA process cluster. 72 lines. 1 callee (CopyAssign_RefCounted). 2 callers (sub_82378CD0 and sub_826C6A80).
+[functions."0x826CADF0"]
+name = "ProcessAndProcessAndProcess136_826CADF0"
+
+
+# A processor that processes the data (two hundred and seventy-seventh form). It takes a structure (a: fields at a->0, a->60, a->64, a->72, a->76, a->80, and a->88). It processes the data (a). This is the "process this data" routine (two hundred and seventy-seventh form), part of the 0x826C6 process cluster. 139 lines. 2 callees (sub_826CADF0 and sub_82CBC5F0). 1 caller (ProcessAndProcessAndProcess261).
+[functions."0x826C6A80"]
+name = "ProcessAndProcessAndProcess277_826C6A80"
+
+
+# Process a structure by releasing a global reference (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and forty-second form). It takes a structure, frees size-bucketed memory (Free_SizeBucketed), decrements and disposes (ProcessAndDecrementDispose), and releases a global reference (ReleaseGlobalRef). Part of the 0x826CA process cluster. 69 lines. 3 callees. 0 callers.
+[functions."0x826CAD78"]
+name = "ProcessAndProcessAndProcess1242_826CAD78"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and fifteenth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x826C5 process cluster. 145 lines. 0 callees. 0 callers.
+[functions."0x826C5A88"]
+name = "ProcessAndProcessAndProcess1615_826C5A88"
+
+
+# Process a very large data structure by constructing a refcounted object (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and twenty-third form). It takes a structure, constructs a refcounted object (ConstructRefCounted), copy-assigns a refcounted object (CopyAssign_RefCounted), copies a structure (CopyStructure), destructs a refcounted object (DestructRefCounted), constructs a string (ProcessConstructString), lowercases (ProcessToLower), releases a global reference (ReleaseGlobalRef), and drives sub-operations (ProcessAndProcessAndProcess1217, ProcessAndProcessAndProcess1244, ProcessAndProcessAndProcess565, ProcessAndProcessAndProcess765, sub_82301D40, sub_823F8C30, sub_826CAD28, ProcessAndProcessAndProcess1624) based on the result. Part of the 0x826CB process cluster. 727 lines. 15 callees. 2 callers (sub_826C63D8 and sub_826C6F28).
+[functions."0x826CB338"]
+name = "ProcessAndProcessAndProcess1623_826CB338"
+
+
+# Process a structure by constructing a 12-byte object (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and twenty-fourth form). It takes a structure and constructs a 12-byte object (Construct12Byte). Part of the 0x826CB process cluster. 95 lines. 1 callee. 2 callers (sub_826C9460 and ProcessAndProcessAndProcess1623).
+[functions."0x826CBC78"]
+name = "ProcessAndProcessAndProcess1624_826CBC78"
+
+
+# Process a very large data structure by constructing a refcounted object (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and sixty-third form). It takes a structure, constructs a refcounted object (ConstructRefCounted), copy-assigns a refcounted object (CopyAssign_RefCounted), destructs a refcounted object (DestructRefCounted), releases a global reference (ReleaseGlobalRef), and drives sub-operations (ProcessAndProcessAndProcess1623, sub_82301D40, sub_82368C30, sub_826C9EE0, ProcessAndProcessAndProcess1664, ProcessAndProcessAndProcess1665, sub_82CBD008) based on the result. Part of the 0x826C6 process cluster. 410 lines. 11 callees. 0 callers.
+[functions."0x826C6F28"]
+name = "ProcessAndProcessAndProcess1663_826C6F28"
+
+
+# Process a large structure by constructing a refcounted object (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and sixty-fourth form). It takes a structure, constructs a refcounted object (ConstructRefCounted), destructs a refcounted object (DestructRefCounted), and drives sub-operations (ProcessAndProcessAndProcess1249, ProcessAndVcallAndProcess16) based on the result. Part of the 0x826CB process cluster. 171 lines. 4 callees. 1 caller (ProcessAndProcessAndProcess1663).
+[functions."0x826CBB58"]
+name = "ProcessAndProcessAndProcess1664_826CBB58"
+
+
+# Process a very large data structure by allocating fresh memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and twenty-third form). It takes a structure, allocates fresh memory (Allocate_OrDbgBreak), frees size-bucketed memory (Free_SizeBucketed), dispatches and processes (ProcessAndDispatchAndProcess25), processes a hash lookup (ProcessHashLookup), and drives sub-operations (ProcessAndProcessAndProcess1100, ProcessAndProcessAndProcess1623, ProcessAndProcessAndProcess1635, sub_822F9408, sub_82368C30, sub_8236CBB8, sub_8236CD68, sub_82379A68, sub_82379B28, sub_82379F28, sub_82379FE0, sub_824E6A88, sub_824E6C78, sub_824E6D28, sub_82583608, sub_826C67F8, sub_829F88B0, sub_829F8948, sub_829F8AC0, sub_829F8B58, sub_82A3B848, sub_82B68F60, sub_82CBD008) based on the result. This is a dispatcher in the 0x826C6 process cluster. 610 lines. 27 callees. 0 callers.
+[functions."0x826C63D8"]
+name = "ProcessAndProcessAndProcess1723_826C63D8"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and twenty-ninth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x826F9 process cluster. 8 lines. 0 callees. 0 callers.
+[functions."0x826F97D0"]
+name = "ProcessAndProcessAndProcess1729_826F97D0"
+
+
+# Process a very large data structure by constructing a refcounted object (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and one hundred and nineteenth form). It takes a structure, constructs a refcounted object (ConstructRefCounted), copies a refcounted object (CopyAssign_RefCounted), destructs a refcounted object (DestructRefCounted), replaces a refcounted object (ProcessAndReplaceRefCounted), releases a global reference (ReleaseGlobalRef), hashes a C string (HashCstring), increments a counter (ProcessAndIncrementCounter), and drives sub-operations (ProcessAndDispatchAndProcess25, ProcessAndVcallAndClear3, ProcessAndVcallAndProcess16, ProcessAndProcessAndProcess26, and many others) based on the result. This is one of the largest functions in the binary in the 0x826C7 process cluster. 2204 lines. 29 callees. 0 callers.
+[functions."0x826C72A8"]
+name = "ProcessAndProcessAndProcess1819_826C72A8"
+
+
+# Process a very large data structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and two hundred and sixty-second form). It takes a structure and drives a sub-operation (sub_829FA020). Part of the 0x826C5 process cluster. 428 lines. 1 callee. 0 callers.
+[functions."0x826C5B88"]
+name = "ProcessAndProcessAndProcess1962_826C5B88"
+
+
+# Process a value by checking its state and driving many sub-operations (two thousand four hundred and forty-first form). It takes a value (a), a value (b), a value (c), a value (d), a value (e), a value (f), a value (g), and a value (h); it checks the value's state, and drives many sub-operations (ConstructRefCounted, DestructRefCounted, Free_SizeBucketed_Thunk, ProcessAndVcallAndProcess16, and more) based on the result. This is the "process this data" routine (two thousand four hundred and forty-first form), part of the 0x826CB process cluster. 361 lines. 7 callees. 2 callers (sub_826CA6E0 and sub_826CA0B0).
+[functions."0x826CB808"]
+name = "ProcessAndProcessAndProcess2440_826CB808"
+
+
+# Process a structure by checking its state and driving many sub-operations (two thousand four hundred and forty-seventh form). It takes a value (a) and a structure (b: fields at b->4 and b->8); it checks the structure's state, and drives many sub-operations (ConstructRefCounted, DestructRefCounted, CopyAssign_RefCounted, ProcessAndComputeFloat, ProcessAndReplaceRefCounted, ProcessAndVcallAndClear3, ReleaseGlobalRef, StrCmp_Signed, and many others) based on the result. This is the "process this data" routine (two thousand four hundred and forty-seventh form), part of the 0x826C8 process cluster. 2077 lines. 34 callees. 0 callers.
+[functions."0x826C81A0"]
+name = "ProcessAndProcessAndProcess2446_826C81A0"

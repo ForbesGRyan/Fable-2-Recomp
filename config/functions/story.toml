@@ -1,0 +1,44 @@
+# story functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# After new game after "look little sparrow" LT button
+[functions."0x82988F48"]
+name = "Story_LookLittleSparrow"
+
+
+#talking to camera man in child scene
+[functions."0x82988F38"]
+name = "Story_TalkToCameraMan"
+
+
+# First Combat childhood fight
+[functions."0x8297EB48"]
+name = "Story_FirstChildCombat"
+
+
+# Interacting with sister after first fight
+[functions."0x8274B788"]
+name = "Story_SisterAfterFirstFight"
+
+
+# Entering the warehouse as child
+[functions."0x8274B738"]
+name = "Story_EnterWarehouseAsChild"
+
+
+# Shooting Beetle in the warehouse as child
+[functions."0x82DDC4D8"]
+name = "Story_ShootBeetleInWarehouse"
+
+
+# Interacting with job sign (blacksmith)
+[functions."0x823A1810"]
+name = "Story_JobSignBlacksmith"
+
+
+# Tatter spire right after you get there when the man says "Get Moving"
+[functions."0x8274B768"]
+name = "Story_TatterSpireGetMoving"

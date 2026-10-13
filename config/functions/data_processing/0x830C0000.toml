@@ -1,0 +1,73 @@
+# data-processing region 0x830C0000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+[functions."0x830F07A8"]
+name = "Func_830F07A8"
+
+[functions."0x830F07F8"]
+name = "Func_830F07F8"
+
+[functions."0x830F0914"]
+name = "Func_830F0914"
+
+[functions."0x830F1208"]
+name = "Func_830F1208"
+
+[functions."0x830F1228"]
+name = "Func_830F1228"
+
+[functions."0x830FB43C"]
+name = "Func_830FB43C"
+
+[functions."0x830FB490"]
+name = "Func_830FB490"
+
+[functions."0x830FB4A0"]
+name = "Func_830FB4A0"
+
+[functions."0x830FD788"]
+name = "Func_830FD788"
+
+[functions."0x830FD7A8"]
+name = "Func_830FD7A8"
+
+[functions."0x830FD7B8"]
+name = "Func_830FD7B8"
+
+[functions."0x830FD7C8"]
+name = "Func_830FD7C8"
+
+[functions."0x830FD7E4"]
+name = "Func_830FD7E4"
+
+[functions."0x830FD7F4"]
+name = "Func_830FD7F4"
+
+[functions."0x830FDCEC"]
+name = "Func_830FDCEC"
+
+[functions."0x830FDCFC"]
+name = "Func_830FDCFC"
+
+[functions."0x830FDD08"]
+name = "Func_830FDD08"
+
+[functions."0x830FE168"]
+name = "Func_830FE168"
+
+[functions."0x830FE220"]
+name = "Func_830FE220"
+
+[functions."0x830FE230"]
+name = "Func_830FE230"
+
+[functions."0x830FE2E8"]
+name = "Func_830FE2E8"
+
+[functions."0x830FE380"]
+name = "Func_830FE380"
+
+[functions."0x830FE390"]
+name = "Func_830FE390"

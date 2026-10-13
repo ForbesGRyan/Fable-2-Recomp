@@ -1,0 +1,98 @@
+# melee_action functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# =============================================================================
+# Player melee-action trigger chain (identified via FABLE2_ATTACK_PROBE)
+#
+# These names come from the attack-probe diff: functions that are NEW (zero in
+# the 5 s idle baseline) and fire exactly once per melee-X swing (count==1 in
+# all 5 captures). The flow, top to bottom, is:
+#
+#   GetUser1InputState_822B2D60      (input read; see above)
+#     -> InputEvent_DispatchButtonPress  (0x82188F20, raw press-bit dispatch)
+#     -> InputEvent_PollQueue    (0x82185C90) -> InputEvent_Handle
+#                                     (0x82BE3F30, builds the press event)
+#     -> DispatchPlayerAction_82748840   (first attack-specific dispatch call)
+#        -> ResolvePlayerAction_823E8528
+#           -> QueryActivePlayerMethod_821EC8A0   (the active hero)
+#     -> MeleeAction_*   (0x829A-0x829B cluster: the melee-action module)
+#
+# CAVEAT: measured with melee-X (light) presses only. A comparative run with a
+# non-attack press and Y (heavy) is still needed to confirm these are
+# melee-specific rather than the generic player-action path.
+# =============================================================================
+
+# Player-action dispatch -- entry of the attack trigger chain. First
+# attack-specific call after InputEvent_Handle builds the press event; takes
+# an event/context object (r3), reads a handler pointer at r3->16, and
+# dispatches (via ResolvePlayerAction_823E8528) toward QueryActivePlayerMethod.
+# FABLE2_ATTACK_PROBE: NEW, count==1 in all 5 melee-X captures, absent from
+# idle.
+[functions."0x82748840"]
+name = "DispatchPlayerAction_82748840"
+
+
+# Player-action dispatch -- action resolution. Called by
+# DispatchPlayerAction_82748840; takes the action object (r3) and looks it up
+# against a fixed global action table (lis/addi/lwz of a global at +4). Same
+# FABLE2_ATTACK_PROBE signature as DispatchPlayerAction (NEW, count==1 in all 5
+# melee-X captures); reaches QueryActivePlayerMethod transitively.
+[functions."0x823E8528"]
+name = "ResolvePlayerAction_823E8528"
+
+
+# Tight address cluster of 12 functions that the FABLE2_ATTACK_PROBE diff found
+# firing exactly once per melee-X swing and never during the idle baseline
+# (NEW, count==1 in all 5 captures). DispatchPlayerAction_82748840 feeds this
+# module, which resolves/executes the action against the active hero. Individual
+# roles are not yet disambiguated, so all 12 carry the shared "MeleeAction"
+# module label. CAVEAT: identified from melee-X captures only.
+[functions."0x829A7128"]
+name = "MeleeAction_829A7128"
+
+
+[functions."0x829AB980"]
+name = "MeleeAction_829AB980"
+
+
+[functions."0x829ADFE8"]
+name = "MeleeAction_829ADFE8"
+
+
+[functions."0x829AF450"]
+name = "MeleeAction_829AF450"
+
+
+[functions."0x829AF950"]
+name = "MeleeAction_829AF950"
+
+
+[functions."0x829AFE08"]
+name = "MeleeAction_829AFE08"
+
+
+[functions."0x829B4F78"]
+name = "MeleeAction_829B4F78"
+
+
+[functions."0x829B5EF0"]
+name = "MeleeAction_829B5EF0"
+
+
+[functions."0x829B5F48"]
+name = "MeleeAction_829B5F48"
+
+
+[functions."0x829B6C78"]
+name = "MeleeAction_829B6C78"
+
+
+[functions."0x829B76A8"]
+name = "MeleeAction_829B76A8"
+
+
+[functions."0x829B78A0"]
+name = "MeleeAction_829B78A0"

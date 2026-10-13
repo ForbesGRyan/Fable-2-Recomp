@@ -1,0 +1,14 @@
+# data-processing region 0x82940000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# Swimming
+[functions."0x8297EB28"]
+name = "Swimming"
+
+
+# Process a structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and twelfth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess1120, ProcessAndProcessAndProcess1621) based on the result. This is a very frequently-called helper in the 0x82978 process cluster. 60 lines. 2 callees. 384 callers.
+[functions."0x82978470"]
+name = "ProcessAndProcessAndProcess1712_82978470"

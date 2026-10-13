@@ -1,0 +1,62 @@
+# data-processing region 0x82900000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# A processor that computes the element counts (from the buffer ranges) and inserts the value in the array. It takes a
+# structure (a: a base at a->4, an end at a->8, a limit at a->12) and a value (b: a pointer at b->0). It computes the
+# element counts (a->8 - a->4 and a->12 - a->4, in 8-byte units). When the counts are valid (a->4 is non-zero, and the
+# end count (a->8 - a->4 >> 3) is less than the limit count (a->12 - a->4 >> 3)), it inserts the value (b) into the array
+# (the per-element handling, sub_82925940). When the counts are invalid or the range is full, it takes the early path.
+# This is the "compute this element count (from the buffer ranges) and insert the value in the array (when the range is
+# valid)" routine for the 0x82925 array-insertion cluster, used by 5 callers (sub_826B3E60, sub_828B8F20, sub_82924730,
+# sub_829785F8, and sub_82C6CB88). Part of the 0x82925 array-insertion cluster. 107 lines, 1 callee. 5 callers.
+[functions."0x829255E8"]
+name = "ProcessAndInsertInArray_829255E8"
+
+
+# A processor that computes the element count, validates the range, and processes the elements. It takes a value (a), a
+# structure (b: a base at b->4, an end at b->8), and a value (c). It computes the element count ((b->8 - b->4) / 8, i.e.
+# 8-byte elements). When the base (b->4) is zero or the count is zero, it takes the empty path. Otherwise it validates the
+# range (b->4 <= b->8, taking the error path (trap 22) when violated) and processes the elements (the per-element
+# handling, and the value insertion sub_82926068). This is the "compute this element count, validate the range, and
+# process the elements (inserting the value)" routine for the 0x82925 array-insertion cluster, called only by
+# ProcessAndInsertInArray_829255E8. Part of the 0x82925 array-insertion cluster (sibling of ProcessAndInsertInArray
+# _829255E8 / sub_82926068). 132 lines, 1 callee. 1 caller: ProcessAndInsertInArray_829255E8.
+[functions."0x82925940"]
+name = "ProcessAndValidateInsert_82925940"
+
+
+# A processor that computes the element count, and when the count and value are valid, grows the array and inserts the
+# value. It takes a structure (a: a base at a->4, an end at a->8, a limit at a->12), a value (b), a value (c), and a
+# structure (d: a 64-bit value at d->0). It computes the element count ((a->12 - a->4) / 8, i.e. 8-byte elements). When
+# the value (c) is zero or the base (a->4) is zero, it takes the empty path. Otherwise it processes the elements: it
+# grows the array (ProcessAndAllocateBuffer_823D94F8, allocating the buffer), frees the old buffer (Free_SizeBucketed
+# _Thunk_8221BE68), and performs the per-element handling (sub_82684B38). This is the "compute this element count and,
+# when the count and value are valid, grow the array and insert the value" routine for the 0x82926 grow-insert cluster,
+# used by 2 callers (sub_828BAED8 and ProcessAndValidateInsert_82925940). Part of the 0x82926 grow-insert cluster
+# (sibling of ProcessAndAllocateBuffer_823D94F8 / ProcessAndValidateInsert_82925940). 503 lines, 3 callees. 2 callers.
+[functions."0x82926068"]
+name = "ProcessAndGrowAndInsert_82926068"
+
+
+# A processor that copies the values (the node) and increments the refcount (the atomic operation). It takes a value (a), a
+# structure (b: a value at b->-4, a value at b->0, a value at b->4), a value (c), and a structure (d: a field at d->0, a field at
+# d->8). When b equals c, it returns. Otherwise it copies the values (b->-4, b->0, and b->4) into the node (d->0, the computed
+# pointer, and d->8). It then increments the refcount (the atomic operation, lwarx/stwcx, on b->4). This is the "copy this value
+# (the node) and increment the refcount (the atomic operation)" routine for the 0x8290F copy-node cluster, used by 4 callers (sub
+# _8246E3C8, sub_82601D80, sub_826703C0, and sub_8292F4E0). Part of the 0x8290F copy-node cluster. 75 lines, 0 callees. 4
+# callers.
+[functions."0x8290F610"]
+name = "ProcessAndCopyNodeAndIncrement_8290F610"
+
+
+# A processor that processes the data (thirty-first form). It takes a structure (a: field at a->0), a value (b), and a value (c). It processes the data (a, b, and c). This is the "process this data" routine (thirty-first form), part of the 0x82903 process cluster. 89 lines. 5 callees (ProcessAndAppendElement, ProcessAndCopyReferenceAndHash, ProcessAndDispatchAndResolve, ProcessAndHashString, and ProcessAndResolveTypedField). 3 callers (sub_8260C3B8, sub_8290B948, and sub_82903620).
+[functions."0x82903C38"]
+name = "ProcessAndProcessAndProcess31_82903C38"
+
+
+# Process a frequently-used structure (seven hundred and one hundred and forty-fourth form). It takes a structure and checks its state, with no external sub-operations. This is a frequently-called helper in the 0x8290F process cluster. 103 lines. 0 callees. 13 callers.
+[functions."0x8290F680"]
+name = "ProcessAndProcessAndProcess844_8290F680"

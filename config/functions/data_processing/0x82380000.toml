@@ -1,0 +1,60 @@
+# data-processing region 0x82380000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# A free routine that shrinks a buffer and releases the refcounted elements it frees. It takes a structure (a: a used size at a->4 and a
+# total size at a->8). When a->4 equals a->8 it returns early. Otherwise it calls sub_829FF3E8 (a free/shrink) to determine the new size,
+# then walks the freed elements (8 bytes each) from the new size back up to the old size and calls Release_RefCounted on each. It finally
+# stores the new size back into a->8. This is the "free and shrink this buffer, releasing the refcounted elements" routine, part of the
+# 0x823B8 buffer cluster. 60 lines. 2 callees (sub_829FF3E8, Release_RefCounted). 9 callers.
+[functions."0x823B8178"]
+name = "ProcessAndFreeAndShrink_823B8178"
+
+
+# A processor that computes and processes the data (second form). It takes a value (a), a structure (b: fields at b->4 and b->8), and a value (c). It reads b->4 (a limit) and
+# b->8 (a start) and computes (b->8 - b->4) >> 2 (a count of 4-byte elements). When the limit is zero it returns zero. When the count is non-zero it processes the array (with the
+# limit, start, count, and a), asserting that b->4 <= b->8 when c is non-zero. It then calls sub_8238EC68 (with the limit, start, count, and a). This is the "compute and process
+# this data" routine (second form), part of the 0x8238E process cluster. 132 lines. 1 callee (sub_8238EC68). 12 callers.
+[functions."0x8238EB88"]
+name = "ProcessAndComputeAndProcess2_8238EB88"
+
+
+# A processor that computes and processes the data (third form). It takes a structure (a: fields at a->4, a->8, and a->12), a value (b), and a structure (c: a field at c->0). It
+# reads a->4 (a limit) and computes two values: (a->12 - a->4) >> 2 and (a->8 - a->4) >> 2 (counts of 4-byte elements). It then performs a large amount of processing: it
+# allocates checked memory (AllocateChecked3_82333F78), copies checked data (CheckedCopy_82CA3808), frees size-bucketed memory (Free_SizeBucketed_Thunk_8221BE68), and calls
+# sub_82684B38. This is the "compute and process this data" routine (third form), part of the 0x8238E process cluster. 412 lines. 4 callees (AllocateChecked3, CheckedCopy,
+# Free_SizeBucketed_Thunk, sub_82684B38). 1 caller (ProcessAndComputeAndProcess2_8238EB88).
+[functions."0x8238EC68"]
+name = "ProcessAndComputeAndProcess3_8238EC68"
+
+
+# A processor that processes the data (two hundred and sixty-third form). It takes a value (a), a structure (b: field at b->16), and a value (c). It processes the data (a, b, and c). This is the "process this data" routine (two hundred and sixty-third form), part of the 0x823A5 process cluster. 92 lines. 4 callees (AccessElement8, ConstructRefCounted, sub_82179350, and sub_8229E9E8). 12 callers (sub_824D2428, sub_8233E578, sub_825B7BC0, sub_827F9E78, sub_82793FC0, sub_82421F98, sub_8257A928, sub_8290A808, sub_82358CB0, sub_82621FD8, sub_82982820, and sub_827F9DD8).
+[functions."0x823A5228"]
+name = "ProcessAndProcessAndProcess263_823A5228"
+
+
+# A processor that processes the data (two hundred and sixty-fourth form). It takes a structure (a: fields at a->0 and a->4) and a structure (b: field at b->0). It processes the data (a and b). This is the "process this data" routine (two hundred and sixty-fourth form), part of the 0x823BE process cluster. 51 lines. 1 callee (Release_RefCounted). 12 callers (sub_82531DC0, sub_83223C50, sub_822A2BA0, sub_828126D0, sub_827C38D8, sub_821D5E90, sub_83225F18, sub_82275F00, sub_828DD0F8, sub_829D3CD8, sub_829D1FB0, and sub_821C38C8).
+[functions."0x823BE9C0"]
+name = "ProcessAndProcessAndProcess264_823BE9C0"
+
+
+# Process a very frequently-used large data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and thirty-eighth form). It takes a structure, checks its state, and drives sub-operations (AllocateChecked, Free_SizeBucketed, sub_82A97648) based on the result. This is the third-most-called function in the recompiled binary. 441 lines. 3 callees. 302 callers.
+[functions."0x823955A8"]
+name = "ProcessAndProcessAndProcess1238_823955A8"
+
+
+# Process a large structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and nineteenth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82396 process cluster. 214 lines. 0 callees. 1 caller (sub_82B14718).
+[functions."0x82396A68"]
+name = "ProcessAndProcessAndProcess1319_82396A68"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and forty-ninth form). It takes a structure and checks its state, with no external sub-operations. This is a frequently-called helper in the 0x823B0 process cluster. 24 lines. 0 callees. 11 callers.
+[functions."0x823B0B10"]
+name = "ProcessAndProcessAndProcess1419_823B0B10"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand four hundred and one hundred and ninety-eighth form). It takes a value (a); it checks the value's state, and drives sub-operations (Allocate_OrDbgBreak) based on the result, allocating a small structure. This is the "process this data" routine (two thousand four hundred and one hundred and ninety-eighth form), part of the 0x823B0 process cluster. 87 lines. 1 callee. 6 callers.
+[functions."0x823B0A18"]
+name = "ProcessAndProcessAndProcess2647_823B0A18"

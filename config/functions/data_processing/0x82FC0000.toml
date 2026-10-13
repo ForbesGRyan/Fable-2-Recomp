@@ -1,0 +1,84 @@
+# data-processing region 0x82FC0000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# Process a value (seven hundred and sixty-third form). It takes a value and checks its state, with no external sub-operations. This is a frequently-called helper in the 0x82FFF process cluster. 27 lines. 0 callees. 24 callers.
+[functions."0x82FFFB40"]
+name = "ProcessAndProcessAndProcess763_82FFFB40"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and three hundred and ninety-fifth form). It takes a structure and checks its state, with no external sub-operations. This is a frequently-called helper in the 0x82FFC process cluster. 12 lines. 0 callees. 8 callers.
+[functions."0x82FFCFA8"]
+name = "ProcessAndProcessAndProcess2095_82FFCFA8"
+
+
+# Process a value by checking its state (two thousand four hundred and twenty-third form). It takes a value (a); it checks the value's state. This is the "process this data" routine (two thousand four hundred and twenty-third form), part of the 0x82FFE process cluster. 10 lines. 0 callees. 12 callers (sub_82FFD038, sub_82FFF800, sub_82FFCDD0, and more).
+[functions."0x82FFE110"]
+name = "ProcessAndProcessAndProcess2422_82FFE110"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand four hundred and twenty-fourth form). It takes a value (a), a value (b), and a value (c); it checks the value's state, and drives sub-operations based on the result. This is the "process this data" routine (two thousand four hundred and twenty-fourth form), part of the 0x82FFE process cluster. 34 lines. 1 callee. 2 callers (sub_82FFF5F0 and sub_82FFD170).
+[functions."0x82FFE428"]
+name = "ProcessAndProcessAndProcess2423_82FFE428"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand four hundred and twenty-fifth form). It takes a value (a) and a structure (b: field at b->0); it checks the value's state, and drives sub-operations (Identity_ReturnArg2) based on the result. This is the "process this data" routine (two thousand four hundred and twenty-fifth form), part of the 0x82FFE process cluster. 64 lines. 1 callee. 1 caller (sub_82FFE428).
+[functions."0x82FFE460"]
+name = "ProcessAndProcessAndProcess2424_82FFE460"
+
+
+# Process a value by checking its state (two thousand four hundred and sixty-ninth form). It takes a value (a), a value (b), and a value (c); it checks the value's state, and sets two fields at the value's start based on the result. This is the "process this data" routine (two thousand four hundred and sixty-ninth form), part of the 0x82FFC process cluster. 23 lines. 0 callees. 12 callers.
+[functions."0x82FFCAE8"]
+name = "ProcessAndProcessAndProcess2518_82FFCAE8"
+
+
+# Process a value by checking its state (two thousand four hundred and eighty-sixth form). It takes a value (a); it checks the value's state, and returns a pointer to the value's field based on the result. This is the "process this data" routine (two thousand four hundred and eighty-sixth form), part of the 0x82FFE process cluster. 10 lines. 0 callees. 12 callers.
+[functions."0x82FFE3C8"]
+name = "ProcessAndProcessAndProcess2535_82FFE3C8"
+
+
+# Process a value by checking its state (two thousand four hundred and one hundred and first form). It takes a value (a); it checks the value's state, and returns a pointer to the value's field based on the result. This is the "process this data" routine (two thousand four hundred and one hundred and first form), part of the 0x82FFE process cluster. 10 lines. 0 callees. 9 callers.
+[functions."0x82FFE3B8"]
+name = "ProcessAndProcessAndProcess2550_82FFE3B8"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand four hundred and one hundred and two hundred and thirteenth form). It takes a structure (a: fields at a->0, a->32, a->4, and a->80); it checks the value's state, and drives sub-operations (RtlInitializeCriticalSectionAndSpinCount) based on the result, initializing a structure. This is the "process this data" routine (two thousand four hundred and one hundred and two hundred and thirteenth form), part of the 0x82FFC process cluster. 66 lines. 1 callee. 12 callers.
+[functions."0x82FFCB78"]
+name = "ProcessAndProcessAndProcess2662_82FFCB78"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand four hundred and one hundred and two hundred and fourteenth form). It takes a structure (a), a value (b), and a value (c); it checks the value's state, and drives sub-operations (ProcessAndProcessAndProcess2095, sub_82FFCC98) based on the result. This is the "process this data" routine (two thousand four hundred and one hundred and two hundred and fourteenth form), part of the 0x82FFC process cluster. 45 lines. 2 callees. 2 callers.
+[functions."0x82FFCC38"]
+name = "ProcessAndProcessAndProcess2663_82FFCC38"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand four hundred and one hundred and two hundred and fifteenth form). It takes a structure (a), a value (b), and a value (c); it checks the value's state, and drives sub-operations (ProcessAndProcessAndProcess2095, sub_82FFE3D8) based on the result. This is the "process this data" routine (two thousand four hundred and one hundred and two hundred and fifteenth form), part of the 0x82FFC process cluster. 45 lines. 2 callees. 1 caller (ProcessAndProcessAndProcess2663).
+[functions."0x82FFCC98"]
+name = "ProcessAndProcessAndProcess2664_82FFCC98"
+
+
+# Process a value by checking its state (two thousand four hundred and one hundred and two hundred and sixteenth form). It takes a value (a) and a value (b); it checks the value's state, and stores the values, returning one of them. This is the "process this data" routine (two thousand four hundred and one hundred and two hundred and sixteenth form), part of the 0x82FFC process cluster. 8 lines. 0 callees. 1 caller (sub_82FFE3D8).
+[functions."0x82FFCCF8"]
+name = "ProcessAndProcessAndProcess2665_82FFCCF8"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand four hundred and one hundred and two hundred and seventeenth form). It takes a structure (a: field at a->4); it checks the value's state, and drives sub-operations (ProcessAndProcessAndProcess2534) based on the result. This is the "process this data" routine (two thousand four hundred and one hundred and two hundred and seventeenth form), part of the 0x82FFC process cluster. 20 lines. 1 callee. 6 callers.
+[functions."0x82FFCD08"]
+name = "ProcessAndProcessAndProcess2666_82FFCD08"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand four hundred and one hundred and two hundred and eighteenth form). It takes a structure (a: field at a->4); it checks the value's state, and drives sub-operations (ProcessAndProcessAndProcess2422) based on the result. This is the "process this data" routine (two thousand four hundred and one hundred and two hundred and eighteenth form), part of the 0x82FFC process cluster. 20 lines. 1 callee. 7 callers.
+[functions."0x82FFCD48"]
+name = "ProcessAndProcessAndProcess2667_82FFCD48"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand four hundred and one hundred and two hundred and nineteenth form). It takes a structure (a: field at a->4); it checks the value's state, and drives sub-operations (ProcessAndProcessAndProcess2535) based on the result. This is the "process this data" routine (two thousand four hundred and one hundred and two hundred and nineteenth form), part of the 0x82FFC process cluster. 20 lines. 1 callee. 10 callers.
+[functions."0x82FFCF18"]
+name = "ProcessAndProcessAndProcess2668_82FFCF18"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand four hundred and one hundred and two hundred and twentieth form). It takes a structure (a), a structure (b: field at b->0), and a value (c); it checks the value's state, and drives sub-operations (ProcessAndProcessAndProcess2665, ProcessAndProcessAndProcess2095) based on the result. This is the "process this data" routine (two thousand four hundred and one hundred and two hundred and twentieth form), part of the 0x82FFE process cluster. 35 lines. 2 callees. 1 caller (ProcessAndProcessAndProcess2664).
+[functions."0x82FFE3D8"]
+name = "ProcessAndProcessAndProcess2669_82FFE3D8"

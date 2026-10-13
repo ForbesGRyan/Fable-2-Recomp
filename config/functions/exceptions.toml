@@ -1,0 +1,35 @@
+# exceptions functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# An (unresolved) exception-frame return routine called after RtlRaiseException. It takes the saved exception frame
+# (the 320-byte frame, passed in r12). It is the continuation of the exception/heap-error path: after the exception
+# has been raised (RtlRaiseException), it cleans up and returns through the frame (restoring r1 to the frame top and
+# returning the result). Its body is not recovered in this recompile (it is an unresolved bl target, flagged
+# REX_FATAL at each call site), so it is named from its call context only. This is the "return through this exception
+# frame after raising the exception" routine for the 0x82239 exception-return cluster, called from 3 functions
+# (Heap_AllocateBlock_82238828 / ProcessAndDispatchException_82238790 / TailCall_82238FCC) across 5 call sites. Part of
+# the 0x82239 exception-return cluster (sibling of Heap_AllocateBlock_82238828 / TailCall_82238FCC / RtlRaiseException).
+# Unresolved target, 0 callees. 3 callers (5 call sites).
+[functions."0x8223900C"]
+name = "Exception_ReturnFrame_8223900C"
+
+[functions."0x82CBB98C"]
+name = "FatalError_82CBB98C"
+
+[functions."0x82CBBB24"]
+name = "FatalError_82CBBB24"
+
+[functions."0x82CBBB30"]
+name = "FatalError_82CBBB30"
+
+[functions."0x82CC02FC"]
+name = "Exception_82CC02FC"
+
+[functions."0x82CC031C"]
+name = "Exception_82CC031C"
+
+[functions."0x82CC032C"]
+name = "Exception_82CC032C"

@@ -1,0 +1,452 @@
+# data-processing region 0x82300000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# A trivial constant-return stub: always returns 2.
+
+# Args: (none used). Sets r3 = 2 and returns. 2 lines. 0 direct callers -- so it's most likely a
+# virtual method reached via a vtable (a type-ID / small-value getter that always yields 2), or
+# otherwise-dead code. The constant 2's meaning (a type tag, an element count, a mode, ...) can't
+# be determined from the body alone. The name states the mechanism: a stub that returns the
+# constant 2.
+[functions."0x823314B8"]
+name = "ReturnConstant2_823314B8"
+
+
+# A dispose / destroy: call the sub-object dispose (sub_8233E380), free the sub-object (obj->4), and zero
+# the fields.
+
+# Args: obj (r3, ->4 = a sub-object, ->8 = a field). Calls sub_8233E380 (a dispose, passing obj, obj->4,
+# and the sub-object's ->0 element) to run the sub-object's teardown. It then frees the sub-object (obj->4)
+# via Free_SizeBucketed_Thunk_8221BE68 (sub_8221BE68). Finally it zeros the fields (obj->4 = 0, obj->8 = 0)
+# to mark the object empty. So it's a "dispose / destroy the object (tear down the sub-object, free it,
+# zero the pointers)" routine. 61 lines, 2 callees (sub_8233E380, Free_SizeBucketed_Thunk_8221BE68). Many
+# callers (sub_82878DA8, sub_82851DF8, sub_8256EAF8, ...). The object's class (->4 = a sub-object, ->8 = a
+# field) and the sub-object's teardown aren't resolvable, so the name states the mechanism: dispose the
+# object. The "2" distinguishes it from Dispose_82B39A30 (sub_82B39A30).
+[functions."0x8233DD70"]
+name = "Dispose2_8233DD70"
+
+
+# A dispose (with validation + chain-root lookup): validate the value (trap-22), compare it to the
+# element, look up the chain root (FindChainRoot_82A596F0), and tear down.
+
+# Args: obj (r3), value (r4), (r5), (r6), (r7), element (r8). Validates the value: if value is 0 or
+# value != element, it traps (trap-22, the same invariant the FindChainRoot family checks). It then
+# compares the element to value (bailing on a mismatch) and tears down: it looks up the chain root
+# (FindChainRoot_82A596F0, sub_82A596F0), and calls sub_8234C988 and sub_826A4C60 (siblings in the
+# 0x8233/0x8234/0x826A clusters) to run the teardown. So it's a "dispose the sub-object (validate, find
+# the chain root, tear down)" routine. 137 lines, 3 callees (FindChainRoot_82A596F0, sub_8234C988,
+# sub_826A4C60). Many callers: Dispose2_8233DD70 (sub_8233DD70), sub_8322BED0, sub_8268BBA0, ... The
+# object's class and the teardown's steps aren't fully resolvable, so the name states the mechanism:
+# dispose the sub-object. The "3" distinguishes it from Dispose_82B39A30 and Dispose2_8233DD70.
+[functions."0x8233E380"]
+name = "Dispose3_8233E380"
+
+
+# A chain search (the sibling of ChainSearch3_82B5D690 / ChainSearch2_82B5D548 / ChainSearch_82B3D880): walk a chain
+# (a two-key comparison: node->12 against a value, following the node's next pointers, node->8 / node->0, with a ->29
+# flag), searching for a match, and (in a path) call sibling operations (sub_823074B8, sub_82308C28, sub_8235E278,
+# sub_8264EDF8).
+
+# Args: obj (r3, r31, ->4 = a node), value (r4, r30, ->0 = a value), (more). It loads a node (obj->4->4, a node in a
+# chain). If the node's flag (node->29, a byte) is zero, it takes one path (reading a value from r30->0). It then walks
+# the chain (a loop): it compares the node's field (node->12, a value) against the target value (r9, from r30->0), and
+# (depending on the comparison) follows the node's next pointer (node->8, a next) or the node's head (node->0, a head / 
+# prev), walking to the next node (node->4->29, a flag). In a path it calls sibling operations (sub_823074B8, sub
+# _82308C28, sub_8235E278, sub_8264EDF8 -- siblings in the 0x82307/0x82308/0x8235E/0x8264E clusters). So it's a "search a
+# chain (walk the chain by a comparison, node->12 against a value, following the next pointers, and (in a path) call
+# sibling operations)" routine (a chain search, part of the 0x82306 cluster, a sibling of ChainSearch3_82B5D690). 158
+# lines, 4 callees (sub_823074B8, sub_82308C28, sub_8235E278, sub_8264EDF8). 1 caller: sub_8281A568. The chain's
+# element type (a node, ->4 = a next, ->8 = a next, ->12 = a value, ->29 = a flag, a chain/list node) and the value's
+# meaning (a searched value, a particular match) aren't resolvable, so the name states the mechanism: a chain search
+# (walk the chain by a comparison and (in a path) call sibling operations). The "4" distinguishes it from ChainSearch
+# 3_82B5D690, ChainSearch2_82B5D548, and ChainSearch_82B3D880.
+[functions."0x82306B80"]
+name = "ChainSearch4_82306B80"
+
+
+# A process (an allocation, with a check and a call, the caller of Allocate_OrDbgBreak_8221F388 / sub_822F1F00): (if a
+# size (a size, a particular size, a particular value, a particular size / a particular allocation) is non-zero, a
+# particular value) perform a check (a check, a particular check / a particular state, a particular size / a
+# particular allocation, a particular operation, calling sub_822F1F00, on a value (stack[80], a value, a particular
+# value, a particular size / a particular allocation, a particular target), and a constant (a constant, from a fixed
+# .data address, a particular value, a particular size / a particular allocation, a particular state), a particular
+# check / a particular state, a particular size / a particular allocation, a particular operation, a particular state
+# / a particular result), and (otherwise) take one path (a no-op / a return, a particular state, a particular result,
+# a particular size / a particular allocation), and allocate (Allocate_OrDbgBreak_8221F388, on a value (a, a value, a
+# particular value, a particular size, a particular size / a particular allocation), a particular allocation / a
+# particular size, a particular size / a particular allocation, a particular operation, a particular state / a
+# particular result).
+
+# Args: a (r3, a value), size (r4, r31, a size, a particular size, a particular value, a particular size / a
+# particular allocation), (more). It checks a size (r31, a, a size, a particular size, a particular value, a
+# particular size / a particular allocation): if it is non-zero (a particular value, a particular state, a particular
+# size / a particular allocation), it performs a check (a check, a particular check / a particular state, a
+# particular size / a particular allocation, a particular operation, calling sub_822F1F00, sub_822F1F00, on a value
+# (stack[80], a value, a particular value, a particular size / a particular allocation, a particular target), and a
+# constant (a constant, from a fixed .data address, a particular value, a particular size / a particular allocation, a
+# particular state), a particular check / a particular state, a particular size / a particular allocation, a
+# particular operation, a particular state / a particular result); if it is zero (a null state, a particular state, a
+# particular size / a particular allocation), it takes one path (a no-op / a return, a particular state, a
+# particular result, a particular size / a particular allocation). It allocates (Allocate_OrDbgBreak_8221F388,
+# sub_8221F388, an allocation, on a value (a, a value, a particular value, a particular size, a particular size / a
+# particular allocation), a particular allocation / a particular size, a particular size / a particular allocation, a
+# particular operation, a particular state / a particular result). So it's a "process (an allocation, with a check and
+# a call: (if a size (a size, a particular size, a particular value, a particular size / a particular allocation) is
+# non-zero, a particular value) perform a check (a check, a particular check / a particular state, a particular size /
+# a particular allocation, a particular operation, calling sub_822F1F00, on a value (stack[80], a value, a
+# particular value, a particular size / a particular allocation, a particular target), and a constant (a constant,
+# from a fixed .data address, a particular value, a particular size / a particular allocation, a particular state), a
+# particular check / a particular state, a particular size / a particular allocation, a particular operation, a
+# particular state / a particular result), and (otherwise) take one path (a no-op / a return, a particular state, a
+# particular result, a particular size / a particular allocation), and allocate (Allocate_OrDbgBreak_8221F388, on a
+# value (a, a value, a particular value, a particular size, a particular size / a particular allocation), a
+# particular allocation / a particular size, a particular size / a particular allocation, a particular operation, a
+# particular state / a particular result))" routine (an allocation check process, part of the 0x82301 cluster, a
+# caller of Allocate_OrDbgBreak_8221F388 and sub_822F1F00). 66 lines, 2 callees (Allocate_OrDbgBreak_8221F388, sub
+# _822F1F00). 4 callers: sub_82301240, sub_823012B0, sub_82B28F48, sub_82301878 (siblings in the 0x82301/0x82B28
+# clusters, a process, which calls this to perform the allocation check, a particular size / a particular allocation,
+# a particular operation). The value's meaning (a, a value, a particular value, a particular size / a particular
+# allocation) isn't resolvable, so the name states the mechanism: an allocation check process (with a check and a
+# call) ((if a size (a size, a particular size, a particular value, a particular size / a particular allocation) is
+# non-zero, a particular value) perform a check (a check, a particular check / a particular state, a particular size /
+# a particular allocation, a particular operation, calling sub_822F1F00, on a value (stack[80], a value, a
+# particular value, a particular size / a particular allocation, a particular target), and a constant (a constant,
+# from a fixed .data address, a particular value, a particular size / a particular allocation, a particular state), a
+# particular check / a particular state, a particular size / a particular allocation, a particular operation, a
+# particular state / a particular result), and (otherwise) take one path (a no-op / a return, a particular state, a
+# particular result, a particular size / a particular allocation), and allocate (Allocate_OrDbgBreak_8221F388, on a
+# value (a, a value, a particular value, a particular size, a particular size / a particular allocation), a
+# particular allocation / a particular size, a particular size / a particular allocation, a particular operation, a
+# particular state / a particular result)). The "AllocateCheck" refers to the allocation (an allocation, a
+# particular allocation / a particular size, a particular size / a particular allocation, a particular operation) and
+# the check (a check, a particular check / a particular state, a particular size / a particular allocation, a
+# particular operation).
+[functions."0x823014D0"]
+name = "ProcessAllocateCheck_823014D0"
+
+
+# A process (a grow/copy, with a range check and a call, the caller of sub_823012B0 / CheckedCopy_82CA3808, the
+# sibling of ProcessAllocateCheck_823014D0): (if a value (a, a value, a particular value, a particular size / a
+# particular allocation) is <= a size (obj->8 - obj->4, a size, a particular size, a particular size / a particular
+# allocation), a particular size) perform a range check (a range check, a particular range / a particular check, a
+# particular size / a particular allocation, a particular operation, a particular state / a particular result), and
+# (otherwise) grow/copy (a grow/copy, a particular grow / a particular copy, a particular size / a particular
+# allocation, a particular operation, a particular state / a particular result, calling sub_823012B0, on a value
+# (stack[80], a value, a particular value, a particular size / a particular allocation, a particular target), and a
+# value (stack[84], a value, a particular value, a particular size / a particular allocation, a particular source),
+# and a value (a, a value, a particular value, a particular size / a particular allocation, a particular size / a
+# particular allocation), a particular grow / a particular copy, a particular size / a particular allocation, a
+# particular operation, a particular state / a particular result), and (in paths) copy (CheckedCopy_82CA3808, on a
+# value, a particular copy, a particular size / a particular allocation, a particular operation, a particular state /
+# a particular result).
+
+# Args: obj (r3, r31, ->4 = a base, ->8 = a limit, a particular structure, a grow object), a (r4, a value, a
+# particular value, a particular size / a particular allocation), b (r5, r6, a value, a particular value, a
+# particular size / a particular allocation), (more). It checks a size (r9, obj->8 - obj->4, a size, a particular
+# size, a particular size / a particular allocation): if a value (r4, a, a value, a particular value, a particular
+# size / a particular allocation) is <= the size (a particular size, a particular state, a particular size / a
+# particular allocation), it performs a range check (a range check, a particular range / a particular check, a
+# particular size / a particular allocation, a particular operation, a particular state / a particular result); if
+# the value is > the size (a particular size, a particular state, a particular size / a particular allocation), it
+# grows/copies (a grow/copy, a particular grow / a particular copy, a particular size / a particular allocation, a
+# particular operation, a particular state / a particular result, calling sub_823012B0, sub_823012B0, a grow/copy, on
+# a value (stack[80], a value, a particular value, a particular size / a particular allocation, a particular
+# target), and a value (stack[84], a value, a particular value, a particular size / a particular allocation, a
+# particular source), and a value (a, a value, a particular value, a particular size / a particular allocation, a
+# particular size / a particular allocation), a particular grow / a particular copy, a particular size / a
+# particular allocation, a particular operation, a particular state / a particular result). In paths it copies
+# (CheckedCopy_82CA3808, sub_82CA3808, a checked copy, on a value (a, a value, a particular value, a particular size,
+# a particular size / a particular allocation), a particular copy, a particular size / a particular allocation, a
+# particular operation, a particular state / a particular result). So it's a "process (a grow/copy, with a range check
+# and a call: (if a value (a, a value, a particular value, a particular size / a particular allocation) is <= a size
+# (obj->8 - obj->4, a size, a particular size, a particular size / a particular allocation), a particular size)
+# perform a range check (a range check, a particular range / a particular check, a particular size / a particular
+# allocation, a particular operation, a particular state / a particular result), and (otherwise) grow/copy (a
+# grow/copy, a particular grow / a particular copy, a particular size / a particular allocation, a particular
+# operation, a particular state / a particular result, calling sub_823012B0, on a value (stack[80], a value, a
+# particular value, a particular size / a particular allocation, a particular target), and a value (stack[84], a
+# value, a particular value, a particular size / a particular allocation, a particular source), and a value (a, a
+# value, a particular value, a particular size / a particular allocation, a particular size / a particular
+# allocation), a particular grow / a particular copy, a particular size / a particular allocation, a particular
+# operation, a particular state / a particular result), and (in paths) copy (CheckedCopy_82CA3808, on a value, a
+# particular copy, a particular size / a particular allocation, a particular operation, a particular state / a
+# particular result))" routine (a grow/copy process, part of the 0x82300 cluster, a sibling of
+# ProcessAllocateCheck_823014D0, a caller of sub_823012B0 and CheckedCopy_82CA3808). 87 lines, 2 callees (sub
+# _823012B0, CheckedCopy_82CA3808). 10+ callers: sub_82A855A8, sub_823C2148, sub_822FDF78, sub_82886658, sub_82B31CA0
+# , sub_82B4A230, sub_82B88670, sub_82A4AE70, sub_824E7A50, sub_82B4A4F8 (processes, which call this to grow/copy, a
+# particular size / a particular allocation, a particular operation). The object's class (obj, ->4 = a base, ->8 = a
+# limit, a particular structure, a grow object, a particular size / a particular allocation, a particular value /
+# a particular state) and the value's meaning (a, a value, a particular value, a particular size / a particular
+# allocation, a particular size / a particular allocation) aren't resolvable, so the name states the mechanism: a
+# grow/copy process (with a range check and a call) ((if a value (a, a value, a particular value, a particular size /
+# a particular allocation) is <= a size (obj->8 - obj->4, a size, a particular size, a particular size / a
+# particular allocation), a particular size) perform a range check (a range check, a particular range / a
+# particular check, a particular size / a particular allocation, a particular operation, a particular state / a
+# particular result), and (otherwise) grow/copy (a grow/copy, a particular grow / a particular copy, a
+# particular size / a particular allocation, a particular operation, a particular state / a particular result, calling
+# sub_823012B0, on a value (stack[80], a value, a particular value, a particular size / a particular allocation, a
+# particular target), and a value (stack[84], a value, a particular value, a particular size / a particular
+# allocation, a particular source), and a value (a, a value, a particular value, a particular size / a
+# particular allocation, a particular size / a particular allocation), a particular grow / a particular copy, a
+# particular size / a particular allocation, a particular operation, a particular state / a particular result), and
+# (in paths) copy (CheckedCopy_82CA3808, on a value, a particular copy, a particular size / a particular allocation, a
+# particular operation, a particular state / a particular result)). The "GrowCopy" refers to the grow/copy (a
+# grow/copy, a particular grow / a particular copy, a particular size / a particular allocation, a
+# particular operation, a particular state / a particular result).
+[functions."0x82300648"]
+name = "ProcessGrowCopy_82300648"
+
+
+# A process (a grow/append, with a range check and a copy, the sibling of ProcessGrowAppend_82BE4AA8 /
+# ProcessGrowAppend2_8321F328 / ProcessGrowCopy_82300648, the caller of sub_82A97648 / CheckedCopy_82CA3808 / Free
+# _SizeBucketed_Thunk_8221BE68 / ProcessAllocateCheck_823014D0): (if a base (obj->4, a base, a particular value, a
+# particular size / a particular allocation) is non-zero, a particular value) compute a size (obj->12 - obj->4, a
+# size, a particular size, a particular size / a particular allocation, a particular operation), and (if a count
+# (obj->8 - obj->4 - 1, a count, a particular count, a particular size / a particular allocation) is >= a value
+# (r29, a count, a particular count, a particular size / a particular allocation), a particular count) perform a
+# range check (a range check, a particular range / a particular check, a particular size / a particular allocation, a
+# particular operation, a particular state / a particular result), and (otherwise) grow/append (a grow/append, a
+# particular grow / a particular append, a particular size / a particular allocation, a particular operation, a
+# particular state / a particular result, calling sub_82A97648, on a value, a particular grow / a particular
+# append, a particular size / a particular allocation, a particular operation, a particular state / a
+# particular result), and (in paths) copy (CheckedCopy_82CA3808, on a value, a particular copy, a particular size /
+# a particular allocation, a particular operation, a particular state / a particular result), and free
+# (Free_SizeBucketed_Thunk_8221BE68, on a value, a particular free / a particular size, a particular size / a
+# particular allocation, a particular operation, a particular state / a particular result), and allocate
+# (ProcessAllocateCheck_823014D0, on a value, a particular allocation / a particular check, a particular size / a
+# particular allocation, a particular operation, a particular state / a particular result).
+
+# Args: obj (r3, r28, ->4 = a base, ->8 = a limit, ->12 = a base, a particular structure, a grow object), a (r4, a
+# value), count (r5, r29, a count, a particular count, a particular size / a particular allocation), b (r6, a value,
+# a particular value, a particular size / a particular allocation), (more). It checks a base (r11, obj->4, a base, a
+# particular value, a particular size / a particular allocation): if it is non-zero (a particular value, a
+# particular state, a particular size / a particular allocation), it computes a size (r10, obj->12 - obj->4, a size, a
+# particular size, a particular size / a particular allocation, a particular operation). It checks a count (r29, a
+# count, a particular count, a particular size / a particular allocation): if it is zero (a null state, a
+# particular state, a particular size / a particular allocation), it takes one path (a no-op / a return, a
+# particular state, a particular result, a particular size / a particular allocation). If it is non-zero (a
+# particular value, a particular state, a particular size / a particular allocation), it checks a count (r9, obj->8
+# - obj->4 - 1, a count, a particular count, a particular size / a particular allocation): if it is >= the count (a
+# particular count, a particular state, a particular size / a particular allocation), it performs a range check (a
+# range check, a particular range / a particular check, a particular size / a particular allocation, a particular
+# operation, a particular state / a particular result); if it is < the count (a particular count, a particular
+# state, a particular size / a particular allocation), it grows/appends (a grow/append, a particular grow / a
+# particular append, a particular size / a particular allocation, a particular operation, a particular state / a
+# particular result, calling sub_82A97648, sub_82A97648, a grow/append, on a value (a, a value, a particular value,
+# a particular size, a particular size / a particular allocation), a particular grow / a particular append, a
+# particular size / a particular allocation, a particular operation, a particular state / a particular result). In
+# paths it copies (CheckedCopy_82CA3808, sub_82CA3808, a checked copy, on a value (a, a value, a particular value, a
+# particular size, a particular size / a particular allocation), a particular copy, a particular size / a
+# particular allocation, a particular operation, a particular state / a particular result), frees
+# (Free_SizeBucketed_Thunk_8221BE68, sub_8221BE68, a free, on a value (a, a value, a particular value, a particular
+# size, a particular size / a particular allocation), a particular free / a particular size, a particular size / a
+# particular allocation, a particular operation, a particular state / a particular result), and allocates
+# (ProcessAllocateCheck_823014D0, sub_823014D0, an allocation, on a value (a, a value, a particular value, a
+# particular size, a particular size / a particular allocation), a particular allocation / a particular check, a
+# particular size / a particular allocation, a particular operation, a particular state / a particular result). So
+# it's a "process (a grow/append, with a range check and a copy: (if a base (obj->4, a base, a particular value, a
+# particular size / a particular allocation) is non-zero, a particular value) compute a size (obj->12 - obj->4, a
+# size, a particular size, a particular size / a particular allocation, a particular operation), and (if a count
+# (obj->8 - obj->4 - 1, a count, a particular count, a particular size / a particular allocation) is >= a value
+# (r29, a count, a particular count, a particular size / a particular allocation), a particular count) perform a
+# range check (a range check, a particular range / a particular check, a particular size / a particular allocation, a
+# particular operation, a particular state / a particular result), and (otherwise) grow/append (a grow/append, a
+# particular grow / a particular append, a particular size / a particular allocation, a particular operation, a
+# particular state / a particular result, calling sub_82A97648, on a value, a particular grow / a
+# particular append, a particular size / a particular allocation, a particular operation, a particular state / a
+# particular result), and (in paths) copy (CheckedCopy_82CA3808, on a value, a particular copy, a particular size /
+# a particular allocation, a particular operation, a particular state / a particular result), and free
+# (Free_SizeBucketed_Thunk_8221BE68, on a value, a particular free / a particular size, a particular size / a
+# particular allocation, a particular operation, a particular state / a particular result), and allocate
+# (ProcessAllocateCheck_823014D0, on a value, a particular allocation / a particular check, a particular size / a
+# particular allocation, a particular operation, a particular state / a particular result))" routine (a grow/append
+# process, part of the 0x82301 cluster, a sibling of ProcessGrowCopy_82300648, a caller of CheckedCopy_82CA3808,
+# Free_SizeBucketed_Thunk_8221BE68, and ProcessAllocateCheck_823014D0). 324 lines, 4 callees (CheckedCopy_82CA3808,
+# Free_SizeBucketed_Thunk_8221BE68, sub_823014D0, sub_82A97648). 2 callers: sub_82B29020, sub_82300648 (ProcessGrow
+# Copy, a grow/copy process, which calls this to grow/append, a particular size / a particular allocation, a
+# particular operation). The object's class (obj, ->4 = a base, ->8 = a limit, ->12 = a base, a particular
+# structure, a grow object, a particular size / a particular allocation, a particular value / a
+# particular state) and the value's meaning (a, a value, a particular value, a particular size / a
+# particular allocation) aren't resolvable, so the name states the mechanism: a grow/append process (with a range
+# check and a copy) ((if a base (obj->4, a base, a particular value, a particular size / a particular allocation) is
+# non-zero, a particular value) compute a size (obj->12 - obj->4, a size, a particular size, a
+# particular size / a particular allocation, a particular operation), and (if a count (obj->8 - obj->4 - 1, a
+# count, a particular count, a particular size / a particular allocation) is >= a value (r29, a count, a
+# particular count, a particular size / a particular allocation), a particular count) perform a range check (a
+# range check, a particular range / a particular check, a particular size / a particular allocation, a
+# particular operation, a particular state / a particular result), and (otherwise) grow/append (a grow/append, a
+# particular grow / a particular append, a particular size / a particular allocation, a particular operation, a
+# particular state / a particular result, calling sub_82A97648, on a value, a particular grow / a
+# particular append, a particular size / a particular allocation, a particular operation, a particular state / a
+# particular result), and (in paths) copy (CheckedCopy_82CA3808, on a value, a particular copy, a
+# particular size / a particular allocation, a particular operation, a particular state / a particular result), and
+# free (Free_SizeBucketed_Thunk_8221BE68, on a value, a particular free / a particular size, a
+# particular size / a particular allocation, a particular operation, a particular state / a
+# particular result), and allocate (ProcessAllocateCheck_823014D0, on a value, a
+# particular allocation / a particular check, a particular size / a particular allocation, a
+# particular operation, a particular state / a particular result)). The "10" distinguishes it from ProcessGrowAppend
+# _82BE4AA8, ProcessGrowAppend2_8321F328, ProcessGrowAppend3_8321FC38, ProcessGrowAppend4_8323CB98, ProcessGrowAppend
+# 5_83212DC0, ProcessGrowAppend6_83216060, ProcessGrowAppend7_83221138, ProcessGrowAppend8_83221378, and
+# ProcessGrowAppend9_83221548.
+[functions."0x823012B0"]
+name = "ProcessGrowAppend10_823012B0"
+
+
+# Returns the constant 2048 (0x800). Tiny leaf function: `r3 = 2048; return;`.
+# Part of the 0x82323 cluster (sibling of the 0x82323E38 allocation helper below it).
+# No direct callers found in the recompiled code (likely reached via a vtable or the
+# function-pointer table). Sibling of ReturnConstant_16384_82A145F0 / ReturnConstant_4096_82A11F28.
+[functions."0x82323C60"]
+name = "ReturnConstant_2048_82323C60"
+
+
+# Splices a node into (or out of) a doubly-linked list by rewiring the neighbor pointers. It takes a list
+# head (obj) and a node (r11), advances the head's pointer (obj->0) to the node's successor (r11->8), and
+# then patches the cross-links: when the node's ->17 flag is clear it links the node as the head's ->4, and
+# it rewrites the ->4 / ->8 next- and back-pointers on both the node and its predecessor (a->4 / r10->4 /
+# r10->8) so the chain stays consistent. This is the low-level "relink one list node" primitive for the
+# 0x82301 linked-list cluster, used by 7 callers across the 0x8230/0x8246/0x826A/0x8282/0x8285/0x82BF/0x82C7
+# range. Part of the 0x82301 linked-list cluster (sibling of ListNodeInsert_8234D268). 67 lines, 0 direct
+# callees (pure pointer rewiring). 7 callers (the 0x8230/0x8246/0x826A/0x8282/0x8285/0x82BF/0x82C7 cluster).
+[functions."0x82301AE0"]
+name = "SpliceListNode_82301AE0"
+
+
+# A processor that indexes into an element array. It takes a range (a: a low bound at a->4 and a high bound at a->8) and an index.
+# When a->4 is set, it computes the element count as (a->8 - a->4) / 36 and checks the index against it; otherwise it calls sub_8233DB18
+# (an unresolved helper). It validates the range (trapping with ppc_trap 22 if the low bound exceeds the high bound) and computes the
+# element position (index << 3, a 32-byte stride) for the lookup. This is the "index into this element array" routine, part of the
+# 0x8233D index cluster. 110 lines. 1 callee (sub_8233DB18, unresolved). 4 callers.
+[functions."0x8233D880"]
+name = "ProcessAndIndexElement_8233D880"
+
+
+# A processor that applies and processes the data. It takes a structure (a: field at a->0) and a structure (b: field at b->4). It reads b->4 (a pointer); when the pointer is non-zero it reads the pointer's +12 field (a value) and +8 field
+# (a value) and computes (the +8 field minus the +12 field) shifted right by 3. It then applies (ProcessApply_8227B7E0, with the pointer, a .data pointer, 0, and the computed value). This is the "apply and process this data" routine, part
+# of the 0x82306 process cluster. 143 lines. 4 callees (GrowAndZeroBuffer, ProcessAndConstructAndDispatch, ProcessAndGuardedDispatch, and ProcessApply). 2 callers (sub_823F8908 and sub_82173718).
+[functions."0x82306718"]
+name = "ProcessAndApplyAndProcess_82306718"
+
+
+# A processor that compares and processes the data. It takes a value (a). It stores 0 into a local buffer, constructs a refcounted (ConstructRefCounted_8222CF18, with the buffer, -1, and 3). It then compares strings (StrCmp_Signed_8226D7A8, with a .data pointer (3224) and a .data pointer (11932)). This is the "compare and process this data" routine, part of the 0x82304 process cluster. 554 lines. 5 callees (Allocate_OrDbgBreak, ConstructRefCounted, DestructRefCounted, ProcessAndConstructAndAtomicIncrement, and StrCmp_Signed). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82304E40"]
+name = "ProcessAndCompareAndProcess_82304E40"
+
+
+# A processor that vcalls and processes the data (twentieth form). It takes a structure (a: field at a->0). It reads a->0 (a pointer) and +8 (a method pointer) and performs a virtual call. It then reads a->0 (a pointer) and +0 (a method pointer) and performs a virtual call (with a and 1). This is the "vcall and process this data" routine (twentieth form), part of the 0x82305 process cluster. 51 lines. 0 callees (leaf function — performs raw memory operations and virtual calls). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82305218"]
+name = "ProcessAndVcallAndProcess20_82305218"
+
+
+# A processor that frees and processes the data (fourth form). It takes a structure (a: field at a->4), a value (b), a value (c), and a value (d). It reads a->4 (a pointer) and the pointer's +0 field. When b is zero or b equals a it traps (ppc_trap 22). It then frees and processes the data (ProcessAndRecurseAndFree_82B4F2F8, with other values). This is the "free and process this data" routine (fourth form), part of the 0x8233E process cluster. 155 lines. 3 callees (FindChainRoot3, ProcessAndRecurseAndFree, and sub_822FF3C8). 3 callers (sub_82B4F198, sub_8233DDD8, and sub_82304A00).
+[functions."0x8233E468"]
+name = "ProcessAndFreeAndProcess4_8233E468"
+
+
+# A processor that processes the data (thirteenth form). It takes a value (a), a structure (b: fields at b->4 and b->8), a pointer (c), and a value (d). It processes the data (a, b, c, and d). This is the "process this data" routine (thirteenth form), part of the 0x82307 process cluster. 306 lines. 4 callees (sub_82308190, sub_82308418, sub_8273ACB8, and sub_8273FAF8). 1 caller (ChainSearch4).
+[functions."0x823074B8"]
+name = "ProcessAndProcessAndProcess13_823074B8"
+
+
+# A processor that processes the data (fourteenth form). It takes a value (a), a structure (b: field at b->8), a value (c), a value (d), and a value (e). It processes the data (a, b, c, d, and e). This is the "process this data" routine (fourteenth form), part of the 0x82308 process cluster. 349 lines. 9 callees (Allocate_OrDbgBreak, SetString, sub_82171810, sub_822F1F00, sub_82308C28, sub_8234DF98, sub_824AF0E8, sub_826C3EF0, and sub_826C3FA8). 2 callers (ProcessAndProcessAndProcess13 and sub_82308190).
+[functions."0x82308418"]
+name = "ProcessAndProcessAndProcess14_82308418"
+
+
+# An allocator that allocates the data (eighteenth form). It takes a structure (a: fields at a->4, a->8, and a->12) and a value (b). It allocates the data (a and b). This is the "allocate this data" routine (eighteenth form), part of the 0x82301 allocate cluster. 65 lines. 2 callees (ProcessAllocateCheck and sub_82A97648). 3 callers (sub_82350EC8, sub_82B29880, and sub_8272E610).
+[functions."0x82301240"]
+name = "ProcessAndAllocateAndProcess18_82301240"
+
+
+# A processor that processes the data (two hundred and twenty-sixth form). It takes a structure (a: fields at a->8, a->12, a->16, a->20, a->24, a->28, a->32, a->36, a->40, a->44, a->48, a->52, a->56, a->60, and a->64). It processes the data (a). This is the "process this data" routine (two hundred and twenty-sixth form), part of the 0x82305 process cluster. 417 lines. 7 callees (Allocate_OrDbgBreak, Construct16Byte, sub_8235E278, sub_8240D938, sub_8241AAB0, sub_8241AC20, and sub_829F8250). 2 callers (sub_82378CD0 and sub_8233AE50).
+[functions."0x823052C0"]
+name = "ProcessAndProcessAndProcess226_823052C0"
+
+
+# A processor that processes the data (two hundred and twenty-seventh form). It takes a value (a), a value (b), and a value (c). It processes the data (a, b, and c). This is the "process this data" routine (two hundred and twenty-seventh form), part of the 0x82307 process cluster. 77 lines. 3 callees (Allocate_OrDbgBreak, CopyAssign_RefCounted, and sub_825BBA48). 11 callers (sub_823A5870, sub_82A188F0, sub_82357490, sub_825B27D0, sub_82308B48, sub_825B2E20, sub_82A17518, sub_825B26A8, sub_82172A10, sub_82A18998, and ProcessAndVcallAndProcess16).
+[functions."0x823077B8"]
+name = "ProcessAndProcessAndProcess227_823077B8"
+
+
+# A processor that processes the data (two hundred and twenty-eighth form). It takes nothing. It processes the data. This is the "process this data" routine (two hundred and twenty-eighth form), part of the 0x82338 process cluster. 135 lines. 0 callees (no function calls). 2 callers (sub_82368538 and sub_82368B20).
+[functions."0x82338DA8"]
+name = "ProcessAndProcessAndProcess228_82338DA8"
+
+
+# A processor that processes the data (two hundred and twenty-ninth form). It takes a structure (a: fields at a->0, a->4, and a->8). It processes the data (a). This is the "process this data" routine (two hundred and twenty-ninth form), part of the 0x8233D process cluster. 61 lines. 2 callees (Free_SizeBucketed_Thunk and sub_8233E468). 4 callers (sub_8233DB90, sub_832AEFD0, sub_822F0250, and ProcessAndProcessAndProcess215).
+[functions."0x8233DDD8"]
+name = "ProcessAndProcessAndProcess229_8233DDD8"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and seventy-fourth form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess1272) based on the result. This is a very frequently-called helper in the 0x82331 process cluster. 74 lines. 1 callee. 96 callers.
+[functions."0x82331308"]
+name = "ProcessAndProcessAndProcess1274_82331308"
+
+
+# Process a large data structure by freeing size-bucketed memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and tenth form). It takes a structure, frees size-bucketed memory (Free_SizeBucketed), drives a sub-operation (ProcessAndProcessAndProcess479), and drives sub-operations (sub_8238E348, sub_8238E400, sub_8238E4E8, sub_8238E7D8, sub_82CFA1B0) based on the result. Part of the 0x8230B process cluster. 353 lines. 7 callees. 1 caller (ProcessAndProcessAndProcess1290).
+[functions."0x8230B488"]
+name = "ProcessAndProcessAndProcess1310_8230B488"
+
+
+# Process a very large data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and eleventh form). It takes a structure, checks a valid pointer (CheckValidPointer), constructs a refcounted object (ConstructRefCounted), counts non-zero bytes (CountNonZeroBytes), destructs a refcounted object (DestructRefCounted), finds a chain root (FindChainRoot3), gets a flag (GetFlag), decrements and disposes (ProcessAndDecrementDispose), finds a tree leaf (ProcessAndFindTreeLeafLocked), and drives many sub-operations (ProcessAndProcessAndProcess1124, ProcessAndProcessAndProcess320, ReleaseGlobalRef, sub_82172EE8, sub_821B3360, sub_822F9408, sub_822FE7F0, sub_8230B348, sub_8230C328, sub_8230CE40, sub_82323398, sub_8238A2D8, sub_82455F20) based on the result. This is a very large refcounted-object tree processor in the 0x8230B cluster. 1118 lines. 21 callees. 2 callers (ProcessAndProcessAndProcess1290 and sub_823214B8).
+[functions."0x8230BB78"]
+name = "ProcessAndProcessAndProcess1311_8230BB78"
+
+
+# Process an enormous data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and twelfth form). It takes a structure, checks a valid pointer (CheckValidPointer), constructs a refcounted object (ConstructRefCounted), destructs a refcounted object (DestructRefCounted), gets a flag (GetFlag), increments a counter (ProcessAndIncrementCounter), grows a bit array (ProcessGrowBitArray), releases a global reference (ReleaseGlobalRef), and drives many sub-operations (ProcessAndProcessAndProcess1120, sub_82172EE8, sub_821BD998, sub_822D0688, sub_822FE7F0, sub_8230BAF0, sub_8230CE40, sub_82323168, sub_82323398, sub_82323550, sub_82323D58, sub_82331378, sub_82392FF8, sub_823B6D98) based on the result. This is the fifth-largest function in the recompiled binary, a refcounted-object tree processor in the 0x8230C cluster. 1588 lines. 21 callees. 1 caller (ProcessAndProcessAndProcess1311).
+[functions."0x8230C328"]
+name = "ProcessAndProcessAndProcess1312_8230C328"
+
+
+# Process a structure by copy-assigning a refcounted object (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and thirty-third form). It takes a structure, copy-assigns a refcounted object (CopyAssign_RefCounted), destructs a refcounted object (DestructRefCounted), increments a global counter (IncrementGlobalCounter2), and drives sub-operations (ProcessAndProcessAndProcess1228, ProcessAndProcessAndProcess1315, ProcessAndProcessAndProcess1634) based on the result. This is a frequently-called helper in the 0x82301 process cluster. 114 lines. 6 callees. 12 callers.
+[functions."0x82301FF8"]
+name = "ProcessAndProcessAndProcess1633_82301FF8"
+
+
+# Process a large structure by constructing a refcounted object (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and thirty-fourth form). It takes a structure, constructs a refcounted object (ConstructRefCounted), copy-assigns a refcounted object (CopyAssign_RefCounted), and drives a sub-operation (sub_8222C210) based on the result. Part of the 0x82303 process cluster. 289 lines. 3 callees. 1 caller (ProcessAndProcessAndProcess1633).
+[functions."0x82303898"]
+name = "ProcessAndProcessAndProcess1634_82303898"
+
+
+# Process a structure by copy-assigning a refcounted object (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and sixty-seventh form). It takes a structure, copy-assigns a refcounted object (CopyAssign_RefCounted), destructs a refcounted object (DestructRefCounted), and drives sub-operations (ProcessAndProcessAndProcess1228, ProcessAndProcessAndProcess1315, ProcessAndProcessAndProcess1633) based on the result. This is a frequently-called helper in the 0x82301 process cluster. 95 lines. 5 callees. 11 callers.
+[functions."0x82301F58"]
+name = "ProcessAndProcessAndProcess1667_82301F58"
+
+
+# Process a large data structure by constructing a refcounted object (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and twenty-sixth form). It takes a structure, constructs a refcounted object (ConstructRefCounted), copy-assigns a refcounted object (CopyAssign_RefCounted), destructs a refcounted object (DestructRefCounted), replaces a refcounted object (ProcessAndReplaceRefCounted), releases a global reference (ReleaseGlobalRef), and drives sub-operations (ProcessAndProcessAndProcess1228, ProcessAndProcessAndProcess1633, ProcessAndProcessAndProcess320, sub_821E6408, sub_8236D798, sub_82B3A7A0, sub_82B3AA88) based on the result. This is a very frequently-called helper in the 0x82301 process cluster. 229 lines. 12 callees. 245 callers.
+[functions."0x82301D40"]
+name = "ProcessAndProcessAndProcess1726_82301D40"
+
+
+# Process a structure by accessing an element (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and three hundred and ninety-sixth form). It takes a structure and accesses an element (AccessElement8). This is a frequently-called helper in the 0x82309 process cluster. 59 lines. 1 callee. 77 callers.
+[functions."0x82309520"]
+name = "ProcessAndProcessAndProcess2096_82309520"
+
+
+# Process a very large data structure by allocating fresh memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and four hundred and twelfth form). It takes a structure, allocates fresh memory (Allocate_OrDbgBreak), splices a linked-list node (List_SpliceNode2), splices another linked-list node (List_SpliceNode3), frees and processes (ProcessAndFreeAndProcess9), sets a string (SetString), and drives sub-operations (sub_822F1F00, sub_826C3EF0, sub_826C3FA8) based on the result. This is a frequently-called processor in the 0x82300 process cluster. 352 lines. 8 callees. 5 callers.
+[functions."0x823003C8"]
+name = "ProcessAndProcessAndProcess2112_823003C8"
+
+
+# Process a structure by checking its state and driving many sub-operations (two thousand four hundred and eighty-sixth form). It takes a value (a), a structure (b: fields at b->156 and b->160), and a value (c); it checks the structure's state, and drives many sub-operations (ProcessAndProcessAndProcess1802, ProcessAndProcessAndProcess1864, ProcessAndProcessAndProcess2194, ProcessAndProcessAndProcess2464, ProcessAndProcessAndProcess2484, and more) based on the result. This is the "process this data" routine (two thousand four hundred and eighty-sixth form), part of the 0x82306 process cluster. 64 lines. 5 callees. 12 callers (sub_82833A90, sub_82583140, sub_82583938, and more).
+[functions."0x82306098"]
+name = "ProcessAndProcessAndProcess2485_82306098"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand four hundred and one hundred and two hundred and twenty-fourth form). It takes a value (a), a structure (b: fields at b->4 and b->8), and a value (c); it checks the value's state, and drives sub-operations (sub_82308690) based on the result, looping over elements. This is the "process this data" routine (two thousand four hundred and one hundred and two hundred and twenty-fourth form), part of the 0x82307 process cluster. 132 lines. 1 callee. 1 caller (ProcessAndProcessAndProcess2121).
+[functions."0x823076D8"]
+name = "ProcessAndProcessAndProcess2673_823076D8"
+
+
+# Process a value by checking its state and driving many sub-operations (two thousand four hundred and one hundred and two hundred and twenty-fifth form). It takes a structure (a: fields at a->4 and a->12), a value (b), a value (c), and a value (d); it checks the value's state, and drives many sub-operations (CopyAssign_RefCounted, ConstructArray4, Free_SizeBucketed, and more) based on the result. This is the "process this data" routine (two thousand four hundred and one hundred and two hundred and twenty-fifth form), part of the 0x82308 process cluster. 550 lines. 7 callees. 2 callers.
+[functions."0x82308690"]
+name = "ProcessAndProcessAndProcess2674_82308690"
+
+
+# Complex game entity initialization. Takes the game state and a constructed reference. Calls ProcessAndProcessAndProcess2254, ProcessAndProcessAndProcess938, ProcessAndProcessAndProcess1309, and sub_822F9EC0. 199 lines. 5+ callees. Called from the main game loop.
+[functions."0x8233CAC8"]
+name = "InitializeGameEntity_8233CAC8"

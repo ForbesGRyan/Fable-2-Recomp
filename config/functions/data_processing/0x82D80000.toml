@@ -1,0 +1,9 @@
+# data-processing region 0x82D80000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# Process a value by checking its state (two thousand four hundred and one hundred and two hundred and tenth form). It takes a structure (a: fields at a->8 and a->4) and a value (b); it checks the value's state, and stores the value and a global pointer into the structure's fields. This is the "process this data" routine (two thousand four hundred and one hundred and two hundred and tenth form), part of the 0x82D9E process cluster. 10 lines. 0 callees. 12 callers.
+[functions."0x82D9E708"]
+name = "ProcessAndProcessAndProcess2659_82D9E708"

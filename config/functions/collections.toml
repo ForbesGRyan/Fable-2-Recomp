@@ -1,0 +1,1219 @@
+# collections functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# An insert-at-position (with possible growth) on a 12-byte-stride dynamic
+# array in the 0x8237 region.
+
+# Args: obj (r3), a value (r4), a count/offset (r5), and a data triple (r6, a
+# 3-word struct). The obj holds a 12-byte-stride array: start = obj->4, current
+# position = obj->8, end/capacity = obj->12. It computes element indices as
+# (obj->12 - obj->4)/12 (total) and (obj->8 - obj->4)/12 (current), clamps the
+# requested index/insertion point against these, and -- when the array must
+# grow -- reallocates (frees via Free_SizeBucketed_Thunk_8221BE68 and calls
+# sub_82684B38 for the new block, with sub_8264EFE0 as a helper). Returns void.
+# 2 callers (sub_8236FDD8, sub_82B423F0). The exact element semantics aren't
+# resolvable, so the name states the mechanism: insert at a position in a
+# 12-byte-stride dynamic array, growing it as needed.
+[functions."0x82370A98"]
+name = "Array_InsertAt_82370A98"
+
+
+# A validated single-element insert into the 12-byte-stride dynamic array --
+# the count==1 wrapper around Array_InsertAt_82370A98 (same 0x8236/0x8237 array
+# family).
+
+# Args: obj (r3), array (r4), value (r5), data triple (r6). Validates the array
+# preconditions with debug assertions (ppc_trap 22 on violation): array->4 (start)
+# ordering vs array->8 (current), and the data pointer. Computes the current
+# element index (array->8 - array->4)/12, then calls Array_InsertAt_82370A98
+# (array, value, count=1, data) to insert ONE element. Returns void. 3 callers
+# (sub_8236F0F0, sub_8236E1B0, sub_82B41738). Named for the mechanism: a
+# single-element (count==1) insert with precondition checks.
+[functions."0x8236FDD8"]
+name = "Array_InsertOne_8236FDD8"
+
+
+# A push_back / append to a u32 dynamic array (4-byte stride).
+
+# Args: obj (r3, the array), value (r4). The array layout: obj->0 = base
+# pointer, obj->8 = current index/count, obj->4 = capacity. If (obj->4 - obj->8)
+# < 1 (no room), it calls sub_82C21C90 (an ensure-capacity/grow) with a new
+# size. Then stores value at base[obj->8] (a 4-byte-stride slot: *(obj->0 +
+# obj->8 * 4) = value) and increments obj->8. Returns void. 38 callers, all in
+# the 0x82C2-0x82C3 region. Named for the mechanism: append a u32 to a dynamic
+# array (grow as needed, then store + bump the index).
+[functions."0x82C21E08"]
+name = "Array_PushBack_82C21E08"
+
+
+# A push of a 36-byte element (a small-buffer object) into a 36-byte-stride
+# array (the 0x8237 array family; the elements are the small-buffer class that
+# LoadFrom_Source_822F2398 operates on).
+
+# Args: obj (r3, the array: obj->4 = start, obj->8 = current, obj->12 = end,
+# 36-byte stride), source element (r4). Computes the element counts (obj->8 -
+# obj->4)/36 and (obj->12 - obj->4)/36. If there is room (current element index
+# < end element index): copy the source element into the slot at obj->8 via
+# LoadFrom_Source_822F2398, then advance obj->8 by 36 (one element). Otherwise
+# (array full) it routes to sub_82376118 (a grow path). Returns void. 7 callers
+# (sub_82B3EDD0, sub_82B4B0E0, sub_82375270, ...). Named for the mechanism: push
+# a 36-byte element into the array (copy in, bump the position, grow if full).
+[functions."0x823758C0"]
+name = "Array_PushElement_823758C0"
+
+
+# A validated tree-node removal: destroys the node's subtree and rewires the
+# links to take the node out of the structure.
+
+# Args: obj (r3), node (r4), and two pointers (r5, r6). Validates preconditions
+# with `trap 22` assertions (r5 and r6 must be nonzero, not equal to node, and
+# must match node's fields). On success it destroys the node's subtree via
+# DestroyTreeNodes_82859340(node, node->4), then rewires: obj->0 = node, clears
+# node->8, sets the node's self-reference fields, and copies node->4->0 into
+# obj->4 (splicing the node out). Returns void. 11 callers (sub_82A6D9F0,
+# sub_82A56CA0, sub_82B150D8, ...). Named for the mechanism: remove a node from
+# a tree (destroy its subtree, rewire the links).
+[functions."0x826A4A20"]
+name = "Tree_RemoveNode_826A4A20"
+
+
+# A push of a 12-byte element into a 12-byte-stride array (with growth) -- a
+# sibling of Array_PushElement_823758C0 (36-byte) and Array_PushBack_82C21E08
+# (u32), but here the element is a raw 12-byte struct copied verbatim.
+
+# Args: obj (r3, the array: obj->4 = start, obj->8 = current, obj->12 = end,
+# 12-byte stride), src (r4, a 12-byte struct). Computes current element count
+# (obj->8 - obj->4)/12 and total (obj->12 - obj->4)/12. If there is room (current
+# < total): copy the 12 bytes from src into the slot at obj->8 (obj->8+0/+4/+8 =
+# src->0/+4/+8), then advance obj->8 by 12. Otherwise (full): validate (obj->4 <=
+# obj->8, else `trap 22`) and grow via sub_82C66BE0, then push. Returns void.
+# Single caller: sub_82C67878. Named for the mechanism: push a 12-byte element
+# into the array (copy in, bump the position, grow if full).
+[functions."0x82C66E00"]
+name = "Array_Push12_82C66E00"
+
+
+# A tree insertion: walk a binary tree to find the insertion point for a key, then
+# insert a node (with a fixup call).
+
+# Args: root (r3, whose ->4 is the first node), key wrapper (r4, *r4 = the key).
+# The nodes carry: ->8 = right child, ->0 = parent, ->12 = node key, ->21 = a
+# state byte (0 / nonzero). The search loop walks the tree -- if node->12 >= key,
+# step up to the parent (*node); else step right (node->8) -- until it reaches a
+# node with a nonzero state byte (the insertion point). It then performs the
+# insertion (splicing a new node in) and calls sub_82419280 (a tree fixup/rebalance
+# step). 7 callers (sub_829FF798, sub_823715E8, sub_8236DFC0, sub_8226A650,
+# sub_829FFC48, sub_82A000F8, sub_82509E40). The exact tree type (e.g. red-black)
+# isn't confirmed from the fields, so the name states the observable behavior: a
+# tree insert (find the point, insert, fix up).
+[functions."0x82A00620"]
+name = "Tree_Insert_82A00620"
+
+
+# A tree find-and-process: walk the tree to locate the node / insertion point for a
+# key, then process it -- a sibling of Tree_Insert_82A00620 (same node layout: ->8 right,
+# ->0 parent, ->12 key, ->25 state byte).
+
+# Args: obj (r3, ->4 = first node), key wrapper (r4, *r4 = the key). Walks the tree --
+# if node->12 < key step right (node->8), else step up to the parent (*node) -- until a
+# node with a nonzero ->25 state byte (the target). Then it processes the located node:
+# compares it to the key, and (depending on the result) calls sub_82A122F8 and
+# Release_RefCounted_829FF648 (releasing a node's payload). 166 lines, 1 caller:
+# sub_83218598. The exact find-vs-remove semantics and the node class aren't fully
+# resolvable, so the name states the observable mechanism: walk the tree to find the
+# node for a key, then process it (release + sub_82A122F8).
+[functions."0x82A120B0"]
+name = "Tree_FindNode_82A120B0"
+
+
+# A 28-byte-stride array push (sibling of Array_Push12_82C66E00): if there is room,
+# initialize a new 28-byte element at the array's current position and advance.
+
+# Args: obj (r3, the array: obj->4 = start, obj->8 = current, obj->12 = end, 28-byte
+# stride). Computes the current element count (obj->8 - obj->4)/28 and the capacity
+# (obj->12 - obj->4)/28. If there is no room (count >= capacity), return. Otherwise, at
+# obj->8, initialize a new 28-byte element (zeroes some fields, sets a few constants --
+# e.g. element->20 = 0) and sets up the element's data via RangeUpdate_8218EA38 and
+# sub_82C643F0, then advances obj->8 by 28. Returns void. 2 callers (sub_82C83378,
+# sub_82C67878). The element class (a 28-byte struct) isn't resolvable, so the name
+# states the mechanism: push a 28-byte element into the array (room check, init, advance).
+[functions."0x82C644D0"]
+name = "Array_Push28_82C644D0"
+
+
+# A self-contained tree find (12 callers, no external callees -- all processing inline)
+# with the same node layout and walk as Tree_FindNode_82A120B0 and Tree_Insert_82A00620
+# (->8 right, ->0 parent, ->12 key, ->25 state byte).
+
+# Args: (r3), obj (r4, ->4 = first node), key wrapper (r5, *r5 = the key). Walks the tree
+# -- if node->12 < key step right (node->8), else step up to the parent (*node) -- until a
+# node with a nonzero ->25 state byte (the target). Then it processes the located node
+# entirely inline (no external sub-calls): compares it to the key and rewrites the
+# surrounding node pointers. Returns the located/adjusted node. 12 callers (sub_828D9110,
+# sub_828D9FE8, sub_828DA098, sub_823385D0, sub_83234418, ...). The node class and the
+# exact find-vs-rebalance semantics aren't resolvable, so the name states the mechanism:
+# a self-contained tree find (walk to the insertion point, process inline) -- a sibling
+# of Tree_FindNode_82A120B0.
+[functions."0x82A12230"]
+name = "Tree_FindNode2_82A12230"
+
+
+# A hash-table lookup (linear probing / open addressing): find a key in a flat hash
+# table.
+
+# Args: table (r3, ->0 = the bucket array base, ->4 = bucket count), key (r4). Computes
+# the starting bucket as (key & (count - 1)) * 8 (8-byte slots), then linearly probes
+# (wrapping around the table) comparing each stored entry to the key; stops on a match
+# (entry == key) or an empty slot (entry == 0). Returns the found slot/index (or a
+# not-found marker). So it's a find-in-hash-table with open addressing. 1 caller:
+# sub_829FAC30 (a sibling, plausibly the insert / get-or-create counterpart). The table
+# key type isn't resolvable, so the name states the mechanism: a linear-probing hash
+# table lookup.
+[functions."0x829FAD30"]
+name = "HashTable_Find_829FAD30"
+
+
+# A doubly-linked-list splice: reorder / remove a node in a list by rewiring the
+# ->0 / ->4 / ->8 links.
+
+# Args: obj (r3, ->4 = a list context), node (r4, the node to splice; ->0 prev, ->4
+# next, ->8 a link). Reads node->8's target, checks a ->25 flag on it, and rewires the
+# node's prev/next pointers (and the neighboring nodes' links) to splice the node into
+# or out of the list -- a classic doubly-linked-list manipulation. Returns void. 67
+# lines, 0 external callees (all inline). 30 callers (sub_8234DB40, sub_82366668,
+# sub_8278C580, ..., ProcessNodeString_82A128B0, ...). The list element class isn't
+# resolvable, so the name states the mechanism: splice a node in a doubly-linked list.
+[functions."0x827C6448"]
+name = "List_SpliceNode_827C6448"
+
+
+# A binary-search-tree walk (search/insert point): walk the tree from the root, comparing
+# the key at each node, following the child pointer indicated by the comparison.
+
+# Args: obj (r3, ->0 = the root node, ->4 = the key), key (r4), dst (r5, a 16-byte
+# scratch/result). Sets dst->0 = dst->4 = obj->4 (the key). Starting from the root
+# (obj->0), loads each node and compares the key to the node's value via sub_82C46A30
+# (the comparator); follows the appropriate child pointer (node->0 or node->8) based on
+# the comparison result, until it reaches the target / null. Returns the found node
+# (or the insertion point). 104 lines. 1 caller: sub_82C46CF8 (a sibling, also in the
+# TODO -- plausibly the get-or-create wrapper). The tree key type and the comparator
+# (sub_82C46A30) aren't resolvable, so the name states the mechanism: a BST search walk.
+[functions."0x82C46AF0"]
+name = "Tree_Search_82C46AF0"
+
+
+# A tree get-or-create (insert): search for an entry in the tree and, if absent, create
+# and insert a new node at a computed offset.
+
+# Args: obj (r3, the tree container), src (r4, a source / key wrapper, ->0 = a vtable
+# object), offset (r5). Makes a vcall on src (vtable slot 4, offset 16), computes the
+# destination as (obj + offset), then calls Tree_Search_82C46AF0 (sub_82C46AF0) to locate
+# the entry; afterwards it initializes the resulting node (sets flags at ->12, ->16, and
+# links it) -- so it's a get-or-create: find the key in the tree, creating a node if not
+# present. Returns the node. 355 lines. 18 callers (sub_82C13F50, sub_82C50270,
+# sub_82C1E2E0, ...). The tree key type and node layout aren't resolvable, so the name
+# states the mechanism: search the tree and create a node if the entry is missing.
+[functions."0x82C46CF8"]
+name = "Tree_GetOrCreate_82C46CF8"
+
+
+# A large (449-line) self-contained tree walk: traverse a BST, rewiring node links and
+# setting a boolean flag (node->12) -- part of the 0x82C46 tree subsystem.
+
+# Args: obj (r3, ->4 = a value), node (r4, a tree node with ->0 / ->4 / ->8 child links
+# and a ->12 flag). Two entry paths (depending on whether node->12 is set). Walks the
+# tree (a loop at loc_82C46FF4) comparing the running pointer to the target, following
+# the child links (node->8 / ->4 / ->0), and rewiring the links as it goes. At the end it
+# sets node->12 to 0 or 1 (a boolean flag). Returns void. 449 lines, 0 external callees
+# (the whole tree manipulation is inline). 1 caller: sub_82C47318 (a sibling, also in the
+# TODO). A core operation of the 0x82C46 BST subsystem (siblings: Tree_Search_82C46AF0,
+# Tree_GetOrCreate_82C46CF8). The exact operation (walk + rewire + set a flag) is the
+# resolvable mechanism; the node/key class isn't.
+[functions."0x82C46FD8"]
+name = "Tree_Walk_82C46FD8"
+
+
+# A tree node-locate-and-process operation: find the target node in the tree (fast path
+# or a search) and then process/rewire it -- part of the 0x82C46 tree subsystem.
+
+# Args: obj (r3, ->4 = a value/key), node (r4, a starting node). If node->0 or node->4
+# matches obj->4, use that node directly; otherwise call sub_82C46BA0 (a tree search) to
+# locate the node. Then process the located node: compare it to the value, set up the
+# child pointer (node->4), and call Tree_Walk_82C46FD8 (sub_82C46FD8) to rewire the
+# surrounding tree. Returns void. 195 lines. 1 caller: sub_82C47470 (a sibling, also in
+# the TODO). Siblings in the 0x82C46 BST subsystem: Tree_Search_82C46AF0,
+# Tree_GetOrCreate_82C46CF8, Tree_Walk_82C46FD8. The node/key class and whether the
+# rewire is specifically a removal aren't fully resolvable, so the name states the
+# mechanism: locate a tree node and process (rewire) it.
+[functions."0x82C47318"]
+name = "Tree_ProcessNode_82C47318"
+
+
+# A thin tree-process wrapper: make a vcall on the source, then dispatch to
+# Tree_ProcessNode_82C47318 -- the 17-caller entry point of the 0x82C46 tree-process path.
+
+# Args: obj (r3, the tree container), src (r4, a source wrapper, ->0 = a vtable object),
+# offset (r5). Makes a vcall on src (vtable slot 4, offset 16), computes (src + offset),
+# then calls Tree_ProcessNode_82C47318 (sub_82C47318) with obj and (src + offset). Returns
+# void. 17 callers (sub_82C55F10, sub_82C103E8, sub_82C0CE28, ...). A wrapper in the
+# 0x82C46 BST subsystem that prepares the call (vcall) and then processes the tree node.
+# Named for what it does: a wrapper that dispatches to the tree-process path.
+[functions."0x82C47470"]
+name = "Tree_Process_Wrapper_82C47470"
+
+
+# A polynomial rolling hash of a C-string: a simple string hash/checksum.
+
+# Arg: buffer (r3, a byte string). If buffer[0] == 0 (empty), return 0. Otherwise compute
+# a rolling hash: crc = 0; for each byte (up to 100, or until a null byte): crc = crc * 
+# 0x0001003F (65635) + signed_byte. Returns the hash. So it's a polynomial (base-65635)
+# rolling hash of a null-terminated string, capped at 100 chars. 282 callers (sub_8328CC90,
+# sub_8328E5F0, sub_8328D780, sub_823F75A0, ...), many in the 0x8328 region -- a high-value
+# string-hash primitive. Named HashCstring to state the mechanism: hash a C-string with a
+# polynomial roll.
+[functions."0x82188CF0"]
+name = "HashCstring_82188CF0"
+
+
+# A tree find-and-remove: search a BST for the key (walk node->12 vs key, left = node->0,
+# right = node->8, leaf flag = node->17), then remove the located node (Tree_RemoveNode).
+
+# Args: obj (r3, ->4 = a container, ->4->4 = the head node), key (r4, *r4 = the key). Walks
+# the tree from the head: at each node, if key >= node->12 go left (node->0), else go right
+# (node->8), stopping at a leaf (node->17 != 0). Then it calls FindChainRoot_82A596F0 and
+# Tree_RemoveNode_826A4A20 (sub_826A4A20) to detach/remove the located node. Returns the
+# removed node (or a marker). 153 lines. 3 callers (sub_83218420, sub_83215610, sub_83218350
+# -- the 0x83218/0x83215 constructor cluster). Part of the 0x82A14 tree cluster. The key
+# type and node class aren't resolvable, so the name states the mechanism: find a node by
+# key in the tree and remove it.
+[functions."0x82A14AE0"]
+name = "Tree_FindAndRemove_82A14AE0"
+
+
+# A hash-table lookup (linear probing, 4-byte stride): find a key in a flat open-addressing
+# hash table and return the located slot -- a sibling of HashTable_Find_829FAD30 (which
+# uses 8-byte stride).
+
+# Args: table (r3, ->0 = the bucket count, ->4 = the array base), key (r4). Computes the
+# starting bucket as (key & (count - 1)), then linearly probes (4-byte slots, wrapping
+# around) comparing each entry's ->0 (the stored key) to the key; stops on a match or an
+# empty slot (entry == 0). Returns the located slot (slot + 4) if found, else 0. 60 lines,
+# 0 external callees (all inline). 35 callers (sub_828907F8, sub_823AAC18, sub_829FC6A0 --
+# also in the TODO -- ...). The table key type isn't resolvable, so the name states the
+# mechanism: a linear-probing hash table lookup (the "2" distinguishes it from
+# HashTable_Find_829FAD30).
+[functions."0x829FC630"]
+name = "HashTable_Find2_829FC630"
+
+
+# A hash table insert / get-or-insert (the sibling of HashTable_Find2_829FC630): look up the
+# key; if not present, increment the count, compute the value's length, allocate, and insert.
+
+# Args: table (r3, ->24 = a count/size), key (r4), value (r5, a C-string). Calls
+# HashTable_Find2_829FC630 (sub_829FC630) to look up the key. If it's already present, returns it.
+# Otherwise it increments the count (table->24 += 1), computes the value's length (a strlen loop),
+# allocates (Allocate_OrDbgBreak_8221F388) and copies the value (MemCpy_SdkRuntime_82CA2C60), then
+# inserts the entry into the open-addressing table. So it's a "get or insert into the hash table"
+# routine. 148 lines. 1 caller: sub_829FC7A8. Sibling of HashTable_Find2_829FC630 (the lookup
+# this insert uses); the table's key/value class (a string-key -> string-value map, plausibly) isn't
+# fully resolvable, so the name states the mechanism: insert into the hash table.
+[functions."0x829FC6A0"]
+name = "HashTable_Insert_829FC6A0"
+
+
+# A hash table insert with auto-grow: call HashTable_Insert_829FC6A0, then check whether the
+# table is at its load threshold and grow/rehash (sub_829FAB50) if needed.
+
+# Args: table (r3, ->0 = a size/mask, ->24 = a count), (r4, a key/index), (r5). Calls
+# HashTable_Insert_829FC6A0 (sub_829FC6A0) to insert the entry. Then it checks the table's load
+# (count = table->24 against a threshold derived from the size table->0, a (3/4)-fill-style
+# threshold); if it's at the threshold it grows the table by calling sub_829FAB50 (a rehash,
+# with the new size table->0 << 1). It then recomputes the probe index ((size - 1) & key). So it's
+# an "insert, and grow the table if it's getting full" routine. 101 lines. 1 caller: sub_829FC858.
+# Part of the 0x829FC hash-table cluster (HashTable_Find2_829FC630, HashTable_Insert_829FC6A0,
+# sub_829FAB50). The table's key/value class isn't resolvable, so the name states the mechanism:
+# insert with auto-grow.
+[functions."0x829FC7A8"]
+name = "HashTable_InsertGrow_829FC7A8"
+
+
+# A hash lookup / get-or-create: hash the string (HashCstring_82188CF0), combine the hash with a
+# stored value, then do a linear search (LinearSearch_82284448) to find or create the entry.
+
+# Args: obj (r3, ->80 = a stored hash), (r4), (r5), src (r6, ->0 = a string, or 0 to use a global
+# string). If r4 or r5 is 0, returns (no-op). Otherwise it hashes the string (HashCstring_82188CF0,
+# sub_82188CF0), merges the hash bits into obj->80 (rlwimi/rlwinm bit manipulation), and does a
+# linear search (LinearSearch_82284448, sub_82284448) to find the matching entry; if not found it
+# creates one (ConstructRefCounted_8222CF18, a refcounted object). So it's a "hash the key, look up
+# (or create) the entry" routine. 122 lines. 6 callers (sub_828152D0, sub_828C9360, sub_823F9620,
+# ...). The entry class and the exact hash combination aren't resolvable, so the name states the
+# mechanism: a hash lookup / get-or-create.
+[functions."0x823F74D0"]
+name = "HashLookup_823F74D0"
+
+
+# A list node splice (the sibling of List_SpliceNode_8292CC00): manipulate a doubly-linked list (via
+# ->0 = prev, ->4 = next, ->8) to insert/unlink a node.
+
+# Args: list (r3, ->4 = the head), node (r4, ->0 = prev, ->4 = next). Reads node->8 (the next node),
+# then manipulates the linked list: it unlinks/links the node (updating the prev/next pointers of the
+# neighbors, and checking a flag byte at offset 33 of a neighbor, ->33). It walks the list (comparing
+# node->4 and neighbor->4 to node->0) and re-splices the nodes (updating ->0 / ->4). So it's a "splice a
+# node into / out of the doubly-linked list" routine. 67 lines, no callees (pure data manipulation).
+# Many callers: ConstructNodeValue_82B4C1C0 (sub_82B4C1C0), sub_82308D70, sub_82323550, sub_823B0DB8, ... A
+# sibling of List_SpliceNode_8292CC00 (sub_8292CC00, the same doubly-linked-list splice shape); the "2"
+# distinguishes the two. The node's class (->33 = a flag) and the list's meaning aren't resolvable, so
+# the name states the mechanism: splice a list node.
+[functions."0x8292CC88"]
+name = "List_SpliceNode2_8292CC88"
+
+
+# A hash-lookup + compare: look up a value (HashLookup_823F74D0), compare the string
+# (CompareString_8229AD78), and handle the refcounted result (CopyAssign / Destruct), recursing as needed.
+
+# Args: obj (r3, the hash table / container), value (r4). If obj is null, returns. Otherwise it looks up
+# the value (HashLookup_823F74D0, sub_823F74D0 -- the hash-table get-or-create), then compares the
+# string (CompareString_8229AD78, sub_8229AD78). Depending on the comparison result, it handles the
+# refcounted object: it may copy-assign (CopyAssign_RefCounted_821F0108, sub_821F0108) or destructure
+# (DestructRefCounted_82214F08, sub_82214F08) the value, and recurses (sub_823F9620, plus sub_823F8C30 and
+# sub_823F8C90, siblings in the 0x823F9 cluster). So it's a "look up a value in the hash table and
+# compare it" routine. 116 lines. 2 callers: sub_82817D28 and sub_828152D0. The table's key/value class
+# (strings) and the exact match semantics aren't resolvable, so the name states the mechanism: hash-
+# lookup and compare.
+[functions."0x823F9620"]
+name = "HashLookupCompare_823F9620"
+
+
+# A hash-table lookup: compute a bucket (a bit index + a mask), walk the bucket's chain, and return the
+# entry whose key matches (or a default).
+
+# Args: table (r3, ->7 = a bit index, ->16 = the bucket base), key (r4, ->8 = a bitmask / key), (more). Computes
+# a bucket index: it uses the table's bit index (table->7) to form a mask (1 << index), ANDs it with the key's
+# bitmask (key->8), and indexes into the table (bucket = table->16 + (mask + mask * 4)). It then walks the
+# bucket's chain (a linked list via ->16): for each entry, if entry->12 == 4 (a type / size marker) and entry->8
+# == key (a key match), it returns the entry. Otherwise it advances to the next entry (entry->16). If it
+# reaches the end (null), it returns a default (a fixed global). So it's a "look up a key in the hash table
+# (a bucketed chain search)" routine. 52 lines, no callees (pure data manipulation). Many callers (sub_82BCC038,
+# sub_82BCCFF8, sub_82BCA948, ...). The table's key/value class (->8 = a key, ->16 = next, ->12 = a marker) isn't
+# resolvable, so the name states the mechanism: hash-table find. The "3" distinguishes it from HashTable_Find
+# _829FC630 and HashTable_Find2_829FC630.
+[functions."0x821CF1D0"]
+name = "HashTable_Find3_821CF1D0"
+
+
+# A chain / tree traversal and search: walk the chain (a binary-tree search, via node->0, node->8, node->12,
+# node->25) and find the node whose ->12 key is at / for the given value (src->0).
+
+# Args: (r3), obj (r4, ->4 = a tree root), src (r5, ->0 = a target key), (more). Loads the tree root (obj->4->4).
+# It then walks the tree: for each node, it checks a flag (node->25); if the flag is set, it bails (a found /
+# terminal path). Otherwise it compares the node's ->12 key to the target (src->0): if node->12 < target, it
+# advances to node->8 (the right child); otherwise it advances to node->0 (the left child). It continues until it
+# finds a node (or reaches the end), returning the found node. So it's a "walk the tree to find the node at / for
+# the given key" routine (a binary-tree search keyed on node->12, part of the 0x82C34 cluster). 87 lines, no
+# callees (pure data manipulation). Many callers (sub_8288D810, sub_827EF058, LookupAndInsertNode_8323A110, ...).
+# The node's class (->0 = left, ->8 = right, ->12 = key, ->25 = a flag) and the tree's meaning (a sorted /
+# ordered structure) aren't resolvable, so the name states the mechanism: walk the tree to find the node. The "2"
+# distinguishes it from Tree_Search (an earlier entry in the same family).
+[functions."0x82C343A0"]
+name = "Tree_Search2_82C343A0"
+
+
+# A list splice (the sibling of List_SpliceNode2_8292CC88): splice / insert a node into a doubly-linked list
+# (manipulating the ->4, ->8, and ->33 pointers, with comparisons to place the node correctly).
+
+# Args: list (r3, ->4 = a node), node (r4, ->0, ->4, ->8, ->33 = a flag), (more). It splices / inserts the node into a
+# doubly-linked list: it reads the list's nodes (list->4, a node), reads the node's fields (node->0, a next pointer,
+# node->4 and node->8, the doubly-linked list pointers, and node->33, a flag byte), and manipulates the pointers
+# (with comparisons, placing the node correctly in the list). If a flag (node->33) is zero, it does one splice; if a
+# next pointer matches, it does another. So it's a "splice / insert a node into a doubly-linked list (manipulating the
+# ->4, ->8, and ->33 pointers)" routine (a list splice, part of the 0x8234D cluster). 67 lines, no callees (pure data
+# manipulation). Many callers (sub_82B5FEB0, sub_824DFEA0, sub_8234C9E0, ConstructNodeValue_82B4C1C0, ...). The list's
+# element type (a doubly-linked list node, ->4 and ->8 = the next/prev pointers, ->33 = a flag) and the list's
+# meaning (a particular list) aren't resolvable, so the name states the mechanism: a list splice (insert a node into a
+# doubly-linked list). The "3" distinguishes it from List_SpliceNode2_8292CC88.
+[functions."0x8234D600"]
+name = "List_SpliceNode3_8234D600"
+
+
+# A sorted list insert (the callee of Heap_CarveBlock_83231058): walk a sorted doubly-linked list (a two-key
+# comparison: node->0 and node->4 against the list's nodes, following the ->12 next pointers), and insert the node
+# (r8->12 = node and node->8 = r8, or at the head if no match).
+
+# Args: list (r3, ->0 = a head), node (r4, ->0 and ->4 = two keys, ->8 and ->12 = the doubly-linked list pointers),
+# (more). It walks the sorted doubly-linked list (from the head, following the ->12 next pointers): it compares the
+# node's keys (node->0 and node->4, a primary and a secondary key) against the list's nodes (r11->0 and r11->4), and
+# walks to the next node (r11->12) until it finds the right place (a node where the node's keys are <= the node's
+# keys, or the end). It then inserts the node: if it found a place (r8, the found node), it sets r8->12 = node and
+# node->8 = r8 (splicing the node after the found node); otherwise (no match), it inserts at the head (list->0 = node
+# and node->8 = r8). So it's a "insert a node into a sorted doubly-linked list (walk the list by a two-key comparison
+# and insert the node, or at the head if no match)" routine (a sorted list insert, part of the 0x829FD cluster). 65
+# lines, no callees (pure data manipulation). 2 callers: Heap_CarveBlock_83231058 (sub_83231058, a heap block carver)
+# , sub_83231240. The list's element type (a sorted doubly-linked list node, ->0 and ->4 = two keys, ->8 and ->12 =
+# the next/prev pointers) and the list's meaning (a sorted list of blocks / nodes, a free list / sorted index) aren't
+# resolvable, so the name states the mechanism: insert a node into a sorted doubly-linked list (by a two-key
+# comparison). The "Sorted" distinguishes it from an unsorted list insert (if any).
+[functions."0x829FD158"]
+name = "List_InsertSorted_829FD158"
+
+
+# A list splice (the sibling of List_SpliceNode3_8234D600 / List_SpliceNode2_8292CC88): splice a node into a list
+# (using the node's ->0, ->4, and ->8 pointers, with a ->21 flag, and a comparison to place the node in the right
+# position).
+
+# Args: obj (r3, ->4 = a node), node (r4, ->0 = a head, ->4 = a next, ->8 = a next, ->21 = a flag), (more). It
+# splices the node into a list: it loads a node (r11 = r4->8, a next), loads its head (r10 = r11->0, a head), and
+# updates r4->8 (r4->8 = r10). If the head's flag (r10->21, a byte) is zero, it sets r10->4 = r4 (a splice). It then
+# updates the next pointers (r11->4 = r4->4, a next) and, (depending on a comparison, obj->4->4 == r4), performs a
+# splice (r10 = obj->4, r10->4 = r11, r11->0 = r4, r4->4 = r11 -- a splice of the node into the list). So it's a
+# "splice a node into a list (using the node's ->0, ->4, and ->8 pointers, with a ->21 flag, and a comparison to
+# place the node in the right position)" routine (a list splice, part of the 0x82C23 cluster, a sibling of List_Splic
+# eNode3_8234D600). 67 lines, no direct callees (pure data manipulation). Many callers (sub_82344608, sub_8246FFC8, sub
+# _8218E0B0, sub_82C06478, sub_8233DE80, sub_82A42F70, sub_825D8968, ProcessHashTable_829FC3C0, sub_82496FB0, sub
+# _82C82A80 -- many across the codebase, including a hash table process). The node's class (a node, ->0 = a head, ->
+# 4 = a next, ->8 = a next, ->21 = a flag, a doubly-linked list node) and the list's meaning (a list of nodes, a
+# particular structure) aren't resolvable, so the name states the mechanism: a list splice (splice a node into a list
+# by the ->0, ->4, and ->8 pointers). The "4" distinguishes it from List_SpliceNode3_8234D600 and List_SpliceNode2_
+# 8292CC88.
+[functions."0x82C239D0"]
+name = "List_SpliceNode4_82C239D0"
+
+
+# A hash lookup (a process, with a hash and a check, the sibling of HashLookup_82B49320 / ProcessString_8246CF80): do a
+# hash lookup (a process, a particular process / a
+# particular lookup, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a hash) do a hash (a hash, a
+# particular hash / a
+# particular value, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, obj->36 ^ key, a
+# compute, a
+# particular compute / a
+# particular operation, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result), and (in a check) check a value (a value, a
+# particular value, a
+# particular size / a
+# particular allocation, r11->60, a
+# particular value, a
+# particular state / a
+# particular result), and (if a value (r11->60, a value, a
+# particular value, a
+# particular size / a
+# particular allocation) is != 1, a
+# particular value) take one path (a no-op / a return, a
+# particular state, a
+# particular result, a particular size / a
+# particular allocation), and (otherwise) do a lookup (a lookup, a
+# particular lookup / a
+# particular value, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, over a table, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result).
+
+# Args: obj (r3, ->36 = a field, a value, ->8 = a field, a value, a
+# particular object), key (r4, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), (more). It does a hash lookup (a
+# process, a
+# particular process / a
+# particular lookup, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result). In the hash, it does a hash (a
+# hash, a
+# particular hash / a
+# particular value, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, obj->36 ^ key, a
+# compute, a
+# particular compute / a
+# particular operation, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result). In the check, it checks a value (a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, r11->60, a
+# particular value, a
+# particular state / a
+# particular result). If it is != 1 (a particular value, a
+# particular state, a
+# particular size / a
+# particular allocation), it takes one path (a no-op / a return, a
+# particular state, a
+# particular result, a particular size / a
+# particular allocation); otherwise, it does a lookup (a
+# lookup, a
+# particular lookup / a
+# particular value, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, over a table, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result). So it's a "hash lookup (a
+# process, with a
+# hash and a
+# check: do a hash lookup (a process, a
+# particular process / a
+# particular lookup, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a hash) do a hash (a hash, a
+# particular hash / a
+# particular value, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, obj->36 ^ key, a
+# compute, a
+# particular compute / a
+# particular operation, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result), and (in a check) check a value (a value, a
+# particular value, a
+# particular size / a
+# particular allocation, r11->60, a
+# particular value, a
+# particular state / a
+# particular result), and (if a value (r11->60, a value, a
+# particular value, a
+# particular size / a
+# particular allocation) is != 1, a
+# particular value) take one path (a no-op / a return, a
+# particular state, a
+# particular result, a particular size / a
+# particular allocation), and (otherwise) do a lookup (a lookup, a
+# particular lookup / a
+# particular value, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, over a table, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result))" routine (a hash lookup routine, part of the 0x82B49 cluster, a sibling of
+# HashLookup_82B49320 and ProcessString_8246CF80). 100 lines, 0
+# callees. 6 callers: sub_82B48FE0, sub_82B497B8, sub_82B49600, sub_82B49320, sub_82B49730,
+# ProcessChunk_TableDispatch_82B49110 (processes, which
+# call this to do the hash lookup, a
+# particular size / a
+# particular allocation, a
+# particular operation). The object's class (obj, r3, ->36 = a field, a value, ->8 = a field, a value, a
+# particular object, a
+# particular value /
+# a particular state) and the value's meaning (key, r4, a value, a
+# particular value, a
+# particular size / a
+# particular allocation) aren't resolvable, so the name states the mechanism: a hash lookup (with a
+# hash and a
+# check) (do a hash lookup (a process, a
+# particular process / a
+# particular lookup, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a hash) do a hash (a hash, a
+# particular hash / a
+# particular value, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, obj->36 ^ key, a
+# compute, a
+# particular compute / a
+# particular operation, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result), and (in a check) check a value (a value, a
+# particular value, a
+# particular size / a
+# particular allocation, r11->60, a
+# particular value, a
+# particular state / a
+# particular result), and (if a value (r11->60, a value, a
+# particular value, a
+# particular size / a
+# particular allocation) is != 1, a
+# particular value) take one path (a no-op / a return, a
+# particular state, a
+# particular result, a particular size / a
+# particular allocation), and (otherwise) do a lookup (a lookup, a
+# particular lookup / a
+# particular value, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, over a table, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result)). The "82B49678" refers to the address (a
+# particular address, a
+# particular size / a
+# particular allocation).
+[functions."0x82B49678"]
+name = "HashLookup_82B49678"
+
+
+# A process (a process, with a check and a list manipulation, the sibling of ListUnlink_82B5D930 / ProcessLine_82B470D0):
+# do a process (a process, a particular process, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a check) check a value (a value, a
+# particular value, a
+# particular size / a
+# particular allocation, r10->21, a
+# particular value, a
+# particular state / a
+# particular result), and (in a list manipulation) do a list manipulation (a
+# list manipulation, a particular list manipulation, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, node->8 = r11->0, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, r10->4 = node, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, r11->4 = node->4, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, r10->4 = r11, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, r11->0 = node, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, node->4 = r11, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result).
+
+# Args: a (r3, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), node (r4, ->8 = a field, a value, ->4 = a field, a
+# value, a
+# particular object), (more). It does a process (a
+# process, a
+# particular process, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result). In the check, it checks a value (a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, r10->21, a
+# particular value, a
+# particular state / a
+# particular result). In the list manipulation, it does a list manipulation (a
+# list manipulation, a
+# particular list manipulation, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, node->8 = r11->0, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, r10->4 = node, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, r11->4 = node->4, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, r10->4 = r11, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, r11->0 = node, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, node->4 = r11, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result). So it's a "process (a
+# process, with a
+# check and a
+# list manipulation: do a process (a process, a
+# particular process, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a check) check a value (a value, a
+# particular value, a
+# particular size / a
+# particular allocation, r10->21, a
+# particular value, a
+# particular state / a
+# particular result), and (in a list manipulation) do a list manipulation (a
+# list manipulation, a particular list manipulation, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, node->8 = r11->0, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, r10->4 = node, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, r11->4 = node->4, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, r10->4 = r11, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, r11->0 = node, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, node->4 = r11, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result))" routine (a list manipulation routine, part of the 0x82B5E cluster, a sibling of
+# ListUnlink_82B5D930 and ProcessLine_82B470D0). 71 lines, 0
+# callees. 2 callers: sub_82B5D930, ProcessChain4_82B5E558 (processes, which
+# call this to do the list manipulation, a
+# particular size / a
+# particular allocation, a
+# particular operation). The object's class (node, r4, ->8 = a field, a value, ->4 = a field, a
+# value, a
+# particular object, a
+# particular value /
+# a particular state) and the value's meaning (a, r3, a value, a
+# particular value, a
+# particular size / a
+# particular allocation) aren't resolvable, so the name states the mechanism: a process (with a
+# check and a
+# list manipulation) (do a process (a process, a
+# particular process, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a check) check a value (a value, a
+# particular value, a
+# particular size / a
+# particular allocation, r10->21, a
+# particular value, a
+# particular state / a
+# particular result), and (in a list manipulation) do a list manipulation (a
+# list manipulation, a
+# particular list manipulation, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, node->8 = r11->0, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, r10->4 = node, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, r11->4 = node->4, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, r10->4 = r11, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, r11->0 = node, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, node->4 = r11, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result)). The "82B5E7F8" refers to the address (a
+# particular address, a
+# particular size / a
+# particular allocation).
+[functions."0x82B5E7F8"]
+name = "ListUnlink_82B5E7F8"
+
+
+# A list manipulation (a list manipulation, with a check and a store, the sibling of ListUnlink2_82B5E7F8 / ListUnlink
+# _82B5E7F8): do a list manipulation (a
+# list manipulation, a particular list manipulation, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, node->0 = r11->8, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, r10->4 = node, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, r11->4 = node->4, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, r10->4 = r11, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, r11->8 = node, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, node->4 = r11, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result).
+
+# Args: node (r4, ->0 = a field, a value, ->4 = a field, a value, ->8 = a field, a
+# value, a
+# particular object), (more). It does a list manipulation (a
+# list manipulation, a
+# particular list manipulation, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, node->0 = r11->8, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, r10->4 = node, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, r11->4 = node->4, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, r10->4 = r11, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, r11->8 = node, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, node->4 = r11, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result). So it's a "list manipulation (a
+# list manipulation, with a
+# check and a
+# store: do a list manipulation (a
+# list manipulation, a particular list manipulation, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, node->0 = r11->8, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, r10->4 = node, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, r11->4 = node->4, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, r10->4 = r11, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, r11->8 = node, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, node->4 = r11, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result))" routine (a list manipulation routine, part of the 0x82B5E cluster, a sibling of
+# ListUnlink2_82B5E7F8 and ListUnlink_82B5E7F8). 71
+# lines, 0 callees. 2 callers: sub_82B5D930, ProcessChain4_82B5E558 (processes, which
+# call this to do the list manipulation, a
+# particular size / a
+# particular allocation, a
+# particular operation). The object's class (node, r4, ->0 = a field, a value, ->4 = a field, a value, ->8 = a field, a
+# value, a
+# particular object, a
+# particular value /
+# a particular state) isn't resolvable, so the name states the mechanism: a list manipulation (with a
+# check and a
+# store) (do a list manipulation (a
+# list manipulation, a
+# particular list manipulation, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, node->0 = r11->8, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, r10->4 = node, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, r11->4 = node->4, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, r10->4 = r11, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, r11->8 = node, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, node->4 = r11, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result)). The "2" distinguishes it from ListUnlink_82B5E7F8.
+[functions."0x82B5E878"]
+name = "ListUnlink2_82B5E878"
+
+
+# Compacts a growable array of pointers in place. obj->4 is the array base and obj->12 the element
+# count; it walks the array and copies every non-zero element to the front (in order), then writes
+# back the new (reduced) count into obj->12. This is the "defragment / remove nulls" step that
+# container code runs before shrinking. Pure loop, no calls.
+# Part of the 0x82C23 cluster (sibling of ProcessGrow_82C21C90). 50 lines, 0 callees. 10 callers
+# (the 0x82C1x/0x82C2x/0x82C3x container cluster).
+[functions."0x82C23DD0"]
+name = "ArrayCompact_82C23DD0"
+
+
+# Inserts a node into a doubly-linked list. It reads the insertion anchor (b->8), advances it past the
+# target node (b->8 = node->0), and splices the node b into the list between its predecessor (b->4) and
+# the following node - fixing up the ->0 (next) and ->4 (prev) links on the neighbors to keep the list
+# consistent. The boundary branches (where b equals the head or tail neighbor) handle insert-at-start /\n# insert-at-end. This is the generic "link a node in here" operation for the game's doubly-linked lists,
+# the mirror image of the unlink helpers (ListUnlink_82B5E7F8 / ListUnlink2_82B5E878). Part of the
+# 0x8234D cluster. 67 lines, 0 direct callees (pure pointer bookkeeping). 7 callers: sub_82BFBE00,
+# sub_82C7E138, sub_82BFC278, sub_826A4C60, sub_82858358, sub_8282ED70, ProcessString_8246CF80.
+[functions."0x8234D268"]
+name = "ListNodeInsert_8234D268"
+
+
+# Computes / processes a named string entry. It first tests a byte flag (b->8): when zero it delegates
+# to the sibling path (sub_82814B38); otherwise it pulls the string-descriptor at b->4, checks that it
+# is valid (->31 > 0, ->28 = the 16-bit payload/length), and hashes the string (HashCstring_82188CF0),
+# using a constant string from a .data table as the seed/key. Along the way it manages ref-counted state
+# (ConstructRefCounted_8222CF18 / DestructRefCounted_82214F08) and dispatches into the 0x82816 processor
+# (ProcessDispatch4_828164E8 / sub_82814D30 / sub_82816618). This is the "hash a named value" step in the
+# 0x82188 / 0x82814-0x82816 dispatch cluster.
+# Part of the 0x82188 cluster (sibling of HashCstring_82188CF0 / ProcessDispatch3_82815C28). 208 lines,
+# 7 callees. 1 caller: ProcessDispatch3_82815C28.
+[functions."0x82188B88"]
+name = "HashNamedEntry_82188B88"
+
+
+# Inserts a node into a doubly-linked list - the twin of ListNodeInsert_8234D268, but for the node family
+# that carries its valid/occupied flag at offset 45 (matching the FindListTail_82C705D8 list). It reads the
+# insertion anchor (b->8), advances it past the target node (b->8 = node->0), and splices node b between its
+# predecessor (b->4) and the following node, fixing up the ->0 (next) / ->4 (prev) links on both neighbors.
+# The boundary branches handle insert-at-head / insert-at-tail. Widely used (10 callers, including
+# RaiseRangeError_8236F5A8) to link nodes into the 0x82C70 / 0x82497 / 0x822F7 list family.
+# Part of the 0x82C70 cluster (sibling of ListNodeInsert_8234D268 / FindListTail_82C705D8). 67 lines, 0
+# direct callees (pure pointer bookkeeping). 10 callers (the 0x822F7/0x8236x/0x82497/0x82C6x/0x82C7x clusters).
+[functions."0x82C70680"]
+name = "ListNodeInsert2_82C70680"
+
+
+# Looks up an entry in a hash table and reports whether it is present. It hashes the key (combining it
+# with the table's salt at obj->36) to select a 32-byte bucket, and when the bucket's 8-byte value field
+# matches the expected value it returns 1 (found, fast path). On a mismatch it falls back to the full table
+# walk (HashLookup_82B49678) plus the 0x82C6F/0x8260C helpers to confirm or deny the entry, returning 1 if
+# present and 0 otherwise. This is the "does the table contain this key/value?" query - the value-checking
+# sibling of HashLookup_82B49678. Part of the 0x82B49 hash-table cluster.
+# 191 lines, 3 callees (HashLookup_82B49678, VirtualCall4_8260C130, sub_82C6F8E8). 2 callers: sub_82B49908,
+# sub_82B49730.
+[functions."0x82B497B8"]
+name = "HashLookup2_82B497B8"
+
+
+# Looks up a key in a hash table by walking the matching bucket's chain. It derives the bucket index from
+# the key (a->8) and the table mask (b->8): ((a->8 - 1) & b->8), then indexes the bucket array (a->20) to
+# the chain head. It then walks the linked list of nodes (each node's ->16 points at the next) with a
+# dcbt prefetch, testing each node's type tag (->12) and key (->8); it returns the node when ->8 matches the
+# target key, or falls off to a constant "not found" pointer (a .data address) at the end of the chain.
+# This is the linear-probing / chained hash-table search in the 0x82228 value cluster, called by 9 sites
+# (including DispatchValueType_822285D8). Part of the 0x82228 hash-lookup cluster.
+# 56 lines, 0 direct callees (pure linked-list walk). 9 callers (the 0x821C/0x8222/0x82A2/0x82A3 cluster).
+[functions."0x82228570"]
+name = "HashLookupByKey_82228570"
+
+
+# Looks up (or inserts) a string key in a power-of-two hash table. It takes a table (a: size at a->4, bucket
+# array at a->8) and a key string (b). It hashes the key (ComputeFNVHash_82C81DF8), reduces the hash to a
+# bucket index (hash & (size - 1)) and scales it to a 4-byte stride (index << 2). It walks the bucket's chain:
+# loading each entry (a->8[index]), string-matching it against the key (MatchStringWrapper_82CAAF08), and
+# continuing the chain on a miss. On a full miss it drives the insert / allocation path (sub_82C82220 /
+# sub_82C87A50) and copies the key in (MemCpy_SdkRuntime_82CA2C60). This is the "find this string key in the
+# hash table (hashing, bucket lookup, chain walk, insert-on-miss)" routine for the 0x82C82 hash-table cluster,
+# called only by sub_82C823D8. Part of the 0x82C82 hash-table cluster (sibling of ComputeFNVHash_82C81DF8 /
+# InsertHashEntry_8219CDA8). 148 lines, 5 callees. 1 caller: sub_82C823D8.
+[functions."0x82C822D8"]
+name = "HashTableLookup_82C822D8"
+
+
+# A processor that computes a hash index, then performs a table lookup (trying up to two probes). It takes a hash
+# table (a: a stride / bucket size at a->32) and a key (b). It computes the index from the key and the bucket size
+# (key / bucket, then key - (key / bucket) * bucket - the remainder), forming the probe address (a->32 +
+# remainder). It performs the first lookup (HashLookup2_82B497B8(a, 0, probe)); when the result's low byte is
+# non-zero (a hit) it performs a second lookup (HashLookup2_82B497B8(a, 1, probe)) to complete the resolution.
+# This is the "compute this key's hash index and look it up in the table (with a follow-up probe)" routine for the
+# 0x82B49 hash cluster, used by 2 callers (sub_82B48EB8 / sub_82B49530). Part of the 0x82B49 hash cluster (sibling
+# of HashLookup2_82B497B8 / ProcessTypeDispatch_82B49D50). 79 lines, 1 callee. 2 callers.
+[functions."0x82B49908"]
+name = "HashLookupWithIndex_82B49908"

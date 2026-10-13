@@ -1,0 +1,17 @@
+# data-processing region 0x83240000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# A processor that zeroes the fields, sets a descriptor, and computes the element count. It takes a structure (a: a
+# descriptor at a->0, a count at a->4, several fields at a->12 / a->16 / a->20 / a->28 / a->32 / a->36, a flag at a->40)
+# and a value (b: a 68-byte element array at b->36 + 16, with a start at + 20 and an end at + 24). It zeroes the fields
+# (a->4, a->12, a->16, a->20, a->28, a->32, a->36 all to 0) and sets the descriptor pointer (a->0) and the flag (a->40 = 0).
+# It then computes the element count: (end - start) / 68 (the number of 68-byte elements in the array). It also applies
+# the transform (ProcessTransform_826FAFD0) and sets the value (SetValue3_82A09FB0). This is the "zero these fields, set
+# the descriptor, and compute the element count" routine for the 0x83240 count-compute cluster, called only by
+# ProcessGrowAppend8_83221378. Part of the 0x83240 count-compute cluster (sibling of ProcessGrowAppend8_83221378 /
+# ProcessTransform_826FAFD0). 183 lines, 2 callees. 1 caller: ProcessGrowAppend8_83221378.
+[functions."0x832402B8"]
+name = "ProcessAndComputeCount_832402B8"

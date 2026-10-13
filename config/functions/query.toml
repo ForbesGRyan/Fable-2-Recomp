@@ -1,0 +1,1085 @@
+# query functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# Time/clock family.
+#
+# The game's master millisecond clock, cached in a global singleton:
+# returns *( *(0x82000908) + 16 ) — no arguments. 147 call sites in 89 files,
+# almost all of the form "stw r3, N(obj)" storing it into per-object timestamp fields
+# (lastUpdate/startTime/nextFire); a few compare against an adjacent
+# previous-time field (32-bit wrap handling) or double-sample it (before/
+# after bracketing, e.g. sub_8237E3E0 stores two reads 4 bytes apart).
+# Millisecond scale proven by callers: rate limiters compute
+# consumption = rate * (now - last) / 1000 (sub_82FFA508), poll loops use
+# deadline = saved + 100 (sub_82388658), and the 2^30 jump guard in
+# GetElapsedMsSinceStart below only makes sense in ms (~12.4 days).
+[functions."0x82266070"]
+name = "GetCurrentTimeMs"
+
+
+# Elapsed milliseconds since first call, reset/wrap-guarded.
+# X = GetCurrentTimeMs(); base A = global 0x81FFBDFC (captured from X on the
+# first call, when A == 0); delta = X - A. Cached last delta B = global
+# 0x81FFBE00: if (delta - B) > 0xC0000000 unsigned the update is skipped and
+# B is returned instead (X wrapped or reset). 24 call sites, all in the
+# 0x832B end-of-.text region, all passing the result into tick/update
+# methods (e.g. sub_832B5530 -> sub_832B50C0(obj, now)).
+[functions."0x832B9398"]
+name = "GetElapsedMsSinceStart"
+
+
+# 2-insn pointer getter: "lwz r3, 32(r3); blr" -- returns the u32/pointer
+# stored at offset +32 of the object in r3. 6 callers (all in the 0x830F-0x831B
+# region); the result is passed as the first arg to various functions, and one
+# caller null-checks it ("cmplwi r3,0"), so offset 32 holds a NULL-able pointer
+# (a sub-object / back-reference). The owning class isn't resolved, so the name
+# states the mechanism (get the pointer field at offset 32) + address suffix.
+[functions."0x824C23D0"]
+name = "GetPtr_Field32_824C23D0"
+
+
+# A lookup-by-key that binary-searches an array (wrapper->4) with a virtual
+# comparison and returns the found element's field 4 -- the caller of
+# BinarySearch_VirtualCmp_82C15850.
+
+# Args: wrapper (r3, whose member at +4 is the array), key (r4). Calls
+# BinarySearch_VirtualCmp_82C15850(wrapper->4, key, &found) to binary-search the
+# array. If found (found != 0) and the element at the returned index is non-null:
+# return element->4 (a sub-object). Otherwise return 0. So it's a find-by-key that
+# returns the matched element's ->4 member (or 0 if not found). 0 direct callers
+# (a virtual/dead method). Named for the mechanism: look up a key via the
+# virtual-compare binary search and return the found element's field 4.
+[functions."0x82C17350"]
+name = "Lookup_ByVirtualCmp_82C17350"
+
+
+# A get-or-create-by-name: hash a name, binary-search a 12-byte-stride array for it,
+# and (if not found) insert a new element.
+
+# Args: obj (r3, whose member at +4 is the array: start/current/end, 12-byte stride),
+# name (r4, a string). First hashes the name via InitNameHash_8236D358 into a local. 
+# Validates the array ranges (start <= current, current <= end, else `trap 22`). Then
+# binary-searches the array (12-byte stride) comparing each element's key (element->0,
+# the stored name hash) to the computed hash. On a miss it inserts a new element via
+# Array_InsertOne_8236FDD8. So it's a find-or-create keyed on the name's hash. 2
+# callers (sub_82371820, sub_8236DD48). The element class (a 12-byte struct holding a
+# name hash + the name) isn't fully resolvable, so the name states the mechanism:
+# get-or-create an entry by name hash.
+[functions."0x8236E1B0"]
+name = "GetOrCreateByNameHash_8236E1B0"
+
+
+# A constant-return global getter: loads and returns a fixed global address (a
+# 2-insn function: lis r11, <hi>; addi r3, r11, <lo>; blr -- ~0x83654CE0).
+
+# Takes no meaningful arguments and always returns the same global pointer. 0 direct
+# callers, so it is most likely a VIRTUAL method (a getter for a global/singleton, or
+# an accessor whose value is that fixed address) -- the exact global's meaning needs
+# the vtable + class. The name states what it does: return a fixed global pointer.
+[functions."0x82C1E350"]
+name = "GetGlobal_82C1E350"
+
+
+# A trivial field getter: return obj->4 (a 2-insn function: lwz r3, 4(r3); blr).
+
+# Arg: obj (r3). Returns the u32 at obj->4. 23 callers (sub_82C80EB8, sub_824D4190,
+# sub_82397348, sub_82C81578, ...). It's a plain accessor for the object's field at
+# offset 4; the field's meaning needs the object class. Named for what it does: get the
+# field at offset 4.
+[functions."0x82A46DE8"]
+name = "GetField4_82A46DE8"
+
+
+# A get-or-create for a 24-byte element: search for the element (via
+# ProcessElements_Vcall4_82C46C10) and, if absent, allocate + initialize a new 24-byte
+# node.
+
+# Args: obj (r3, ->8 = a container), value (r4). Calls ProcessElements_Vcall4_82C46C10
+# (sub_82C46C10) to search the container for the element; if it is found (result nonzero),
+# returns 0 (the existing element). Otherwise it allocates 24 bytes via
+# Allocate_OrDbgBreak_8221F388(24), resets it (ResetTreeObj_82C474C8), and inserts it
+# (Tree_GetOrCreate_82C46CF8). So it's a get-or-create: find the 24-byte element, creating
+# one if missing. 95 lines. 1 caller: sub_82C174D8 (a sibling, also in the TODO). Part of
+# the 0x82C17/0x82C46 tree+element subsystem. The element class isn't resolvable, so the
+# name states the mechanism: get-or-create a 24-byte element.
+[functions."0x82C173C0"]
+name = "GetOrCreate24Element_82C173C0"
+
+
+# A trivial two-level getter: return (obj->0)->4, or 0 if obj->0 is null (a 5-insn
+# function).
+
+# Arg: obj (r3, ->0 = a pointer). If obj->0 == 0, return 0. Otherwise return *(obj->0 + 4)
+# (the u32 at field 4 of the pointed-to object). 20 callers (sub_821EE858, sub_82A1A360,
+# sub_82B3A9A8, ...). A plain accessor for a nested object's field at offset 4; the field's
+# meaning needs the object class. Named for what it does: get field 4 of the object pointed
+# to by obj->0.
+[functions."0x821EEA78"]
+name = "GetSubObjField4_821EEA78"
+
+
+# A lookup via vcall + binary search: obtain a value from a vtable slot-1 call on the
+# source, then binary-search for it (BinarySearch_4Stride_82C40EC0).
+
+# Args: (r3), src (r4, ->0 = a vtable object), value (r5). Makes a vcall on src (vtable
+# slot 1, offset 4) passing src, a global (~0x82C24C60), and value; if the result is 0,
+# returns 0. Otherwise it processes the result (result + 4) and calls
+# BinarySearch_4Stride_82C40EC0 (sub_82C40EC0) to look the value up in a sorted array.
+# Returns the lookup result. 83 lines. 2 callers (sub_82C1E7F0 -- also in the TODO -- plus
+# sub_82C1E878). Part of the 0x82C1E lookup cluster. The object class and the slot-1 method
+# aren't resolvable, so the name states the mechanism: obtain a value via a vcall and
+# binary-search for it.
+[functions."0x82C1E760"]
+name = "LookupByVcall_82C1E760"
+
+
+# A boolean predicate: call LookupByVcall_82C1E760 and return 0/1 based on the result's
+# sign (a "does it exist / is it valid" test).
+
+# Args: (r3), src (r4), value (r5). Calls LookupByVcall_82C1E760 (sub_82C1E760) with the
+# same arguments, then does a clz-based sign test on the result and returns (sign ^ 1) --
+# a 0/1 boolean. So it's a predicate built on the lookup: true (1) when the lookup returns
+# a "nonzero-sign" result. 0 direct callers, so it is most likely a VIRTUAL method (or
+# currently dead). Part of the 0x82C1E lookup cluster. The lookup semantics aren't fully
+# resolvable, so the name states the mechanism: a boolean predicate over the vcall+binary-
+# search lookup.
+[functions."0x82C1E7F0"]
+name = "LookupPredicate_82C1E7F0"
+
+
+# A lazy-init singleton getter: check a global flag and, on first call only, initialize a
+# global object, then return it.
+
+# No real args (operates on globals). Checks bit 0 of a global flag (~0x82C73F98); if it is
+# already set, skip to the return. Otherwise set the flag, initialize the global object at
+# ~0x82C78640 (sub_82BA8BB0), and call sub_82CA3700 (a string/format routine) with another
+# global (~0x82C38A80). Returns the global object. So it's a "get the singleton, initialize
+# on first use" accessor. 72 lines. 94 callers, mostly in the 0x82BA/0x82BB region
+# (sub_82BA8800, sub_82BA9938, sub_82BB1398, ...) -- a high-value subsystem getter. The
+# object class isn't resolvable, so the name states the mechanism: get the (lazy-init)
+# singleton.
+[functions."0x82BA8718"]
+name = "GetSingleton_82BA8718"
+
+
+# A trivial pointer adjustment: return obj + 492 (a 2-insn function: addi r3, r3, 492; blr).
+
+# Arg: obj (r3). Returns (obj + 492) -- a pointer to a sub-field / embedded object at offset
+# 492 within the object. 0 direct callers, so it is most likely a VIRTUAL method (a vtable
+# accessor) or currently dead. It's a plain "get the embedded object at offset 492" accessor;
+# the field's meaning needs the object class. Named for what it does: return obj + 492.
+[functions."0x82BAA138"]
+name = "GetSubObj_492_82BAA138"
+
+
+# A string-key lookup: walk a node structure, comparing node keys via StrCmp_Signed_8226D7A8,
+# and set a 0/1 result.
+
+# Args: obj (r3, ->4 ->4 = a starting node, node->17 = a flag, node->12 = a key), src (r4,
+# ->0 = the target). Reads the starting node (obj->4->4); if the node's byte-17 flag is 0, it
+# walks the node structure comparing each node's key (node->12) to the target via
+# StrCmp_Signed_8226D7A8, setting a 0/1 result (found/not) in r11. Returns that result. 100
+# lines. 1 caller: sub_825D7688 (a sibling, also in the TODO). The node/key class (a string-key
+# lookup over a tree/list of nodes) isn't resolvable, so the name states the mechanism: a
+# string-key lookup (walk + StrCmp compare, return a 0/1 result).
+[functions."0x822ADCB8"]
+name = "LookupString_822ADCB8"
+
+
+# A string-key lookup (the larger sibling of LookupString_822ADCB8): walk a node structure,
+# comparing node keys via StrCmp_Signed_8226D7A8 / CompareStrings_8228B5A0, and set a 0/1
+# result.
+
+# Args: obj (r3, ->4 ->4 = a starting node, node->17 = a flag, node->12 = a key), (r4), src
+# (r5, ->0 = the target). Reads the starting node (obj->4->4); if the node's byte-17 flag is 0,
+# it walks the node structure comparing each node's key (node->12) to the target via
+# StrCmp_Signed_8226D7A8 and CompareStrings_8228B5A0, setting a 0/1 result (found/not). Also
+# calls sub_8246CF80 and sub_824708F8 (further lookup helpers). Returns the 0/1 result. 220
+# lines. Many callers (sub_82514818, sub_825C7278, sub_8291FC20, ...). A larger sibling of
+# LookupString_822ADCB8 (same walk + string-key compare + 0/1 result shape, but with extra
+# helpers and a longer body); the "2" distinguishes the two. The node/key class isn't
+# resolvable, so the name states the mechanism: a string-key lookup.
+[functions."0x8246C010"]
+name = "LookupString2_8246C010"
+
+
+# A lookup-and-compare: call LookupString_822ADCB8 to find the node, validate it, then confirm
+# the match with CompareStrings_8228B5A0.
+
+# Args: obj (r3), target-obj (r4), src (r5). Calls LookupString_822ADCB8 (sub_822ADCB8) to
+# find the matching node. If the result is 0, raises `trap 22` (an invalid/missing-node
+# assertion). Otherwise it reads the node's key (result->4) and, if it doesn't already equal the
+# lookup result, confirms the match with CompareStrings_8228B5A0 (sub_8228B5A0, comparing the
+# node's +12 string to src). Returns the 0/1 match result. 86 lines. Many callers (sub_82B71020,
+# sub_825C6368, sub_825C79D8, ...). It's a thin "find the node, then verify the string matches"
+# wrapper around LookupString + CompareStrings. The node class and exact comparison semantics
+# aren't resolvable, so the name states the mechanism: lookup and compare.
+[functions."0x825D7688"]
+name = "LookupAndCompare_825D7688"
+
+
+# A trivial global getter: returns a fixed global address (0x83334D40).
+
+# Args: (none used). Loads a fixed 32-bit address via lis/addi (0x83334D40, in the tail of the
+# .text/.data region) into r3 and returns it. 2 lines. 0 direct callers -- so it's most likely a
+# virtual method reached via a vtable (a "get the global object/pointer" accessor) or otherwise-
+# dead code. The global it points at (0x83334D40) and its meaning can't be determined from the
+# body alone. The name states the mechanism: a stub returning a fixed global pointer.
+[functions."0x82C27FA0"]
+name = "GetGlobalPtr_82C27FA0"
+
+
+# A trivial global getter (the sibling of GetGlobalPtr_82C27FA0): returns a fixed global
+# address (0x83334D28, 24 bytes before GetGlobalPtr_82C27FA0's 0x83334D40).
+
+# Args: (none used). Loads a fixed 32-bit address via lis/addi (0x83334D28) into r3 and returns
+# it. 2 lines. 0 direct callers -- most likely a virtual method reached via a vtable (a "get the
+# global object/pointer" accessor) or otherwise-dead code. Sibling of GetGlobalPtr_82C27FA0
+# (same shape, a nearby global in the same region); the "2" distinguishes the two. The global's
+# meaning can't be determined from the body alone. The name states the mechanism: a stub
+# returning a fixed global pointer.
+[functions."0x82C23D00"]
+name = "GetGlobalPtr2_82C23D00"
+
+
+# A trivial global getter (the third in the GetGlobalPtr series): returns a fixed global address
+# (0x8332ECF0).
+
+# Args: (none used). Loads a fixed 32-bit address via lis/addi (0x8332ECF0, in the .data region)
+# into r3 and returns it. 2 lines. Most likely a virtual method reached via a vtable (a "get the
+# global object/pointer" accessor) or otherwise-dead code. Siblings: GetGlobalPtr_82C27FA0 (returns
+# 0x83334D40) and GetGlobalPtr2_82C23D00 (returns 0x83334D28); the "3" distinguishes this one. The
+# global's meaning can't be determined from the body alone. The name states the mechanism: a stub
+# returning a fixed global pointer.
+[functions."0x82240578"]
+name = "GetGlobalPtr3_82240578"
+
+
+# A node lookup / insert: call sub_82C343A0 to look up the node, validate the result (trap 22 if
+# invalid), and run a chain lookup (ChainLookup_82550638).
+
+# Args: obj (r3, ->4 = a field, ->8 = a value), (r4), gate (r5, ->4 = a value), (r6). If r4 ==
+# gate->4, returns (already present). Otherwise it calls sub_82C343A0 (a lookup, with (obj + 4)
+# args), validates the result (it must be non-null and must not equal obj + 4 -- a self-reference
+# check -- else it raises `trap 22`), then reads the result's fields and calls
+# ChainLookup_82550638 (sub_82550638), Release_RefCounted_829FF648, and sub_82A10A70 (further
+# node helpers). So it's a "look up / insert the node" routine. 124 lines. 1 caller:
+# CopyStructData_83235608 (sub_83235608). Part of the 0x8323 constructor cluster. The node class
+# and the exact lookup/insert semantics aren't resolvable, so the name states the mechanism: look
+# up / insert a node.
+[functions."0x8323A110"]
+name = "LookupAndInsertNode_8323A110"
+
+
+# A trivial global-getter stub: return a pointer to a fixed global (0x82CCC8C0 + 19788 = 0x82D0388C).
+
+# Args: (none used). Loads the address 0x82D0388C (a fixed .data global) into r3 and returns. 2 lines.
+# 0 direct callers (most likely a virtual method / a "get the global singleton" accessor). A sibling
+# of GetGlobalPtr_82C27FA0, GetGlobalPtr2_82C23D00, and GetGlobalPtr3_82240578 (all trivial global-
+# pointer getters). The global's meaning (a singleton, a type table, a global object) can't be
+# determined from the body alone. The name states the mechanism: get a global pointer (the "4" is the
+# series index).
+[functions."0x82C21AD0"]
+name = "GetGlobalPtr4_82C21AD0"
+
+
+# A trivial field getter: return *(r3 + 48) -- the field at offset 48.
+
+# Args: obj (r3). Loads the 32-bit field at offset 48 of obj and returns it. 8 lines (no callees).
+# 0 direct callers (most likely a virtual method / accessor reached via a vtable, e.g. a "get field 48"
+# getter). The field's meaning (a size, a count, a pointer, a type) can't be determined from the body
+# alone -- only that it's a 32-bit field at offset 48 of the object. A sibling of other trivial field
+# getters (GetField4_8320F978). The name states the mechanism: get the field at offset 48.
+[functions."0x82C6F840"]
+name = "GetField48_82C6F840"
+
+
+# A trivial global-getter stub: return a pointer to a fixed global (0x82CCC8C0 + 19776 = 0x82D03880).
+
+# Args: (none used). Loads the address 0x82D03880 (a fixed .data global) into r3 and returns. 2 lines.
+# 0 direct callers (most likely a virtual method / a "get the global singleton" accessor). A sibling of
+# GetGlobalPtr_82C27FA0, GetGlobalPtr2_82C23D00, GetGlobalPtr3_82240578, and GetGlobalPtr4_82C21AD0 (all
+# trivial global-pointer getters). Notably, GetGlobalPtr4_82C21AD0 returns 0x82D0388C, just 12 bytes above
+# this one -- so this is a getter for a neighboring field of the same global object. The global's meaning
+# (a singleton, a type table, a global object) can't be determined from the body alone. The name states
+# the mechanism: get a global pointer (the "5" is the series index).
+[functions."0x82C1F258"]
+name = "GetGlobalPtr5_82C1F258"
+
+
+# A trivial field getter: return *(r4 + 12) -- the field at offset 12.
+
+# Args: (r3), obj (r4). Loads the 32-bit field at offset 12 of obj (r4) and returns it. 8 lines (no
+# callees). 0 direct callers (most likely a virtual method / accessor reached via a vtable, e.g. a "get
+# field 12" getter). The field's meaning (a size, a count, a pointer, a type) can't be determined from the
+# body alone -- only that it's a 32-bit field at offset 12. A sibling of other trivial field getters
+# (GetField4_8320F978, GetField48_82C6F840; the adjacent sub_82284200 returns field 24). The name states
+# the mechanism: get the field at offset 12.
+[functions."0x82283EC8"]
+name = "GetField12_82283EC8"
+
+
+# A lookup + dispatch: look up a value (sub_823FE8F8), set a flag (0/1), and dispatch a virtual method
+# (value->0->32).
+
+# Args: value (r3), flag (r4), (more). Loads a global (from a fixed .data address) and, if flag is 0, looks
+# up the value (sub_823FE8F8, a lookup). It sets a result flag (0 or 1, based on whether the lookup found
+# something). If the flag is set (non-zero), it dispatches a virtual method on the value (loading value->0->32
+# as the method address and bctrl'ing). So it's a "look up the value, and if found, dispatch its virtual
+# method" routine (part of the 0x823F8/0x823FE hash/lookup cluster). 93 lines, 1 callee (sub_823FE8F8). 1
+# caller: HashLookupCompare_823F9620 (sub_823F9620). The value's class (->0->32 = a vtable slot) and the
+# lookup's meaning aren't resolvable, so the name states the mechanism: look up and dispatch.
+[functions."0x823F8C90"]
+name = "LookupAndDispatch_823F8C90"
+
+
+# A chain-lookup + assign: look up the value (ChainLookup_82550638), release the old value if it changed
+# (Release_RefCounted_829FF648), assign the new value (src->0, src->4), and take a reference on it.
+
+# Args: obj (r3, ->4 = a value slot), src (r4, ->0 = a new value, ->4 = a new value's refcount). Looks up
+# the value (ChainLookup_82550638, sub_82550638, passing obj+4 and src->0->4). If the looked-up value's ->4
+# differs from src->4, it releases the old value (Release_RefCounted_829FF648, sub_829FF648), assigns the new
+# value (result->0 = src->0, result->4 = src->4), and takes a reference on the new value (if src->4 is non-
+# null, it increments its refcount). So it's a "look up the value, and assign the new one (releasing the old
+# and refcounting the new)" routine (a reference-counted value assignment via a chain lookup, part of the
+# 0x8323A cluster). 79 lines, 2 callees (ChainLookup_82550638, Release_RefCounted_829FF648). 4 callers
+# (sub_83225E00, sub_83227478, sub_83225538, sub_832259A0). The value's class (->0 = the value, ->4 = the
+# refcount) isn't resolvable, so the name states the mechanism: look up and assign.
+[functions."0x8323A1E8"]
+name = "LookupAndAssign_8323A1E8"
+
+
+# A trivial offset getter: return (r3 + 732), i.e. a sub-object / field embedded at offset 732 of the
+# containing object.
+
+# Args: obj (r3, a containing object). Returns obj + 732 (0x2DC) -- the address of a sub-object / field
+# embedded at offset 732 of the containing object. 2 lines, no callees. 0 direct callers (a leaf thunk / vcall
+# target). The containing object's class (a large object with an embedded sub-object at offset 732) and the
+# sub-object's meaning aren't resolvable, so the name states the mechanism: get the offset-732 field.
+[functions."0x82BAA148"]
+name = "GetOffset732_82BAA148"
+
+
+# A trivial offset getter: return (r3 + 684), i.e. a sub-object / field embedded at offset 684 of the
+# containing object -- the sibling of GetOffset732_82BAA148.
+
+# Args: obj (r3, a containing object). Returns obj + 684 (0x2AC) -- the address of a sub-object / field
+# embedded at offset 684 of the containing object. 2 lines, no callees. 0 direct callers (a leaf thunk / vcall
+# target). The containing object's class (a large object with embedded sub-objects at offsets 684 and 732) and
+# the sub-object's meaning aren't resolvable, so the name states the mechanism: get the offset-684 field. A
+# sibling of GetOffset732_82BAA148 (sub_82BAA148) -- same shape (addi + blr), different offset (684 vs 732), and
+# the two sit adjacent in the binary (0x82BAA148 and 0x82BAA150), so they likely return two different sub-
+# objects of the same large containing object.
+[functions."0x82BAA150"]
+name = "GetOffset684_82BAA150"
+
+
+# A trivial global getter: return a fixed global (0x82CCC8C0 + 19812) -- a sibling of the GetGlobalPtr family.
+
+# Args: (none -- it ignores its arguments). Returns a fixed global (0x82CCC8C0 + 19812), i.e. the address of a
+# particular global variable / structure. 3 lines, no callees. 0 direct callers (reached via a dispatch / vcall,
+# likely a type's global / singleton getter). The global's meaning (a particular global variable / structure) isn't
+# resolvable, so the name states the mechanism: get a global pointer. The "6" distinguishes it from GetGlobalPtr
+# _82C27FA0, GetGlobalPtr2_82C23D00, GetGlobalPtr3_82240578, GetGlobalPtr4_82C21AD0, and GetGlobalPtr5 (an earlier
+# entry).
+[functions."0x82C26870"]
+name = "GetGlobalPtr6_82C26870"
+
+
+# A trivial offset getter: return (obj->12 + index * 8) -- a base plus an index into an 8-byte-stride array.
+
+# Args: obj (r3, ->12 = a base), index (r4), (more). Returns (obj->12 + (index << 3)) = (obj->12 + index * 8) -- a
+# base (obj->12) plus an index into an 8-byte-stride array. 3 lines, no callees. A sibling of GetOffset732_82BAA148
+# and GetOffset684_82BAA150 (which compute (index + constant) * 16 from a base); this one computes (base + index * 8)
+# (an 8-byte stride). It is registered (in the function table, fable_2_init.cpp / fable_2_register.cpp) but has no
+# direct callers in the recompiled code (a registered-but-uncalled getter, likely invoked only from code outside the
+# traced region, or unused). The array's meaning (an 8-byte-stride array) and the base (obj->12) aren't resolvable,
+# so the name states the mechanism: get an offset (base + index * 8). The "8" distinguishes it from the other
+# GetOffset* getters.
+[functions."0x82BABC60"]
+name = "GetOffset8_82BABC60"
+
+
+# A trivial field getter: return (obj->16).
+
+# Args: obj (r3, ->16 = a value), (more). Returns (obj->16) -- a field at offset 16. 2 lines (to the next function),
+# no callees (pure data access). A sibling of the GetField*/GetGlobalPtr* trivial getters (e.g., GetField12). It is
+# registered (in the function table, fable_2_init.cpp / fable_2_register.cpp) but has no direct callers in the
+# recompiled code (a registered-but-uncalled getter, likely invoked only from code outside the traced region, or
+# unused). The field's meaning (obj->16, a sub-object / value / pointer) isn't resolvable, so the name states the
+# mechanism: get a field (obj->16). The "13" distinguishes it from GetField12 and other GetField* getters.
+[functions."0x82B495F8"]
+name = "GetField13_82B495F8"
+
+
+# A pointer getter (a branch on a field): if (obj->24 >= 8), return (obj->4); otherwise return (obj + 4).
+
+# Args: obj (r3, ->4 = a pointer, ->24 = a flag / count), (more). Branches on obj->24: if it is >= 8 (a threshold), it
+# returns (obj->4, a pointer field); otherwise it returns (obj + 4, a pointer to a fixed offset within the object). So
+# it's a "get a pointer (branch on a field: obj->24 >= 8 -> obj->4, else obj + 4)" routine (a pointer getter, part of
+# the 0x822F5 cluster). 19 lines (to the next function), no callees (pure data access). 2 callers (sub_82EE2A48, sub
+# _822F6480). The object's class (->4 = a pointer, ->24 = a flag / count, an object with a pointer field and a flag)
+# and the pointer's meaning (a sub-object / value / a fixed offset) aren't resolvable, so the name states the
+# mechanism: get a pointer (branch on a field).
+[functions."0x822F5458"]
+name = "GetPointer_822F5458"
+
+
+# A getter (a pointer/index getter, with a bounds check and special values, the sibling of GetPointer_82C23858 /
+# GetField13_82375C28): (if a value is positive) compute a pointer (obj->12 + value * 8, an 8-byte element stride, with
+# a bounds check, obj->8, a limit, and a particular offset (minus 8)), and (if the value is in a special range,
+# -10000 / -10001 / -10002, a set of special values) compute a pointer (obj->8 + value * 8, a negative offset, a
+# particular pointer), returning the pointer.
+
+# Args: obj (r3, r11, ->8 = a limit, ->12 = a base, a pointer), value (r4, a value, a particular index / a particular
+# value), (more). It checks the value (r4, a value, a particular index / a particular value): if it is positive (a
+# positive index, a forward offset), it computes a pointer (obj->12 + value * 8, a base (r9, obj->12) plus a stride (r1
+# 0, value * 8, an 8-byte element stride, rlwinm r10, r4, 3, 0, 28, a left shift by 3, a multiplication by 8, a 8-byte
+# element stride), a pointer, a particular element), and performs a bounds check (obj->8, a limit, a particular bound
+# , and a particular offset (r3 = r11 - 8, a pointer, minus 8, a particular adjustment), if the pointer is below the
+# limit, it returns a constant (from a fixed .data address, a particular default, a null / a particular value)). If the
+# value is in a special range (-10000 / -10001 / -10002, a set of special values, a particular set of negative offsets)
+# , it computes a pointer (obj->8 + value * 8, a base (r11, obj->8) plus a stride (r10, value * 8, a negative offset, a
+# particular pointer), a pointer, a particular element). So it's a "get a pointer/index (a pointer/index getter: (if a
+# value is positive) compute a pointer (obj->12 + value * 8, an 8-byte element stride, with a bounds check), and (if
+# the value is in a special range, a set of special values) compute a pointer (obj->8 + value * 8, a negative offset))"
+# routine (a pointer/index getter, part of the 0x82BC5 cluster, a sibling of GetPointer_82C23858). 111 lines, no direct
+# callees (pure data manipulation). 10+ callers: sub_822A5E98, sub_82BC68F0, sub_82BD2768, sub_82BC59D0, sub_821E1548,
+# sub_821931E8, sub_82BC6718, sub_82BC5C88, sub_82BC5FF0, sub_82BC5B30 (a widely-called pointer/index getter, part of
+# the game's data subsystem). The object's class (obj, ->8 = a limit, ->12 = a base, a pointer, a particular structure
+# , a table / a region) and the value's meaning (a value, a particular index / a particular value) aren't resolvable, so
+# the name states the mechanism: a pointer/index getter ((if a value is positive) compute a pointer (obj->12 + value * 8
+# , an 8-byte element stride, with a bounds check), and (if the value is in a special range) compute a pointer (obj->8
+# + value * 8, a negative offset)).
+[functions."0x82BC5448"]
+name = "GetIndexedPointer_82BC5448"
+
+
+# A getter (a pointer offset getter, the sibling of GetOffset8_82BABC60 / GetPointer_82C23858): return a pointer (a +
+# 36, a 36-byte offset, a particular field / a particular element, a pointer offset, a particular offset into an object
+# ).
+
+# Args: a (r3, a pointer, a particular object / a particular structure). It returns a pointer (r3 + 36, a 36-byte
+# offset, a particular field / a particular element, a pointer offset, a particular offset into the object, a specific
+# field / a specific element). So it's a "get a pointer offset (a pointer offset getter: return a pointer (a + 36, a
+# 36-byte offset, a particular field / a particular element))" routine (a pointer offset getter, part of the 0x82295
+# cluster, a sibling of GetOffset8_82BABC60). ~5 lines, no direct callees (a trivial pointer offset getter). 3 callers:
+# sub_82C6ABE8, sub_82C6B640, sub_82C6AAB8 (siblings in the 0x82C6A/0x82C6B clusters). The object's class (a pointer,
+# a particular object / a particular structure, a particular layout, a 36-byte offset to a particular field) and the
+# offset's meaning (a 36-byte offset, a particular field / a particular element) aren't resolvable, so the name states
+# the mechanism: a pointer offset getter (return a pointer (a + 36, a 36-byte offset, a particular field / a
+# particular element)). The "36" refers to the 36-byte offset (a particular field / a particular element, a specific
+# offset into the object).
+[functions."0x822957E8"]
+name = "GetOffset36_822957E8"
+
+
+# A getter (with a check, the sibling of GetSingleton_829F9090 / GetObjectAtOffset_821782D8): read a global (from a
+# fixed .data address, a particular value, a particular singleton / a particular flag), and (if it is non-zero, a
+# particular state) return another global (a flag, from a fixed .data address, a particular value, a particular flag /
+# a particular state), and (otherwise) return 0, a zero / a particular state.
+
+# No args. It reads a global (r11, from a fixed .data address, a particular value, a particular singleton / a
+# particular flag). It checks the value: if it is non-zero (a particular state, a particular value), it returns another
+# global (r3, from a fixed .data address, a particular value, a particular flag / a particular state, a particular
+# value); if it is zero (a null state, a particular state), it returns 0 (a zero / a particular state, a particular
+# value). So it's a "get a flag (with a check: read a global, and (if it is non-zero, a particular state) return
+# another global (a flag, from a fixed .data address, a particular value, a particular flag / a particular state), and
+# (otherwise) return 0)" routine (a getter, with a check, part of the 0x82226 cluster). 23 lines, no direct callees
+# (pure data manipulation). 8 callers: sub_822FAD38, sub_82184D38, sub_8230C328, sub_82815E00, sub_8230BB78, sub
+# _8217D1F8, sub_822D1410, sub_822C5390 (a widely-called getter, part of the game's subsystems). The global's meaning
+# (a global, from a fixed .data address, a particular value, a particular singleton / a particular flag, a particular
+# flag / a particular state) and the flag's meaning (a flag, from a fixed .data address, a particular value, a
+# particular flag / a particular state) aren't resolvable, so the name states the mechanism: a getter (with a check) (a
+# flag, from a fixed .data address, a particular value, a particular flag / a particular state, with a check, a
+# particular state).
+[functions."0x82226ED8"]
+name = "GetFlag_82226ED8"
+
+
+# A lookup (a lookup, with a compute and a mask, the sibling of ProcessSortCompare_82C22148 / ProcessLookup2_82A0
+# FB80): perform a lookup (a lookup, a particular lookup / a
+# particular value, a particular size / a
+# particular allocation, a
+# particular operation, a particular state / a
+# particular result), and (in a compute) compute an offset (an offset, a
+# particular offset / a
+# particular index, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, (index << 1) & 0x1FE, a
+# compute, a
+# particular compute / a
+# particular operation, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result), and (in a mask) mask a value (a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# 2-byte element, a
+# particular element, & 0xFFFF8000, a
+# mask, a
+# particular mask / a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and return the value (a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# 2-byte element, a
+# particular element, a
+# particular state / a
+# particular result).
+
+# Args: index (r3, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular index), (more). It performs a lookup (a
+# lookup, a particular lookup / a
+# particular value, a particular size / a
+# particular allocation, a
+# particular operation, a particular state / a
+# particular result). In the compute, it computes an offset (r10, (r3 << 1) & 0x1FE, an
+# offset, a
+# particular offset / a
+# particular index, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, a
+# compute, a
+# particular compute / a
+# particular operation, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result). It masks a value (r11, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# 2-byte element, a
+# particular element, & 0xFFFF8000, a
+# mask, a
+# particular mask / a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result). It returns the value (a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# 2-byte element, a
+# particular element, a
+# particular state / a
+# particular result). So it's a "lookup (a
+# lookup, with a
+# compute and a
+# mask: perform a lookup (a
+# lookup, a particular lookup / a
+# particular value, a particular size / a
+# particular allocation, a
+# particular operation, a particular state / a
+# particular result), and (in a compute) compute an offset (an offset, a
+# particular offset / a
+# particular index, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, (index << 1) & 0x1FE, a
+# compute, a
+# particular compute / a
+# particular operation, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result), and (in a mask) mask a value (a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# 2-byte element, a
+# particular element, & 0xFFFF8000, a
+# mask, a
+# particular mask / a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and return the value (a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# 2-byte element, a
+# particular element, a
+# particular state / a
+# particular result))" routine (a lookup routine, part of the 0x8223F cluster, a sibling of
+# ProcessSortCompare_82C22148 and ProcessLookup2_82A0FB80). 18
+# lines, 0 callees. 9 callers: sub_82CB7B90, sub_82CAE4A8, sub_82CB7688, sub_830043D0, BuildBuffer_8223F990, sub
+# _82CACCC0, sub_82CB3260, sub_82CB2038, sub_82CB1438 (processes, which
+# call this to perform the lookup, a
+# particular size / a
+# particular allocation, a
+# particular operation). The value's meaning (index, r3, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular index) isn't resolvable, so the name states the mechanism: a lookup (with a
+# compute and a
+# mask) (perform a lookup (a
+# lookup, a particular lookup / a
+# particular value, a particular size / a
+# particular allocation, a
+# particular operation, a particular state / a
+# particular result), and (in a compute) compute an offset (an offset, a
+# particular offset / a
+# particular index, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, (index << 1) & 0x1FE, a
+# compute, a
+# particular compute / a
+# particular operation, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result), and (in a mask) mask a value (a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# 2-byte element, a
+# particular element, & 0xFFFF8000, a
+# mask, a
+# particular mask / a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and return the value (a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# 2-byte element, a
+# particular element, a
+# particular state / a
+# particular result)). The "Masked" refers to the lookup (a
+# lookup, a particular lookup / a
+# particular value, a particular size / a
+# particular allocation, a
+# particular operation, a particular state / a
+# particular result) and the mask (a
+# mask, a
+# particular mask / a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result).
+[functions."0x8223F970"]
+name = "LookupMasked_8223F970"
+
+
+# Get-or-create lookup into a ref-counted chain. It looks the key up with WalkChainFind_83239FA8;
+# if an entry already exists it releases that reference (Release_RefCounted_829FF648) and resets the
+# caller's slot (obj->0 / obj->4) to null. If the key is absent it allocates a fresh 36-byte node
+# (Allocate_OrDbgBreak_8221F388), wraps it as a ref-counted value (SetRefcountedWrapper_8238A848), and
+# extracts / seeds it via ExtractRef_83227478. Net effect: "give me a live reference for this key,
+# creating the node if it did not exist."
+# Part of the 0x83237 cluster (sibling of ProcessRead3_83237DB8 / ExtractRef_83227478's caller chain).
+# 152 lines, 5 callees. 1 caller: ResolveRef_832274F8.
+[functions."0x83237FA0"]
+name = "GetOrCreateRef_83237FA0"
+
+
+# Get-or-create lookup into a ref-counted chain that allocates 256-byte nodes. It looks the key up
+# with WalkChainFind_83239FA8; if an entry already exists it releases that reference
+# (Release_RefCounted_829FF648) and resets the caller's slot (obj->0 / obj->4) to null. If the key is
+# absent it allocates a fresh 256-byte node (Allocate_OrDbgBreak_8221F388) and seeds it (sub_82A0ECC8),
+# adjusting ref counts via ProcessRefCount_83225538. Net effect: "give me a live 256-byte reference
+# for this key, creating the node if it did not exist." The 256-byte-node twin of
+# GetOrCreateRef_83237FA0 (which allocates 36-byte nodes).
+# Part of the 0x82A0C cluster (sibling of ProcessErase_82A0C2E0 / Construct32ByteCopy_82A0C1B8).
+# 211 lines, 5 callees. 1 caller: StateDispatch4_83220888.
+[functions."0x82A0C960"]
+name = "GetOrCreateRef2_82A0C960"
+
+
+# The second 256-byte get-or-create lookup - an exact twin of GetOrCreateRef2_82A0C960. It looks the
+# key up with WalkChainFind_83239FA8; on a hit it releases the found reference (Release_RefCounted_829FF648)
+# and resets the caller's slot (obj->0 / obj->4) to null, and on a miss it allocates a fresh 256-byte node
+# (Allocate_OrDbgBreak_8221F388) and seeds it with sub_82A0ED30, adjusting counts via ProcessRefCount_83225538.
+# Same "give me a live 256-byte reference for this key" contract as its sibling; the two are distinguished
+# only by the node-seed routine they call (sub_82A0ED30 here vs. Construct256ByteNode_82A0ECC8 there). Part
+# of the 0x82A0C cluster.
+# 211 lines, 5 callees (Allocate_OrDbgBreak_8221F388, ProcessRefCount_83225538, Release_RefCounted_829FF648,
+# WalkChainFind_83239FA8, sub_82A0ED30). 1 caller: StateDispatch4_83220888.
+[functions."0x82A0CFC8"]
+name = "GetOrCreateRef3_82A0CFC8"
+
+
+# Reads a string / element by index with bounds validation. It looks at the index (obj->24): when the
+# value is at least 8 it dereferences the base pointer at obj->4 (the "large / indirect" layout), otherwise
+# it uses the inlined buffer at (obj + 4) (the "small / inline" layout). Each access is bounds-checked with
+# ValidateIndex_822F6EE8 and the range is grown on demand (ProcessRangeGrow_8217A858); the element is then
+# accessed through ValidateElementAccess_8217A7F8 / ProcessVcallLoop_8217A9A8 and the 0x822F5 element helpers.
+# This is the "get the Nth string" accessor for the 0x822F2 string cluster (sibling of SetString_822F2020),
+# widely used (10 callers) as the safe read path.
+# Part of the 0x822F2 string cluster (sibling of SetString_822F2020 / ValidateIndex_822F6EE8). 203 lines, 6
+# callees. 10 callers (the 0x822F2/0x8236x/0x8237x/0x826C0/0x82B3D/0x82C63 cluster).
+[functions."0x822F2238"]
+name = "ReadStringElement_822F2238"
+
+
+# Returns a field from a global / thread-local structure. It loads a base pointer from the thread-context
+# register at offset 256 (r13 + 256), then returns the 32-bit field at offset 332 of that structure
+# ((r13 + 256) + 332). This is the trivial one-field getter used to expose a global value (likely a
+# per-thread state word or a global object pointer) to the 10 callers scattered across the 0x821C/0x8221/
+# 0x82A1/0x82A9/0x82B6/0x82C0/0x82EF/0x8300 range. Part of the 0x8221E global-accessor cluster (sibling of
+# the Allocate_SizeBucketed thunks nearby). 5 lines, 0 direct callees (pure 2-load accessor). 10 callers
+# (the 0x821C/0x8221/0x82A1/0x82A9/0x82B6/0x82C0/0x82EF/0x8300 cluster).
+[functions."0x8221EE38"]
+name = "GetGlobalField_8221EE38"
+
+
+# Returns a global 32-bit value. It loads a .data address and reads the 32-bit word stored at (r11 - 1572),
+# returning it in r3. This is the trivial one-field getter used to expose a global value to the 10 callers
+# scattered across the 0x82BC/0x82BD/0x82CD range. Part of the 0x82CB7 global-accessor cluster (sibling of
+# GetGlobalField_8221EE38). 6 lines, 0 direct callees (pure 2-load accessor). 10 callers (the 0x82BC/0x82BD/
+# 0x82CD cluster).
+[functions."0x82CB7D90"]
+name = "GetGlobalValue_82CB7D90"
+
+
+# Returns a pointer to a field at a fixed offset from a base object, with a null guard. It takes a base
+# pointer (r3), checks the field at offset 492 (r3 + 492): if that field is non-zero it returns the pointer
+# to the field at offset 568 (r3 + 568), otherwise it returns null. The addic. / bnelr sequence makes this a
+# single conditional-return trampoline. This is a "get a member pointer, or null if the owning sub-object is
+# absent" accessor for the 0x82173 object cluster. Reached only via a vtable / function-pointer table (no
+# direct callers in the recompiled code). Part of the 0x82173 field-accessor cluster. 11 lines, 0 direct
+# callees (pure pointer arithmetic + null guard). No direct callers found in the recompiled code (likely
+# reached via a vtable / function-pointer table).
+[functions."0x82173CC0"]
+name = "GetField568_82173CC0"
+
+
+# Returns the field at offset 24 from an object - a one-line getter. It loads the 32-bit word at obj->24
+# and returns it in r3. This is the trivial accessor used to expose a single object member to the (vtable /
+# function-pointer-reached) call site. Part of the 0x82284 field-accessor cluster (sibling of
+# GetField568_82173CC0). 5 lines, 0 direct callees (pure one-load accessor). No direct callers found in the
+# recompiled code (likely reached via a vtable / function-pointer table).
+[functions."0x82284200"]
+name = "GetField24_82284200"
+
+
+# Returns a field from a typed value, dispatching on the value's kind. It first resolves the value's base
+# pointer via GetIndexedPointer_82BC5448, then reads the value's type tag (->4) and branches: when the tag
+# is 2 it returns the value's payload directly (->0), when the tag is 7 it returns a pointer offset into the
+# payload (->0 + 24), and for any other tag it returns null (0). This is the "extract the relevant field
+# from a value whose layout depends on its type" getter for the 0x822AF typed-value cluster, used by 10
+# callers (the 0x82BB1/0x82BB7/0x82BB8/0x82BB9/0x82BBF/0x82BC0/0x82BD6/0x82BD8 range). Part of the 0x822AF
+# typed-value cluster (sibling of GetIndexedPointer_82BC5448 / ProcessDispatchValue_82228D98). 56 lines, 1
+# callee (GetIndexedPointer_82BC5448). 10 callers.
+[functions."0x822AF338"]
+name = "GetTypedField_822AF338"
+
+
+# Returns the field at offset 24 from an object - a one-line getter (the 0x82B56 twin of GetField24_82284200).
+# It loads the 32-bit word at obj->24 and returns it in r3. This is the trivial accessor used to expose a
+# single object member to its call sites, here reached from 10 callers in the 0x82B5/0x82EE/0x8301/0x8302/
+# 0x8304/0x8305 range (including several Func_8304x thunk entries). Part of the 0x82B56 field-accessor
+# cluster (sibling of GetField24_82284200 / GetTypedField_822AF338). 5 lines, 0 direct callees (pure
+# one-load accessor). 10 callers.
+[functions."0x82B56750"]
+name = "GetField24_82B56750"
+
+
+# Computes the address of an 8-byte element by index, with bounds checking and special-case handling. It
+# takes a container (obj) and an index (a). For a positive index it computes the element address (obj->12 +
+# index * 8), then tests whether the slot's back-pointer (address - 8) is before the container's start
+# (obj->8) - an out-of-bounds / invalid slot that makes it return a .data sentinel pointer (r11 - 26784).
+# For an index in the range (-10000, 0] it returns the address directly (obj->8 + index * 8), and a handful
+# of sentinel negative indices (-10000, -10001, -10002) each map to a distinct fixed address. This is the
+# "index into an 8-byte element array, with an out-of-range guard and named sentinels" accessor for the
+# 0x82A1E element-access cluster, used by 10 callers (the 0x82228/0x8239F/0x823A5/0x824F7/0x825ED/0x8277C/
+# 0x8290A/0x82A18/0x82A1E/0x82A29 range). Part of the 0x82A1E element-access cluster (sibling of
+# ElementAccess_821E1498 / Access2DElement_82283FB0). 111 lines, 0 direct callees (pure address math +
+# sentinel selection). 10 callers.
+[functions."0x82A1E620"]
+name = "AccessElement8_82A1E620"
+
+
+# Returns a fixed global pointer. It loads a single word from a fixed .data address (r11 + 6784, a global
+# object pointer) and returns it. This is a one-line "get the global singleton at this address" accessor
+# for the 0x82239 global-getter cluster, used by 10 callers (the 0x82238/0x82239/0x82CA3/0x82CA5/0x82CA8/
+# 0x82CAB/0x82CAE/0x82CBB/0x82CAF range). Part of the 0x82239 global-getter cluster (sibling of GetGlobalField_
+# 82810540 / GetGlobalValue_82C2AC08). 10 lines, 0 direct callees (pure load + return). 10 callers.
+[functions."0x82239798"]
+name = "GetGlobalPointer_82239798"
+
+
+# Returns a fixed .data constant pointer (a getter). It takes no arguments. It loads a .data base constant
+# and adds a fixed offset (+19924) to compute the address of a specific .data object, then returns it as the
+# function's result. This is the "hand out this well-known .data constant address" getter for the 0x82C39
+# constant-pointer cluster, reached only via a vtable / function-pointer table (no direct callers in the
+# recompiled code). Part of the 0x82C39 cluster (sibling of CompactClearArray_82C39298). 10 lines, 0 direct
+# callees (pure .data pointer arithmetic). No direct callers found in the recompiled code (likely reached
+# via a vtable / function-pointer table).
+[functions."0x82C39178"]
+name = "GetConstantPointer_82C39178"
+
+
+# A getter that returns the 32-bit field at offset 72 of a structure. It takes a structure (a) and returns
+# a->72. It is a trivial accessor - a single 32-bit load from the object, with no side effects. It is reached
+# only via a vtable / function-pointer table (no direct callers in the recompiled code), indicating it is a
+# virtual "get field 72" accessor for the 0x82B44 structure family (adjacent to the destruct / free-family
+# sub_82B44A00 at 0x82B44A00, which frees the object when its low bit is set). Part of the 0x82B44
+# accessor / free cluster (sibling of sub_82B44A00). 6 lines, 0 callees. No direct callers found in the
+# recompiled code (likely reached via a vtable / function-pointer table).
+[functions."0x82B44358"]
+name = "GetField_72_82B44358"
+
+
+# A getter that reads the field at offset 12 and returns it. It takes a structure (a) and returns the field at a->12
+# (a one-line field accessor). This is the "read this structure's field at offset 12" getter for the 0x83041 field
+# -accessor cluster, used by 10 callers (sub_82317970, sub_82317E50, sub_82317F98, sub_82325A78, sub_8232DBB8,
+# sub_823971C8, sub_82C51040, sub_82C510C8, sub_82C511C0, and sub_82C80EB8). Part of the 0x83041 field-accessor
+# cluster. 5 lines, 0 callees. 10 callers.
+[functions."0x830418B0"]
+name = "GetField_12_830418B0"
+
+
+# A query that, when the field is non-null, returns the value (read under the lock). It takes a structure (a: a field at a->8).
+# When a->8 is zero, it returns 0. Otherwise it reads the value (LockedReadSubobject_82B44360, on the stack pointer) and returns
+# the value (r1->80). This is the "when this field is non-null, return the value (read under the lock)" routine for the 0x82C63
+# locked-read cluster, used by 6 callers (sub_822F4958, sub_8234EE00, sub_823784A0, sub_82414F40, sub_824154F0, and sub_82A16DA0).
+# Part of the 0x82C63 locked-read cluster (sibling of LockedReadSubobject_82B44360 / CheckAndExtractBit_82C63040). 45 lines, 1
+# callee. 6 callers.
+[functions."0x82C63098"]
+name = "QueryLockedSubobject_82C63098"
+
+
+# A small getter that returns the field at offset 8 of the structure. It takes a structure (a: a field at a->8). It reads the
+# field (a->8) and returns it. This is the "return this field (a->8)" routine for the 0x821CD field-getter cluster, called only
+# via the vtable (0 direct callers). Part of the 0x821CD field-getter cluster. 8 lines, 0 callees. 0 direct callers (vtable
+# dispatch).
+[functions."0x821CDF88"]
+name = "GetFieldAt8_821CDF88"
+
+
+# A querier that queries a file's attributes. It takes a file path (an ANSI string). It initializes a local ANSI string over the path
+# (RtlInitAnsiString) and calls the Windows kernel to query the full file attributes (NtQueryFullAttributesFile, with a file-attributes
+# mask of 0xFFFFFFFF and a buffer size of 64). On success it returns the file-attribute flags word from the result; on failure it calls
+# sub_82CC1C38 (an error helper) and returns -1. This is the "query this file's attributes" routine, part of the 0x82CBD file-query
+# cluster. 62 lines. 3 callees (RtlInitAnsiString, NtQueryFullAttributesFile, sub_82CC1C38). 9 callers.
+[functions."0x82CBD368"]
+name = "QueryFileAttributes_82CBD368"
+
+
+# A querier that calls a Windows API and returns a value. It sets up a local result struct on the stack (at r1+80 and r1+88) and calls
+# a Windows API function (resolved through a .data function pointer) with the result struct, a size of 4, and a query code of 26. When
+# the call returns a non-negative status, it returns the value stored in the result struct (r1+80); on failure it calls sub_82CC1C38
+# (an error helper) and returns -1. This is the "query this value via the Windows API" wrapper, part of the 0x82CC1 API-wrapper
+# cluster. 55 lines. 1 callee (sub_82CC1C38, the shared error helper). 1 caller (ProcessAndFormatString).
+[functions."0x82CC1360"]
+name = "QueryAndReturnValue_82CC1360"
+
+
+# A getter that resolves a data pointer and a clamped length. It takes a structure (a: a base at a->184, a total size at a->188, an
+# offset at a->216, and a length at a->220) plus two output pointers. It computes the data pointer as (a->184 + a->216) and the
+# usable length as the smaller of a->220 and (a->188 - a->216) (i.e. the length clamped so it does not run past the end of the total
+# size), stores the pointer to *out1 and the length to *out2, and returns 1 (success). This is the "get the data pointer and its
+# clamped length" routine, a leaf function (no callees) called only via the vtable (0 direct callers), part of the 0x832B6
+# data-access cluster. ~33 lines. 0 callees. 0 direct callers (vtable dispatch).
+[functions."0x832B6A60"]
+name = "GetDataPointerAndLength_832B6A60"
+
+
+# A querier that calls a Windows API and stores a 64-bit value. It takes a 64-bit output pointer. It sets up a local result struct on the
+# stack (at r1+80 and r1+96) and calls a Windows API function (resolved through a .data function pointer) with the result struct, a size
+# of 56, and a query code of 34. When the call returns a non-negative status, it stores the 64-bit value from the result struct to *out
+# and returns 1 (success); on failure it calls sub_82CC1C38 (the shared error helper) and returns 0. This is the "query this 64-bit value
+# via the Windows API" wrapper, part of the 0x82CC1 API-wrapper cluster (sibling of QueryAndReturnValue_82CC1360). 65 lines. 1 callee
+# (sub_82CC1C38). 2 callers.
+[functions."0x82CC1460"]
+name = "QueryAndStoreValue_82CC1460"
+
+
+# A function that accesses an element by index. It takes a value, a structure (a: fields at a->40 and a->44), and another structure (b: fields at
+# b->4 and b->8). It reads a->40 (a base pointer) and b->4 (an index); when the base is zero or the index is at least (a->44 - a->40) / 36 it asserts
+# (trap 22). It then computes a byte offset ((index + (index * 8)) * 4) from the base, loads the element pointer at that offset, and reads its
+# fields. This is the "access this element by index" routine, a leaf function (no callees), called only via the vtable (0 direct callers), part of
+# the 0x82B40 element-access cluster. 74 lines. 0 callees. 0 direct callers (vtable dispatch).
+[functions."0x82B40EB0"]
+name = "AccessElementByIndex_82B40EB0"
+
+
+# A lookup routine that looks up from a structure. It takes a structure (a: a field at a->12). It reads a->12 (a pointer); when the pointer is zero it returns zero. Otherwise it
+# tail-calls LockedTableLookup_82C81E58 with the pointer + 8. This is the "look up from this structure" routine, part of the 0x82C86 lookup cluster. 20 lines. 1 callee
+# (LockedTableLookup). 3 callers.
+[functions."0x82C86260"]
+name = "LookupFromStructure_82C86260"
+
+
+# A getter that returns a .data pointer. It returns the address of a .data structure (0xE8000000 + 19900, i.e. 0xE8004E00). This is a simple getter that returns a pointer to a global
+# .data object, part of the 0x82C34 getter cluster. 10 lines. 0 callees (leaf function). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect
+# entry).
+[functions."0x82C34F28"]
+name = "GetDataPointer_82C34F28"
+
+
+# A getter that gets the timebase. It takes a structure (a: a field at a->0). It reads the timebase (mftb). When the timebase is zero it reads the timebase again (a retry). It then stores the timebase
+# into a->0 and returns 1. This is the "get the timebase" routine, part of the 0x8221E process cluster. 20 lines. 0 callees (leaf function). 12 callers (sub_82BBB2A8, sub_82D02A88, sub_82B9C530,
+# sub_82A3E7C0, sub_82CFECA8, sub_822B6D70, sub_82A57418, sub_82AA2E80, sub_82B69488, sub_82AB2968, sub_82BE3E00, and sub_8238A2D8).
+[functions."0x8221EB58"]
+name = "GetTimebase_8221EB58"
+
+
+# A getter that gets a data pointer (second form). It returns a .data pointer (a constant address). This is the "get this data pointer" routine (second form), part of the 0x82C43 process cluster. 10
+# lines. 0 callees (leaf function). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82C43398"]
+name = "GetDataPointer2_82C43398"
+
+
+# A pointer getter that returns a data pointer (fourth form). It returns a .data pointer (a constant address, a plus 19952). This is the "get this data pointer" routine (fourth form), part of the 0x82C40
+# process cluster. 10 lines. 0 callees (leaf function). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82C40EB0"]
+name = "GetDataPointer4_82C40EB0"
+
+
+# A pointer getter that returns a pointer from the context. It reads the context's field at +336 (a flag). When the flag is non-zero it returns 0. Otherwise it reads the context's field at +256 (a pointer) and
+# returns the pointer's field at +352. This is the "get this pointer from the context" routine, part of the 0x82CC1 process cluster. 21 lines. 0 callees (leaf function). 12 callers (sub_82CF9558,
+# sub_82CBBFA8, sub_82CF9078, sub_82CFA6E8, sub_82CF9480, WrapperSub82CC1C70_82CC0758, sub_82CF9288, sub_82CF91E0, sub_82CF98F8, sub_82CF9130, sub_82CFA410, and sub_82CF96A0).
+[functions."0x82CC1C70"]
+name = "GetPointerFromContext_82CC1C70"
+
+
+# A getter that returns the data. It takes a structure (a: field at a->200). It reads a->200 (a value) and returns it. This is the "get this field" routine, part of the 0x82B56 process cluster.
+# 8 lines. 0 callees (leaf function). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82B56838"]
+name = "GetField200_82B56838"
+
+
+# A getter that returns the data. It takes a structure (a: field at a->28). It reads a->28 (a value) and returns it. This is the "get this field" routine, part of the 0x82BAA process cluster.
+# 8 lines. 0 callees (leaf function). 1 caller (sub_82C886F0).
+[functions."0x82BAA130"]
+name = "GetField28_82BAA130"
+
+
+# A getter for a global field (offset 19764). It reads a field from a .data structure (at offset 19764) and returns it. This is the "get this global field" routine, part of the 0x82C13 process cluster. 10 lines. 0 callees (leaf function).
+# 12 callers (sub_82BFFD88, sub_82BFFC68, sub_82BFFBD8, sub_82BFFCE8, ProcessAndComputeAndProcess17_82BFFF40, sub_82BFFD30, sub_82BFFEE8, sub_82BFFE50, sub_82BFFBB0, sub_82BFFEA8, sub_82BFFB10, and sub_82BFFC20).
+[functions."0x82C13068"]
+name = "GetGlobalField19764_82C13068"
+
+
+# A getter for a structure field (offset 20). It takes a structure (a: field at a->20). It reads a->20 and returns it. This is the "get field 20 of this structure" routine, part of the 0x82B56 process cluster. 8 lines. 0 callees
+# (leaf function). 12 callers (sub_82E938B0, sub_82E81258, sub_82EB7F78, sub_82E92610, sub_82EB7A18, sub_82E821F8, sub_82EC52E8, sub_82E84DB8, sub_82EBC060, sub_82E6A1C8, sub_82EAD038, and sub_82E7C5F8).
+[functions."0x82B568C0"]
+name = "GetField20_82B568C0"
+
+
+# A getter for a structure field (offset 8). It takes a structure (a: field at a->8). It reads a->8 and returns it. This is the "get field 8 of this structure" routine, part of the 0x83041 process cluster. 8 lines. 0 callees (leaf function).
+# 12 callers (sub_82C510C8, sub_82C50FE8, UIFont_Initialize, sub_82C88C58, sub_82C50E28, sub_82C88B38, sub_82C88BC8, sub_82C51810, sub_82C51870, sub_82C51960, sub_82C519C8, and sub_82C51040).
+[functions."0x830418A8"]
+name = "GetField8_830418A8"
+
+
+# A getter that reads a field at offset 832. It takes a pointer (a) and returns a+832 (a pointer to a field at offset 832). This is the "get field 832" routine, part of the 0x82BAA process cluster. 8 lines. 0 callees (leaf function — performs raw memory operations). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82BAA158"]
+name = "GetField832_82BAA158"
+
+
+# A getter that reads a field. It takes a pointer (a). It reads a->0 (a pointer). When a->0 is zero it returns a .data pointer (63). When a->0 is non-zero it returns a->0. This is the "read this field" routine, part of the 0x822F8 get cluster. 21 lines. 0 callees (leaf function — performs raw memory operations). 12 callers (sub_8223C950, sub_82C01930, sub_8260B9E0, sub_8253FBE8, sub_82C47BC0, sub_82A1A360, sub_82C01668, sub_82281EE0, sub_825C6248, sub_8256F540, sub_82C48210, and sub_82C00DA0).
+[functions."0x822F8628"]
+name = "GetField833_822F8628"
+
+
+# A getter that reads a field. It takes a value (a). When a is zero it returns a .data pointer (19876). When a is non-zero it returns a .data pointer (19880). This is the "read this field" routine, part of the 0x82C30 get cluster. 21 lines. 0 callees (leaf function — performs raw memory operations). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82C30640"]
+name = "GetField834_82C30640"
+
+
+# Get a flag from a substructure, returning the byte value only when the guard byte is zero (a flag-getter routine). It takes a structure (a: field at a->16, which is a pointer to a sub-structure with bytes at +16 and +17); if the guard byte (a->16+17) is zero, it returns the flag byte (a->16+16), otherwise it returns 0. This is a "get flag from substructure" routine. 18 lines. 0 callees. 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x821DB8D0"]
+name = "GetFlagFromSubstructure_821DB8D0"
+
+
+# Thunk that calls KeQuerySystemTime to get the current system time (a system-time thunk). It takes no arguments and simply calls __imp__KeQuerySystemTime. This is a "query system time" thunk. 7 lines. 1 callee (__imp__KeQuerySystemTime). 5 callers (sub_83000E70, sub_821882B0, sub_83003018, sub_82CA4248, and sub_830038E0).
+[functions."0x821882A8"]
+name = "QuerySystemTime_Thunk_821882A8"
+
+
+# Get the current time in milliseconds by querying the system time and converting (a time-conversion routine). It takes no arguments; it queries the system time (KeQuerySystemTime), computes the time difference from a reference, and divides by 10000 to convert to milliseconds. This is a "get current time in milliseconds" routine. 46 lines. 1 callee (QuerySystemTime_Thunk). 11 callers (many from the 0x82C* and 0x82* clusters).
+[functions."0x821882B0"]
+name = "GetCurrentTimeMillis_821882B0"
+
+
+# Return the byte at offset 8 of a structure (a byte-getter routine). It takes a structure (a: field at a->8) and returns the byte value at a->8. This is a "get byte at offset" routine. 7 lines. 0 callees. 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x8217FD88"]
+name = "GetByteAtOffset8_8217FD88"
+
+# UI-text container per-frame processor (hooked in fable2_text_probe.h). r3 = container;
+# iterates the up-to-6 child element pointers at container+0..+20. Pass 1 calls each
+# live child's vtable[2] (offset 8, the per-element update). Pass 2 calls each child's
+# vtable[1] (offset 4, a query) and records the index of the first child returning a
+# non-zero low byte. Confirmed on the main-menu render path by the UIR render probe.
+[functions."0x822A9360"]
+name = "GetByteAtOffset96_822A9360"
+
+
+# Return the byte at offset 4 of a structure (a byte-getter routine). It takes a structure (a: field at a->4) and returns the byte value at a->4. This is a "get byte at offset" routine. 8 lines. 0 callees. 7 callers (many from the 0x82EE* cluster).
+[functions."0x829F9C40"]
+name = "GetByteAtOffset4_829F9C40"
+
+
+# Extract the exponent from a float (a float exponent extraction routine). It takes a float (f1); it extracts the exponent field from the float's bit pattern and returns it as an integer. This is an "extract float exponent" routine. 17 lines. 0 callees. 2 callers (ProcessAndProcessAndProcess504 and sub_82CA5C18).
+[functions."0x821FE2F0"]
+name = "GetFloatExponent_821FE2F0"
+
+
+# Get a float field from a structure (a field getter). It takes a structure (a: field at a->396); it loads the float from the structure's field and returns it. This is a "get float field" routine. 11 lines. 0 callees. 0 callers.
+[functions."0x821CC7D0"]
+name = "GetFloatField396_821CC7D0"
+
+
+# Get a bit field by extracting bits from a structure (a bit field getter). It takes a structure (a: field at a->44); it extracts bits from the field, and returns the result. This is a "get bit field" routine. 12 lines. 0 callees. 5 callers (many from the 0x82D* clusters, and ProcessAndProcessAndProcess670).
+[functions."0x8225FE18"]
+name = "GetBitField_8225FE18"
+
+
+# Return a global pointer. It takes no arguments; it returns a pointer to a global object. This is the global-pointer getter, part of the 0x82C44 global cluster. 10 lines. 0 callees. 0 callers.
+[functions."0x82C440B8"]
+name = "GetGlobalPointer_82C440B8"
+
+
+# Return a global pointer (second form). It takes no arguments; it returns a pointer to a global object. This is the global-pointer getter (second form), part of the 0x82C45 global cluster. 10 lines. 0 callees. 0 callers.
+[functions."0x82C45D10"]
+name = "GetGlobalPointer2_82C45D10"
+
+
+# Return a field from an object. It takes a structure (a: fields at a->92 and a->24); it returns a field from the object. This is the object-field getter, part of the 0x82C50 object cluster. 16 lines. 0 callees. 1 caller (UITextPrompt_RenderElement).
+[functions."0x82C50A58"]
+name = "GetFieldFromObject_82C50A58"
+
+
+# Return a field from an object (second form). It takes a structure (a: fields at a->92 and a->36); it returns a field from the object. This is the object-field getter (second form), part of the 0x82C50 object cluster. 16 lines. 0 callees. 1 caller (UITextPrompt_RenderElement).
+[functions."0x82C50A70"]
+name = "GetFieldFromObject2_82C50A70"

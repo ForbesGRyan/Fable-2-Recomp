@@ -1,0 +1,94 @@
+# data-processing region 0x827C0000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# A processor that inserts (or removes) an element from a 16-byte-per-element array based on an index. It
+# takes an array object (a: a start at a->4, an end at a->8), an index (b), and a value (c). It computes the
+# current element count as (a->8 - a->4) / 16 (the 16-byte stride). When the index (b) is beyond the current
+# count (an append) it grows / inserts the trailing element (InsertElement16_82A8BFE8). When the index (b) is
+# within the array (an interior edit) it locates the element (base + (b << 4)) and updates it in place.
+# This is the "insert / update this 16-byte element at index b, growing the array on append" routine for the
+# 0x827C5 element-array cluster, used by 10 callers (the 0x82549/0x827C4/0x827F2/0x82884/0x82930/0x83228/
+# 0x83236/0x83237 range, incl. ProcessObjectFields_83236C28). Part of the 0x827C5 element-array cluster
+# (sibling of InsertElement16_82A8BFE8 / ProcessObjectFields_83236C28). 102 lines, 1 callee. 10 callers.
+[functions."0x827C55C8"]
+name = "ProcessElementArray_827C55C8"
+
+
+# A processor that replaces a value and updates related counters. It takes a structure (a: a field at a->16) and a value (b). It replaces a
+# refcounted value (ProcessAndReplaceRefCounted_822B85C8), increments several counters (ProcessAndIncrementCounter_82287710 and
+# ProcessAndIncrementCounter_822D6B40, with .data descriptors), and manages the associated memory (Allocate_OrDbgBreak, Release_RefCounted,
+# ReleaseGlobalRef, SetValue4, and sub_823B8178 / sub_827DEEE0 / sub_827DFA18 / sub_82B38B78). This is the "replace this value and update
+# the related counters" routine, part of the 0x827DE value-replace cluster. 163 lines. 11 callees. 4 callers.
+[functions."0x827DEAE0"]
+name = "ProcessAndReplaceValue_827DEAE0"
+
+
+# A processor that looks up a value and manages the associated memory. It takes three values. It increments a counter (ProcessAndIncrementCounter_822D6B40
+# with a .data descriptor), performs a lookup (sub_82B391D8), and based on the result (checking for a -1 sentinel) it either takes a default path
+# or continues processing. It then manages the associated memory and counters (Allocate_OrDbgBreak, ProcessAndIncrementCounter, ProcessAndReplaceRefCounted,
+# ReleaseGlobalRef, Release_RefCounted, SetValue4, and several sub_827Dx / sub_82B38x / sub_82B39x helpers). This is the "look up this value and
+# manage the associated memory" routine, part of the 0x827DE value-lookup cluster. 577 lines. 14 callees. 1 caller (ProcessAndReplaceValue_827DEAE0).
+[functions."0x827DEEE0"]
+name = "ProcessAndLookupValue_827DEEE0"
+
+
+# A constructor that allocates and initializes a 12-byte node. It takes a structure (a: a value at a->0 and a result slot at a->4). It allocates
+# 12 bytes (Allocate_OrDbgBreak); when the allocation succeeds it initializes the node with a count of 1 (at +0), a .data descriptor (at +4), and
+# the value from a->0 (at +8). It then stores the node pointer (or 0 on failure) into a->4. This is the "allocate and initialize this 12-byte
+# node" routine, part of the 0x827DF node-construct cluster. 62 lines. 1 callee (Allocate_OrDbgBreak). 2 callers (ProcessAndLookupValue_827DEEE0,
+# ProcessAndReplaceValue_827DEAE0).
+[functions."0x827DFA18"]
+name = "ProcessAndAllocateNode12Byte_827DFA18"
+
+
+# Process a structure by decrementing and disposing (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and one hundred and thirty-seventh form). It takes a structure, decrements and disposes (ProcessAndDecrementDispose), and drives a sub-operation (ProcessAndProcessAndProcess1217) based on the result. This is a frequently-called helper in the 0x827DE process cluster. 75 lines. 2 callees. 4 callers.
+[functions."0x827DEDE0"]
+name = "ProcessAndProcessAndProcess1837_827DEDE0"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and one hundred and seventy-first form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess1694). This is a frequently-called helper in the 0x827DF process cluster. 56 lines. 1 callee. 4 callers.
+[functions."0x827DFDB8"]
+name = "ProcessAndProcessAndProcess1871_827DFDB8"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and four hundred and eighty-second form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess1694). This is a frequently-called helper in the 0x827DF process cluster. 94 lines. 1 callee. 2 callers (sub_827DF7F0 and sub_827DF8D0).
+[functions."0x827DFD18"]
+name = "ProcessAndProcessAndProcess2182_827DFD18"
+
+
+# Process a large structure by incrementing a counter (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and five hundred and forty-fourth form). It takes a structure, increments a counter (ProcessAndIncrementCounter), releases a global ref (ReleaseGlobalRef), and drives sub-operations (ProcessAndProcessAndProcess1871, ProcessAndProcessAndProcess2182, sub_827DFA80) based on the result. This is a frequently-called helper in the 0x827DF process cluster. 128 lines. 5 callees. 2 callers (sub_827DF2C0 and sub_827DF7F0).
+[functions."0x827DF8D0"]
+name = "ProcessAndProcessAndProcess2244_827DF8D0"
+
+
+# Process a structure by freeing size-bucketed memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and five hundred and forty-fifth form). It takes a structure, frees size-bucketed memory (Free_SizeBucketed), constructs and processes (ProcessAndConstructAndProcess25), and releases a global ref (ReleaseGlobalRef). Part of the 0x827DF process cluster. 45 lines. 3 callees. 0 callers.
+[functions."0x827DFE18"]
+name = "ProcessAndProcessAndProcess2245_827DFE18"
+
+
+# Process a large structure by decrementing and disposing (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and five hundred and fifty-sixth form). It takes a structure, decrements and disposes (ProcessAndDecrementDispose), increments a counter (ProcessAndIncrementCounter), releases a global ref (ReleaseGlobalRef), and drives a sub-operation (ProcessAndProcessAndProcess1837) based on the result. This is a frequently-called helper in the 0x827DE process cluster. 114 lines. 4 callees. 3 callers (ProcessAndProcessAndProcess814, sub_82818728, sub_82818988).
+[functions."0x827DEBF8"]
+name = "ProcessAndProcessAndProcess2256_827DEBF8"
+
+
+# Process a value by checking its state and driving many sub-operations (two thousand two hundred and eighty-third form). It takes a value (a), a value (b), and a value (c); it checks the value's state, and drives many sub-operations (ProcessAndProcessAndProcess1871, ProcessAndValidateAndProcess3, ProcessChain2, and more) based on the result. This is the "process this data" routine (two thousand two hundred and eighty-third form), part of the 0x827DF process cluster. 376 lines. 5 callees. 1 caller (ProcessAndProcessAndProcess2244).
+[functions."0x827DFA80"]
+name = "ProcessAndProcessAndProcess2282_827DFA80"
+
+
+# Process a value by checking its state and driving many sub-operations (two thousand two hundred and eighty-fourth form). It takes a value (a), a value (b), a value (c), and a value (d); it checks the value's state, and drives many sub-operations (SetString, Allocate_OrDbgBreak, ProcessAndFreeAndProcess9, ProcessAndIncrementCounter, and more) based on the result. This is the "process this data" routine (two thousand two hundred and eighty-fourth form), part of the 0x827E0 process cluster. 350 lines. 9 callees. 2 callers (sub_827DFED8 and ProcessAndProcessAndProcess2282).
+[functions."0x827E0168"]
+name = "ProcessAndProcessAndProcess2283_827E0168"
+
+
+# Process a structure by checking its state (two thousand four hundred and one hundred and second form). It takes a structure (a: fields at a->8 and a->4); it checks the structure's state, and manipulates the structure's linked-list pointers based on the result. This is the "process this data" routine (two thousand four hundred and one hundred and second form), part of the 0x827E0 process cluster. 71 lines. 0 callees. 2 callers (sub_827E03E0 and ProcessAndProcessAndProcess2283).
+[functions."0x827E0838"]
+name = "ProcessAndProcessAndProcess2551_827E0838"
+
+
+# Process a value by checking its state (two thousand four hundred and one hundred and seventy-sixth form). It takes a value (a) and a structure (b: fields at b->0, b->4, and b->8); it checks the value's state, and manipulates linked-list pointers based on the result. This is the "process this data" routine (two thousand four hundred and one hundred and seventy-sixth form), part of the 0x827E0 process cluster. 45 lines. 0 callees. 2 callers.
+[functions."0x827E08B8"]
+name = "ProcessAndProcessAndProcess2625_827E08B8"

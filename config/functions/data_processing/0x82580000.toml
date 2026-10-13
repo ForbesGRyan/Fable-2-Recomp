@@ -1,0 +1,113 @@
+# data-processing region 0x82580000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# A process (a size computation, with a special case, the caller of sub_822F1F00 / the sibling of ComputeClamped_83230
+# A48): (if a size is 0, a null state) take one path, and (otherwise) perform a special case check (a divide, -1 / size
+# , a particular value, a below/above-threshold check, >= 24, a particular threshold), and (in a path) call a process
+# (sub_822F1F00, on a constant and a stack value, a particular operation), and compute a size (size * 24, a 24x size,
+# a particular size, a block size / a particular allocation size).
+
+# Args: obj (r3, an object), size (r4, r31, a size, a particular size / a particular count), (more). It checks the size
+# (r4, r31, a size, a particular size / a particular count): if it is 0 (a null state, a particular invalid state), it
+# takes one path (a no-op / a return, a particular state). Otherwise (a valid size), it performs a special case check
+# (a divide, -1 / size (divwu r10, r11, r31, a divide, -1 (r11, a constant, a particular value) / the size (r31, a
+# size, a particular size), a particular value, a particular quotient), and (if the quotient is >= 24 (a particular
+# threshold, a particular size, a particular count), it takes one path (a particular state, a particular result)). In a
+# path it calls a process (sub_822F1F00, on a constant (r9, a constant, a particular value, from a fixed .data address,
+# a particular string / a particular key) and a stack value (r3, a stack buffer, a particular value), a particular
+# operation, a string / a key operation). It computes a size (size * 24, a 24x size, a particular size, a block size /
+# a particular allocation size: rlwinm r11, r31, 1, 0, 30, a left shift by 1, a multiplication by 2, a particular
+# stride, and add r11, r31, r11, a size * 3, a 3x size, and rlwinm r3, r11, 3, 0, 28, a left shift by 3, a multiplication
+# by 8, a 8x size, a 24x size, a particular size, a block size / a particular allocation size). So it's a "process (a
+# size computation: (if a size is 0, a null state) take one path, and (otherwise) perform a special case check (a
+# divide, -1 / size, a particular value, >= 24, a particular threshold), and (in a path) call a process (sub_822F1F00,
+# on a constant and a stack value), and compute a size (size * 24, a 24x size, a particular size, a block size / a
+# particular allocation size))" routine (a size computation process, part of the 0x825BB cluster, a sibling of
+# ComputeClamped_83230A48). 70 lines, 2 callees (Allocate_OrDbgBreak_8221F388, sub_8221F388, a size-bucketed allocation
+# ; sub_822F1F00, a string / a key operation). 10+ callers: sub_82B134D8, sub_821BA6D0, sub_82A04C38, sub_82668848,
+# sub_82344EC0, sub_825F7BE8, sub_82917988, sub_823FE080, sub_82A12EC0, sub_82A7FBC0 (a widely-called size computation
+# process, part of the game's size / allocation subsystem). The object's class (obj, an object, a particular structure,
+# a size / a value object) and the size's meaning (a size, a particular size / a particular count) aren't resolvable, so
+# the name states the mechanism: a size computation process ((if a size is 0, a null state) take one path, and
+# (otherwise) perform a special case check (a divide, -1 / size, a particular value, >= 24, a particular threshold),
+# and (in a path) call a process (sub_822F1F00, on a constant and a stack value), and compute a size (size * 24, a 24x
+# size, a particular size, a block size / a particular allocation size)).
+[functions."0x825BBAD0"]
+name = "ProcessSizeCompute_825BBAD0"
+
+
+# A processor that checks a range. It takes a value, a structure (a: a field at a->4), and another structure (b: a field at b->0). It reads a->4
+# (then at +4) to get a node, and checks the node's flag (at +17); when the flag is non-zero it takes one path. Otherwise it reads b->0 and walks
+# the structure (following the next pointer at +0), comparing b->0 against each node's +12 field; when b->0 is less than the field it sets a flag to
+# 0, otherwise to 1. It uses FindChainRoot5_824708F8 and sub_8282ED70 to perform the processing. This is the "check this range" routine, part of the
+# 0x825BF range-check cluster. 195 lines. 2 callees (FindChainRoot5, sub_8282ED70). 12 callers.
+[functions."0x825BF630"]
+name = "ProcessAndCheckRange_825BF630"
+
+
+# A processor that allocates and processes the data (eighth form). It takes a structure (a: fields at a->4, a->8, and a->12) and a value (b). When b is 0xFFF or less it allocates checked memory (AllocateChecked3_82333F78, with a and b). It then stores the allocated pointer into a->4, a->8, and a->12. This is the "allocate and process this data" routine (eighth form), part of the 0x82581 process cluster. 69 lines. 2 callees (AllocateChecked3 and sub_82684B38). 5 callers (ProcessAndComputeAndProcess32, sub_82A800A0, sub_823D2CA0, sub_82A7FA88, and ProcessAndComputeAndProcess25).
+[functions."0x825813E8"]
+name = "ProcessAndAllocateAndProcess8_825813E8"
+
+
+# A processor that processes the data (twenty-sixth form). It takes a pointer (a), a pointer (b), and a pointer (c). It processes the data (a, b, and c). This is the "process this data" routine (twenty-sixth form), part of the 0x8259D process cluster. 145 lines. 4 callees (HashCstring, StringInsert, ProcessAndProcessAndProcess17, and sub_823FE8F8). 12 callers (ProcessAndProcessAndProcess21, sub_8259DA00, sub_826C72A8, sub_828D0220, sub_8283FD80, sub_828FCA50, sub_828E4360, sub_828E0A90, sub_828CAA88, sub_82337C68, sub_826CBA78, and sub_82409CF0).
+[functions."0x8259D6C8"]
+name = "ProcessAndProcessAndProcess26_8259D6C8"
+
+
+# A processor that processes the data (two hundred and seventy-fifth form). It takes a structure (a: field at a->8) and a value (b). It processes the data (a and b). This is the "process this data" routine (two hundred and seventy-fifth form), part of the 0x825BB process cluster. 81 lines. 5 callees (SetString, sub_82171810, sub_822F1F00, sub_826C3EF0, and sub_826C3FA8). 11 callers (sub_823420C0, sub_82B78208, ProcessAndProcessAndProcess227, sub_82B44D10, sub_825BBEE8, sub_8266CC98, sub_825BB9D0, sub_82392118, sub_82B3DE68, sub_828E7008, and sub_82A18998).
+[functions."0x825BBA48"]
+name = "ProcessAndProcessAndProcess275_825BBA48"
+
+
+# Hash a C-string and process it (seven hundred and one hundred and one hundred and one hundred and one hundred and fifth form). It takes a structure, hashes a C-string (HashCstring), and drives a sub-operation (ProcessAndProcessAndProcess17) based on the result. This is a string-hashing helper in the 0x8259D process cluster. 117 lines. 2 callees. 9 callers.
+[functions."0x8259D3C8"]
+name = "ProcessAndProcessAndProcess1105_8259D3C8"
+
+
+# Process a structure by driving sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and forty-ninth form). It takes a structure and drives sub-operations (ProcessAndProcessAndProcess1105, sub_823FE8F8) based on the result. Part of the 0x8259D string-hashing cluster. 83 lines. 2 callees. 1 caller (sub_826CBB58).
+[functions."0x8259D340"]
+name = "ProcessAndProcessAndProcess1249_8259D340"
+
+
+# Process a large data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and ninety-fifth form). It takes a structure, enters a critical section (CriticalSection_EnterOrTry), gets the current time (GetCurrentTimeMs), and drives sub-operations (ProcessAndProcessAndProcess279, ProcessAndProcessAndProcess313, ProcessAndProcessAndProcess314, sub_825AAD70, sub_825AB370, ProcessAndProcessAndProcess1396, sub_825ABC40, sub_829F83A0, sub_82B83FA8, sub_82CC0560, sub_82CC05E0) based on the result. Part of the 0x825AB process cluster. 482 lines. 14 callees. 1 caller (ProcessAndProcessAndProcess1389).
+[functions."0x825AB3D0"]
+name = "ProcessAndProcessAndProcess1395_825AB3D0"
+
+
+# Process a structure by entering a critical section (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and ninety-sixth form). It takes a structure and enters or tries a critical section (CriticalSection_EnterOrTry). Part of the 0x825AB process cluster. 52 lines. 1 callee. 1 caller (ProcessAndProcessAndProcess1395).
+[functions."0x825AB768"]
+name = "ProcessAndProcessAndProcess1396_825AB768"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and sixty-second form). It takes a structure and checks its state, with no external sub-operations. This is a frequently-called helper in the 0x82581 process cluster. 55 lines. 0 callees. 12 callers.
+[functions."0x82581388"]
+name = "ProcessAndProcessAndProcess1662_82581388"
+
+
+# Process a structure by hashing a C string (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and one hundred and fifty-sixth form). It takes a structure, hashes a C string (HashCstring), and drives sub-operations (ProcessAndProcessAndProcess17, sub_823FE8F8) based on the result. This is a frequently-called helper in the 0x8259D process cluster. 128 lines. 3 callees. 12 callers.
+[functions."0x8259D5F8"]
+name = "ProcessAndProcessAndProcess1856_8259D5F8"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and five hundred and fiftieth form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess275). This is a frequently-called helper in the 0x825BB process cluster. 85 lines. 1 callee. 4 callers.
+[functions."0x825BBEE8"]
+name = "ProcessAndProcessAndProcess2250_825BBEE8"
+
+
+# Process a structure by checking its state and driving many sub-operations (two thousand four hundred and forty-fifth form). It takes a value (a), a structure (b: field at b->0), and a structure (c: field at c->0); it checks the structure's state, and drives many sub-operations (ConstructRefCounted, HashCstring, ProcessAndProcessAndProcess17, and more) based on the result. This is the "process this data" routine (two thousand four hundred and forty-fifth form), part of the 0x8259D process cluster. 136 lines. 3 callees. 2 callers (sub_8259D488 and sub_8259D7C0).
+[functions."0x8259D510"]
+name = "ProcessAndProcessAndProcess2444_8259D510"
+
+
+# Process a value by checking its state and driving many sub-operations (two thousand four hundred and forty-sixth form). It takes a value (a) and a value (b); it checks the value's state, and drives many sub-operations (ConstructRefCounted, DestructRefCounted, CopyAssign_RefCounted2, ProcessAndVcallAndProcess16, ProcessAndProcessAndProcess1105, ProcessAndProcessAndProcess2444, and more) based on the result. This is the "process this data" routine (two thousand four hundred and forty-sixth form), part of the 0x8259D process cluster. 204 lines. 6 callees. 2 callers (ProcessAndProcessAndProcess1614 and sub_82338648).
+[functions."0x8259D7C0"]
+name = "ProcessAndProcessAndProcess2445_8259D7C0"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand four hundred and one hundred and ninety-ninth form). It takes a value (a), a structure (b: field at b->4), and a structure (c: field at c->0); it checks the value's state, and drives sub-operations (Allocate_OrDbgBreak, ProcessAndProcessAndProcess275, and more) based on the result, allocating a small structure. This is the "process this data" routine (two thousand four hundred and one hundred and ninety-ninth form), part of the 0x825BB process cluster. 76 lines. 2 callees. 12 callers.
+[functions."0x825BB9D0"]
+name = "ProcessAndProcessAndProcess2648_825BB9D0"

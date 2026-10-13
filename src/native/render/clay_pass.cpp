@@ -1,15 +1,18 @@
 #include "clay_pass.h"
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cstring>
 
+#include <rex/cvar.h>
 #include <rex/logging.h>
 
 #include "../../core/readback_force_list.h"
 #include "../capture/guest_read.h"
 #include "../capture/xdk_hook_ids.h"
 #include "../fable2_native_shaders.h"
+#include "water_sampler.h"
 
 namespace fable2::native::render {
 
@@ -439,7 +442,7 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
     water_blur_layout_ = nullptr;
     ForgetWaterObjects();
     water_objects_failed_ = false;
-    water_layout_ = nullptr;
+    for (nrhi::BindingLayout*& layout : water_layouts_) layout = nullptr;
     ForgetPostObjects();
     post_objects_failed_ = false;  // (another device: its post steps are tried anew)
     post_layout_ = nullptr;
@@ -2795,21 +2798,22 @@ void ClayPass::DrawWaterTargets(nrhi::Cmd* cmd, const WaterTargetPlan& plan, nrh
 
 void ClayPass::ForgetWaterObjects() {
   water_vs_ = water_ps_ = nullptr;
-  for (nrhi::Pipeline*& p : water_pipelines_) p = nullptr;
+  for (auto& mode : water_pipelines_) for (nrhi::Pipeline*& p : mode) p = nullptr;
   water_objects_ = false;
 }
 
 void ClayPass::DestroyWaterObjects() {
   if (device_) {
-    for (nrhi::Pipeline* p : water_pipelines_) device_->DestroyDeferred(p);
+    for (auto& mode : water_pipelines_) for (nrhi::Pipeline* p : mode) device_->DestroyDeferred(p);
     device_->DestroyDeferred(water_vs_);
     device_->DestroyDeferred(water_ps_);
   }
   ForgetWaterObjects();
 }
 
-bool ClayPass::EnsureWaterObjects(nrhi::Device* dev) {
-  if (water_objects_) return true;
+bool ClayPass::EnsureWaterObjects(nrhi::Device* dev, uint32_t filter_mode) {
+  if (filter_mode >= kWaterFilterModes) return false;
+  if (water_objects_ && water_pipelines_[filter_mode][0]) return true;
   if (water_objects_failed_ || !ready_ || dev != device_) return false;
   auto fail = [&](const char* what) {
     REXLOG_ERROR("[native] clay: {} failed: the water's surface step is off until the pass is rebuilt (another device, or an F6 retry "
@@ -2819,7 +2823,8 @@ bool ClayPass::EnsureWaterObjects(nrhi::Device* dev) {
     water_objects_failed_ = true;
     return false;
   };
-  if (!water_layout_) {
+  nrhi::BindingLayout*& layout = water_layouts_[filter_mode];
+  if (!layout) {
     nrhi::BindingLayoutDesc desc;
     desc.params[kWaterParamConstants].kind = nrhi::BindingParamKind::kConstantBuffer;
     desc.params[kWaterParamConstants].shader_register = 0;
@@ -2841,32 +2846,29 @@ bool ClayPass::EnsureWaterObjects(nrhi::Device* dev) {
     desc.params[kWaterParamTextures].visibility = nrhi::Visibility::kPixel;
     desc.param_count = 6;
     static_assert(kClayStaticSamplers == 4 && kWaterParamIndices == kWaterParamPositions + 1 && kWaterParamPair == kWaterParamPositions + 2);
-    for (uint32_t i = 0; i < 4; ++i) {
-      desc.static_samplers[i].shader_register = i;
-      desc.static_samplers[i].filter = (i & 1) ? nrhi::Filter::kLinear : nrhi::Filter::kPoint;
-      desc.static_samplers[i].address = (i & 2) ? nrhi::AddressMode::kClamp : nrhi::AddressMode::kWrap;
-    }
-    desc.static_sampler_count = 4;
+    // SampleGrad normal fetches inherit the shared override. Mask/reflection use
+    // SampleLevel(0), which remains isotropic even with an anisotropic sampler.
+    ConfigureWaterSamplers(desc, filter_mode);
     desc.allow_input_layout = false;
-    water_layout_ = dev->CreateBindingLayout(desc);
-    if (!water_layout_) return fail("water binding layout creation");
+    layout = dev->CreateBindingLayout(desc);
+    if (!layout) return fail("water binding layout creation");
   }
   nrhi::ShaderDesc sd;
   sd.entry_point = "main";
   sd.stage = nrhi::ShaderStage::kVertex;
   sd.name = "fable2_clay_water_vs";
   sd.hlsl_source = shaders::kClayWaterVs;
-  water_vs_ = dev->CreateShader(sd);
+  if (!water_vs_) water_vs_ = dev->CreateShader(sd);
   sd.stage = nrhi::ShaderStage::kPixel;
   sd.name = "fable2_clay_water_ps";
   sd.hlsl_source = shaders::kClayWaterPs;
-  water_ps_ = dev->CreateShader(sd);
+  if (!water_ps_) water_ps_ = dev->CreateShader(sd);
   if (!water_vs_ || !water_ps_) return fail("water shader compile");
   // One pipeline a cull mode, into the colour pass's targets: source alpha over inverse source alpha, the depth
   // tested "less" against what the pass has written and WRITTEN (the game's "greater" with the write under its
   // reversed range: the state word 0x00708746, ledger ruling 27; the one state WaterSurfaceStateOf lets through).
   nrhi::GraphicsPipelineDesc pipe;
-  pipe.layout = water_layout_;
+  pipe.layout = layout;
   pipe.vs = water_vs_;
   pipe.ps = water_ps_;
   pipe.rtv_format = kLinearFormat;
@@ -2879,14 +2881,17 @@ bool ClayPass::EnsureWaterObjects(nrhi::Device* dev) {
   pipe.depth.func = nrhi::CompareFunc::kLess;
   for (const capture::Cull cull : {capture::Cull::kNone, capture::Cull::kFront, capture::Cull::kBack}) {
     pipe.cull = ToCull(uint8_t(cull));
-    water_pipelines_[WaterPipelineSlot(cull)] = dev->CreateGraphicsPipeline(pipe);
-    if (!water_pipelines_[WaterPipelineSlot(cull)]) return fail("water pipeline creation");
+    water_pipelines_[filter_mode][WaterPipelineSlot(cull)] = dev->CreateGraphicsPipeline(pipe);
+    if (!water_pipelines_[filter_mode][WaterPipelineSlot(cull)]) return fail("water pipeline creation");
   }
   water_objects_ = true;
   REXLOG_INFO("[native] clay: water step ready (a mesh by its own index buffer, the position by the record's rows; blended by the alpha, "
               "depth test less with the depth write, one pipeline a cull mode; its own layout: b0 {} bytes of constants in {} slots a "
               "record, b2 the frame's block, t3 to t5 the positions, the indices and the mask's coordinates, t0 to t2 the mask, the "
-              "normal map and the record's reflection target)", sizeof(ClayWaterConstants), kClayWaterSlots);
+              "normal map and the record's reflection target; normal filtering {}, anisotropic_override mode {})",
+              sizeof(ClayWaterConstants), kClayWaterSlots,
+              filter_mode ? std::to_string(WaterFilterAnisotropy(filter_mode)) + "x anisotropic" : "linear",
+              filter_mode);
   return true;
 }
 
@@ -5001,7 +5006,25 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     water_in.objects = water_state && !water_objects_failed_;
     water_in.objects_targets = !water_targets_failed_;
     if (DecideClayWater(water_in) == ClayWater::kDrawn) water_in.objects_targets = EnsureWaterTargets(dev);
-    if (DecideClayWater(water_in) == ClayWater::kDrawn) water_in.objects = EnsureWaterObjects(dev);
+    if (DecideClayWater(water_in) == ClayWater::kDrawn) {
+      // The installed SDK exports the registry accessor, not typed Query specializations.
+      const std::string text = rex::cvar::GetFlagByName("anisotropic_override");
+      int32_t setting = 0;
+      const auto parsed = std::from_chars(text.data(), text.data() + text.size(), setting);
+      if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size()) setting = 0;
+      for (WaterSurface& s : water_surfaces_) {
+        TextureFetch normal;
+        if (WaterTextureFetch(s.record->fetch[capture::kWatNormal], WaterDecode::kDxn, &normal) != FetchError::kNone) {
+          water_in.objects = false;
+          break;
+        }
+        s.filter_mode = WaterSurfaceFilterMode(setting, normal);
+        if (!EnsureWaterObjects(dev, s.filter_mode)) {
+          water_in.objects = false;
+          break;
+        }
+      }
+    }
     if (DecideClayWater(water_in) == ClayWater::kDrawn) {
       // Each record's constants into its two slots (MakeClayWaterConstants judges the record again: its registers
       // by the capture's own rule, its draw's rows, the scale, the state's reference, the samplers). One refused
@@ -5010,7 +5033,7 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       for (size_t i = 0; i < water_surfaces_.size(); ++i) {
         const WaterSurface& s = water_surfaces_[i];
         ClayWaterConstants constants{};
-        if (s.draw >= scene.draws.size() || s.target >= water_plan.count || !water_pipelines_[WaterPipelineSlot(s.state.cull)] ||
+        if (s.draw >= scene.draws.size() || s.target >= water_plan.count || !water_pipelines_[s.filter_mode][WaterPipelineSlot(s.state.cull)] ||
             !MakeClayWaterConstants(*s.record, scene.draws[s.draw], s.state.alpha_ref, out_scale, fog_on, s.samplers, s.swizzle, s.vertex_count,
                                     &constants)) {
           water_in.scale = false;
@@ -5417,13 +5440,18 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       cmd->SetScissor({0, 0, int32_t(kWidth), int32_t(kHeight)});
     };
     if (water_dumping && WaterDumpBefore(cmd, dev)) scene_targets();
-    cmd->SetBindingLayout(water_layout_);
     cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
-    cmd->SetConstantBuffer(kWaterParamFrame, terrain_cb_, 0);
+    uint32_t water_bound_mode = ~uint32_t(0);
     nrhi::Pipeline* water_bound = nullptr;
     for (size_t i = 0; i < water_surfaces_.size(); ++i) {
       const WaterSurface& s = water_surfaces_[i];
-      nrhi::Pipeline* const pipeline = water_pipelines_[WaterPipelineSlot(s.state.cull)];
+      if (water_bound_mode != s.filter_mode) {
+        cmd->SetBindingLayout(water_layouts_[s.filter_mode]);
+        cmd->SetConstantBuffer(kWaterParamFrame, terrain_cb_, 0);
+        water_bound_mode = s.filter_mode;
+        water_bound = nullptr;
+      }
+      nrhi::Pipeline* const pipeline = water_pipelines_[s.filter_mode][WaterPipelineSlot(s.state.cull)];
       if (pipeline != water_bound) {
         cmd->SetPipeline(pipeline);
         water_bound = pipeline;

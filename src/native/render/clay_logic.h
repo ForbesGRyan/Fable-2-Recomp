@@ -7523,6 +7523,17 @@ constexpr uint64_t ImpostorStepForm(const ClayStats& st) {
 // are pinned to their single-precision form by tests/native/water_pins.inc (tools/xdk_sigmatch/water_pins.py).
 // ClayWater, the frame's verdict, is declared before ClayStats (which carries it).
 
+// Match the SDK's anisotropic_override for the supported linear normal fetch. Its constant has
+// anisotropy disabled; -1 (no override), 0 and out-of-range values therefore keep linear filtering.
+// Positive modes 1..5 mean 1x, 2x, 4x, 8x and 16x. Six cached layouts bound hot-reload allocation.
+inline constexpr uint32_t kWaterFilterModes = 6;
+constexpr uint32_t WaterFilterMode(int32_t override_value) {
+  return override_value > 0 && override_value < int32_t(kWaterFilterModes) ? uint32_t(override_value) : 0u;
+}
+constexpr uint32_t WaterFilterAnisotropy(uint32_t mode) {
+  return mode > 0 && mode < kWaterFilterModes ? 1u << (mode - 1) : 1u;
+}
+
 // The dead draw (spec ruling 12): F6D9 kills every pixel, whatever the mask holds, when the saturate's argument is
 // positive at both ends of the mask: min(c141.x, c141.x - c141.y) >= 1e-6 with |c141.x|, |c141.y| <= 4
 // (light_formulas.water_opaque_dead). The difference and the comparisons are made in DOUBLE on the single inputs

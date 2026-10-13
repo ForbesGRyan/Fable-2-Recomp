@@ -483,7 +483,7 @@ class ClayPass {
   // off; false when they could not be made, now or before (not tried again until the pass is rebuilt; one log
   // line): every frame's water is then `pipeline` and the frame is the picture of before. Destroyed with the
   // pass's other objects.
-  bool EnsureWaterObjects(nrhi::Device* dev);
+  bool EnsureWaterObjects(nrhi::Device* dev, uint32_t filter_mode);
   void DestroyWaterObjects();
   void ForgetWaterObjects();
   // What the scene's clouds alone need (clay_logic.h, "Native clouds"): two programs and one pipeline under
@@ -923,10 +923,11 @@ class ClayPass {
   nrhi::Texture* water_blur_ = nullptr;
   nrhi::TextureView* water_blur_view_ = nullptr;
   bool water_objects_ = false, water_objects_failed_ = false;
-  nrhi::BindingLayout* water_layout_ = nullptr;  // the RHI has no layout destruction
+  // The RHI has no layout destruction: cache the six filtering modes, including hot reload.
+  nrhi::BindingLayout* water_layouts_[kWaterFilterModes] = {};
   nrhi::Shader* water_vs_ = nullptr;
   nrhi::Shader* water_ps_ = nullptr;
-  nrhi::Pipeline* water_pipelines_[3] = {};   // by capture::Cull, in the pass's window space
+  nrhi::Pipeline* water_pipelines_[kWaterFilterModes][3] = {};   // filter mode, then capture::Cull
   uint32_t water_step_slots_ = 0;
   ClayFrameSlotPlan water_slots_{};
   struct WaterSurface {
@@ -940,6 +941,7 @@ class ClayPass {
     nrhi::TextureView* normal = nullptr;
     uint32_t samplers[3] = {};                // the mask's, the normal map's, the picture's
     uint32_t swizzle = 0;
+    uint32_t filter_mode = 0;
     WaterSurfaceState state;
     uint8_t target = 0;
   };

@@ -52,6 +52,11 @@ void SetSunWanted(bool wanted);
 // frame with records. Without it no wind register, literal table or stream is read, a draw costs
 // one branch, and a frame's scene says so (FrameScene::wind_records false).
 void SetWindWanted(bool wanted);
+// Whether the consumer also wants the draws' light sets (local lights: the lanterns and torches of
+// the multi-light shaders). Set and latched like SetWindWanted, and it has an effect only in a frame
+// with records. Without it no light set is read, a draw costs one branch, and no record names a set
+// (FrameScene::light_sets empty).
+void SetLocalLightsWanted(bool wanted);
 // The consumer's impostor switch (the native view on and fable2_native_impostors: off, flat or on;
 // impostor_record.h). Set and latched like SetShadowsWanted, and it has an effect only in a frame
 // with records. With kOff nothing of the far woods' BeginVertices calls is read, no record, array or

@@ -570,11 +570,17 @@ struct LightInputs {
   // trees' in-scatter, when it was read, is a number and lies in [0, kTreeFogScaleMax]. kTreeFogNone:
   // the draw has no usable scale and is drawn without fog (counted by the pass); its light is whole.
   float tree_fog = kTreeFogNone;
+  // A draw of a multi-light family or the leaves (local lights; 0xFFFF, kNoSideIndex of
+  // draw_record.h, which includes this header, otherwise): the draw's light set in
+  // FrameScene::light_sets (render::LightSetOf), kNoSideIndex none.
+  uint16_t light_set = 0xFFFF;
+  uint8_t light_set_pad[2] = {};
 };
 // Measured, so that a field added here is noticed: one entry per lit draw is copied into the frame
 // on the guest thread (about 900 a frame at the bridge; 312 bytes before the leaves' four floats,
-// 328 before the trees' fog scale). The draw record itself does not hold it and stays as it is.
-static_assert(sizeof(LightInputs) == 332, "LightInputs grew or shrank: see the comment above");
+// 328 before the trees' fog scale, 332 before the light set's index). The draw record itself does
+// not hold it and stays as it is.
+static_assert(sizeof(LightInputs) == 336, "LightInputs grew or shrank: see the comment above");
 
 // Registers of one constant bank as a draw's capture read them: `bank` is 256 x 4 host floats,
 // bit r of `have` says register r was read for this draw (anything else in `bank` is stale).

@@ -144,6 +144,13 @@ std::atomic<bool> g_fog_frame{false};
 // is torn: a draw's inputs are thread-local and copied under the mutex.
 std::atomic<bool> g_wind_wanted{false};
 std::atomic<bool> g_wind_frame{false};
+// The consumer also wants the draws' light sets (SetLocalLightsWanted: the native view and the
+// local lights' switch on; local lights, 2026-10-13), latched like the wind's and set only in a
+// frame with records. With it clear no light set is read (ReadLightSet) and no record names one;
+// a draw costs one branch. A draw reads g_local_lights_frame before it takes g_scene_mutex, as the
+// wind's: one draw can straddle the latch, and then has no set (or one the frame does not need).
+std::atomic<bool> g_local_lights_wanted{false};
+std::atomic<bool> g_local_lights_frame{false};
 // A count of the frames with the wind: a shader object's literal verdict is one frame's (WindLiteralVerdict).
 std::atomic<uint32_t> g_wind_generation{0};
 // The consumer also wants the frame's post block (SetPostWanted: the native
@@ -1693,6 +1700,42 @@ LightBlock ReadLightBlock() {
   for (uint32_t r : kLightBlockRegisters) have[r] = ReadPixelConstant(r, reg[r]);
   return MakeLightBlock(reg, have, this_scene);
 }
+
+// The light set at the draw this thread is capturing (light_block.h, MakeLightSet): the sun's slot
+// from c112 and c113, then the sun slot's direction and blend, then the eight registers of each
+// slot before it (position, colour, axis; blend, range, cone cosine and slope; the shadow strength,
+// c112 / c113, already read). Refused as a whole (the reason in the set) unless the set was loaded
+// this scene (LightSetThisScene). Costs 2 ReadPixelConstant calls for a set without a sun, else
+// 4 and at most 7 per lantern slot (a register slots share is read once); made once per upload of the set
+// (LightSetCache, RecordDraw), at draws of the multi-light families and the leaves only, with the
+// local lights on (g_local_lights_frame); discovery rows make it per row ("lset").
+LightSet ReadLightSet() {
+  if (!LightSetThisScene()) {
+    LightSet s;
+    s.reason = LightSetReason::kNotThisScene;
+    return s;
+  }
+  float reg[ConstantLoads::kRegisters][4] = {};
+  bool have[ConstantLoads::kRegisters] = {};
+  have[112] = ReadPixelConstant(112, reg[112]);
+  have[113] = ReadPixelConstant(113, reg[113]);
+  const uint32_t sun = LightSetSunSlot(reg, have);
+  if (sun >= kLightSetSlots) return MakeLightSet(reg, have, true);  // (no sun: the two registers only)
+  auto read = [&](uint32_t k) {
+    if (!have[k]) have[k] = ReadPixelConstant(k, reg[k]);
+  };
+  const LightSetSlotRegs sr = LightSetRegsOf(sun);
+  read(80 + sun);
+  read(sr.blend);
+  for (uint32_t slot = 0; slot < sun; ++slot) {
+    const LightSetSlotRegs r = LightSetRegsOf(slot);
+    for (uint32_t k : {80 + slot, 87 + slot, 98 + slot, r.blend, r.range, r.cone_cos, r.cone_scale, r.shadow}) read(k);
+  }
+  return MakeLightSet(reg, have, true);
+}
+// This thread's sets of the frame by upload (light_block.h, LightSetCache; g_light_tries_frame tells
+// one frame from the next).
+constinit thread_local LightSetCache t_light_sets;
 
 // The vertex buffer feeding a fetch slot (stream_resolve.h): nullptr, or the
 // reason the stream cannot be resolved.
@@ -3854,6 +3897,9 @@ void AppendWindInputs(std::string& row, uint32_t device, const DeviceSnapshot& d
 // "wrap" a leaf's world translation (vertex c4..c6 .w) and vertex c50.w (zero for any other family),
 // "c8x" a trunk's or a leaf's vertex c8.x, the scale of the trees' in-scatter (-1: none usable, and
 // for any other family),
+// "lset" (a multi-light family or the leaves only; local lights) the draw's light set as ReadLightSet
+// reads it at the row: {"upload","reason","sun_slot","count"[,"lanterns":[[pos x,y,z,w, col r,g,b,
+// blend, range, cone_cos, cone_scale, shadow, axis x,y,z] x count]]} ("lanterns" when valid),
 // and "vc" the probe sets (twelve registers) or the plants' c45 (one); or, without inputs,
 //   {"reason":"light-unknown"|"normal-unsupported","why": MakeLightInputs' word[,"family","multi"][,"kind"]}
 // where family and kind are what the two shaders' entries say, when they have one.
@@ -3924,6 +3970,30 @@ void AppendLightInputs(std::string& row, uint32_t device, const DeviceSnapshot& 
   floats("pos", l.world_pos, 3);
   floats("wrap", &l.wrap, 1);
   floats("c8x", &l.tree_fog, 1);
+  if (l.multi || l.family == LightFamily::kTreeLeaf) {
+    // (read here at every row, not through the records' cache: a row is evidence of its own draw)
+    const uint64_t upload = LightSetUpload();
+    const LightSet set = ReadLightSet();
+    std::snprintf(buf, sizeof(buf), ",\"lset\":{\"upload\":%llu,\"reason\":\"%s\",\"sun_slot\":%u,\"count\":%u",
+                  static_cast<unsigned long long>(upload), LightSetReasonName(set.reason), set.sun_slot, set.count);
+    row += buf;
+    if (set.valid) {
+      row += ",\"lanterns\":[";
+      for (uint32_t i = 0; i < set.count && i < kMaxLightSetLanterns; ++i) {
+        const LocalLight& ll = set.lights[i];
+        const float v[] = {ll.pos[0], ll.pos[1], ll.pos[2], ll.w, ll.col[0], ll.col[1], ll.col[2], ll.blend,
+                           ll.range, ll.cone_cos, ll.cone_scale, ll.shadow, ll.axis[0], ll.axis[1], ll.axis[2]};
+        row += i ? ",[" : "[";
+        for (size_t k = 0; k < std::size(v); ++k) {
+          if (k) row += ",";
+          AppendFloat(row, v[k]);
+        }
+        row += "]";
+      }
+      row += "]";
+    }
+    row += "}";
+  }
   const uint32_t sets = l.kind == LightVertexKind::kProbe ? kLightProbeRegisters : l.kind == LightVertexKind::kInstance ? 1 : 0;
   if (sets) {
     row += ",\"vc\":[";
@@ -5579,6 +5649,9 @@ uint32_t RecordDraw(uint32_t id, const LastArgs& a, uint32_t device, const uint3
   LightBlock block{};
   bool block_tried = false;
   uint64_t block_set = 0;
+  LightSet light_set;
+  bool have_light_set = false;
+  uint32_t light_set_frame = 0;  // g_light_tries_frame when the set was read
   if (extra == SkipReason::kNone && in.have_shader && !in.depth_only && shaders.have_dev) {
     light_reason = FillLightInputs(device, shaders.dev, shaders.vs, shaders.ps, in.instances.active,
                                    shaders.max_vertex, &light, nullptr);
@@ -5604,6 +5677,24 @@ uint32_t RecordDraw(uint32_t id, const LastArgs& a, uint32_t device, const uint3
         // block and no further read.
         if (!block.valid) t_light_tries.Tried(set, false);
       }
+    }
+    // The draw's light set (local lights): only with them on, for a draw with inputs whose family
+    // is a multi-light form or the leaves. Read once per upload of the set in the frame
+    // (LightSetCache); no upload of this scene: refused not-this-scene without a read.
+    if (light_reason == LightReason::kNone && family && (family->multi || family->family == LightFamily::kTreeLeaf) &&
+        g_local_lights_frame.load(std::memory_order_relaxed)) {
+      light_set_frame = g_light_tries_frame.load(std::memory_order_relaxed);
+      const uint64_t upload = LightSetUpload();
+      if (upload == 0) {
+        light_set = LightSet{};
+        light_set.reason = LightSetReason::kNotThisScene;
+      } else if (const LightSet* hit = t_light_sets.Find(light_set_frame, upload)) {
+        light_set = *hit;
+      } else {
+        light_set = ReadLightSet();
+        t_light_sets.Put(light_set_frame, upload, light_set);
+      }
+      have_light_set = true;
     }
   }
   // Wind (frame-map section 18, "Wind inputs"): only in a frame with the wind wanted, and like
@@ -5658,7 +5749,13 @@ uint32_t RecordDraw(uint32_t id, const LastArgs& a, uint32_t device, const uint3
     g_builder.AddWater(t_water_record, water_why);
   }
   // A terrain draw's inputs, a lit draw's light inputs and a swaying draw's wind inputs go to the
-  // frame's side arrays, not into the record.
+  // frame's side arrays, not into the record. The light set first, into the frame's sets, and
+  // only into the frame it was read in: one that straddled the frame's end is dropped (the record
+  // itself is the builder's open scene's, whatever frame that is).
+  if (have_light_set && light_reason == LightReason::kNone &&
+      light_set_frame == g_light_tries_frame.load(std::memory_order_relaxed)) {
+    light.light_set = g_builder.AddLightSet(light_set);
+  }
   g_builder.Add(r, TerrainInputsOf(in), light_reason == LightReason::kNone ? &light : nullptr, light_reason, wind, wind_reason);
   return r.seq;
 }
@@ -6259,6 +6356,8 @@ void EndMainSceneFrame(bool write, int frame, uint64_t swap, SwapTimer& timer,
       g_wind_frame.store(wind, std::memory_order_relaxed);
       if (wind) g_wind_generation.fetch_add(1, std::memory_order_relaxed);  // (the literal verdicts are asked again)
       g_builder.WindOn(wind);
+      // The light sets likewise (the builder needs no switch: without them no set is offered).
+      g_local_lights_frame.store(records && g_local_lights_wanted.load(std::memory_order_relaxed), std::memory_order_relaxed);
       // The impostor records, only in a frame with records; and with them the following of the
       // pixel bool word's last writer, which begins anew each time they come on (g_impostor_epoch).
       // The water records likewise, with the same word followed for them (kFollowWater). The following
@@ -6605,10 +6704,19 @@ void PublishScene(const FinishedScene& done) {
       std::snprintf(block, sizeof(block), "valid, sun (%.4f, %.4f, %.4f) colour (%.4f, %.4f, %.4f)", sc.light.sun_dir[0],
                     sc.light.sun_dir[1], sc.light.sun_dir[2], sc.light.sun_col[0], sc.light.sun_col[1], sc.light.sun_col[2]);
     }
-    REXSYS_INFO("[native] capture: frame {} light: lit {} by family {{{}}} (multi {}), unknown {{{}}} by ps {{{}}} "
-                "| block {} (tries {}) | {} in {} of {} frames",
-                sc.frame, lit, LightFamilies(sc, ""), sc.light_multi, LightReasons(sc, ""), by_ps, block, sc.light_tries,
-                kLightBlockReason, g_light_block_missing, g_light_frames);
+    // The light sets (local lights): the frame's distinct sets, the lit records naming one, and the
+    // offers refused by reason (zero counts left out).
+    std::string refused;
+    for (size_t i = 1; i < size_t(LightSetReason::kCount); ++i) {
+      if (!sc.light_set_reason[i]) continue;
+      std::snprintf(buf, sizeof(buf), "%s %s %u", refused.empty() ? "; refused:" : ",", LightSetReasonName(LightSetReason(i)),
+                    sc.light_set_reason[i]);
+      refused += buf;
+    }
+    REXSYS_INFO("[native] capture: frame {} light: lit {} by family {{{}}} (multi {}); sets {} (draws {}{}), unknown {{{}}} "
+                "by ps {{{}}} | block {} (tries {}) | {} in {} of {} frames",
+                sc.frame, lit, LightFamilies(sc, ""), sc.light_multi, sc.light_sets.size(), sc.light_set_draws, refused,
+                LightReasons(sc, ""), by_ps, block, sc.light_tries, kLightBlockReason, g_light_block_missing, g_light_frames);
     g_light_block_missing = 0;
     g_light_frames = 0;
     // shadow: this frame's shadow capture (render::ShadowLine: the block, the two passes' records
@@ -6826,6 +6934,10 @@ void SetSunWanted(bool wanted) {
 
 void SetWindWanted(bool wanted) {
   g_wind_wanted.store(wanted, std::memory_order_relaxed);
+}
+
+void SetLocalLightsWanted(bool wanted) {
+  g_local_lights_wanted.store(wanted, std::memory_order_relaxed);
 }
 
 void SetImpostorsWanted(ImpostorMode mode) {

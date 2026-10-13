@@ -71,6 +71,8 @@ enum class TransformLayout : uint8_t { kDot = 0, kCombine = 1 };
 // side array of the frame and indexed from the record, so that the other
 // records do not carry them.
 inline constexpr uint16_t kNoSideIndex = 0xFFFF;
+// (material.h, included above, cannot name it: LightInputs::light_set spells it out)
+static_assert(LightInputs{}.light_set == kNoSideIndex, "LightInputs::light_set must default to kNoSideIndex");
 
 struct DrawRecord {
   uint32_t seq = 0;

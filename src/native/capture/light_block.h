@@ -492,7 +492,7 @@ inline const char* LightSetReasonName(LightSetReason r) {
 // MakeLanternBuffer refuses a set whose sun is not the frame's). `valid` false: `reason` says why
 // and nothing else is read.
 struct LightSet {
-  LocalLight lights[kMaxLightSetLanterns];
+  LocalLight lights[kMaxLightSetLanterns] = {};  // (zero past `count`: no indeterminate bytes)
   uint32_t count = 0;
   uint32_t sun_slot = 0;
   float sun_dir[3] = {};
@@ -633,6 +633,44 @@ class LightBlockTries {
   uint32_t frame_ = 0;
   uint32_t failed_ = 0;
   bool done_ = false;
+};
+
+// The light sets a thread read this frame, by the upload that loaded them (capture.cpp
+// LightSetUpload: an upload's order number in the thread's load model): at most kEntries, the
+// oldest replaced; another frame empties it. So a set is read (capture.cpp ReadLightSet: 4 and at most
+// 7 per lantern slot ReadPixelConstant calls) once per upload, at the first draw of a multi-light family
+// or the leaves under it, not at every such draw. A set read in one frame is never another frame's
+// (the frame number keys it); the builder dedupes by value anyway (FrameBuilder::AddLightSet). One
+// per guest thread, as the load model is whose numbers it holds; `frame` is any number that
+// changes with the frame (g_light_tries_frame, as for LightBlockTries).
+class LightSetCache {
+ public:
+  static constexpr uint32_t kEntries = 16;
+  const LightSet* Find(uint32_t frame, uint64_t upload) {
+    Open(frame);
+    for (uint32_t i = 0; i < count_; ++i) {
+      if (uploads_[i] == upload) return &sets_[i];
+    }
+    return nullptr;
+  }
+  void Put(uint32_t frame, uint64_t upload, const LightSet& set) {
+    Open(frame);
+    const uint32_t at = count_ < kEntries ? count_++ : next_++ % kEntries;
+    uploads_[at] = upload;
+    sets_[at] = set;
+  }
+
+ private:
+  void Open(uint32_t frame) {
+    if (frame != frame_) {
+      frame_ = frame;
+      count_ = 0;
+      next_ = 0;
+    }
+  }
+  uint64_t uploads_[kEntries] = {};
+  LightSet sets_[kEntries] = {};
+  uint32_t frame_ = 0, count_ = 0, next_ = 0;
 };
 
 // --- the hooks' pure parts ---------------------------------------------------

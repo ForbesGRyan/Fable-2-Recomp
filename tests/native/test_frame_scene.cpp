@@ -321,6 +321,44 @@ static int LightAndPoolTests(const capture::DrawRecord& r) {
     lb.Add(plain, nullptr, &plant);
     auto f6 = lb.Finish(6);
     if (f6->lights.size() != 1 || f6->draws[0].light_index != 0) return 156;
+
+    // Light sets (local lights): AddLightSet dedupes by value, numbers in order, refuses past
+    // capture::kMaxFrameLightSets; a lit record naming one counts as a draw with a set (LightSetOf).
+    capture::LightSet set{};
+    set.valid = true; set.count = 1; set.sun_slot = 1; set.lights[0].pos[0] = 1.0f; set.lights[0].col[0] = 1.0f;
+    if (lb.AddLightSet(set) != kNoSideIndex) return 157;  // outside the bracket: no entry
+    lb.Open();
+    const uint16_t i0 = lb.AddLightSet(set);
+    capture::LightSet other = set; other.lights[0].pos[0] = 2.0f;
+    const uint16_t i1 = lb.AddLightSet(other);
+    if (i0 != 0 || i1 != 1 || lb.AddLightSet(set) != 0) return 157;
+    for (int k = 0; k < 20; ++k) { other.lights[0].pos[1] = float(k + 10); lb.AddLightSet(other); }
+    capture::LightSet refused{};
+    refused.reason = capture::LightSetReason::kNoSun;
+    if (lb.AddLightSet(refused) != kNoSideIndex) return 157;
+    LightInputs with_set = obj; with_set.light_set = i1;
+    lb.Add(plain, nullptr, &with_set);
+    lb.Add(plain, nullptr, &obj);
+    auto f7 = lb.Finish(7);
+    if (f7->light_sets.size() != capture::kMaxFrameLightSets ||
+        f7->light_set_reason[size_t(capture::LightSetReason::kTooMany)] != 6 ||
+        f7->light_set_reason[size_t(capture::LightSetReason::kNoSun)] != 1 || f7->light_set_draws != 1) {
+      return 158;
+    }
+    if (render::LightSetOf(*f7, *LightOf(*f7, f7->draws[0])) != &f7->light_sets[1] ||
+        render::LightSetOf(*f7, *LightOf(*f7, f7->draws[1])) || render::LightSetOf(*f7, obj)) {
+      return 158;
+    }
+    LightInputs past_set = obj; past_set.light_set = uint16_t(capture::kMaxFrameLightSets);
+    if (render::LightSetOf(*f7, past_set) || render::LightSetOf(render::FrameScene{}, with_set)) return 158;
+    // The next frame starts with no sets and clean tallies; the scene before keeps its own.
+    lb.Open();
+    lb.Add(plain, nullptr, &with_set);  // (an index the frame did not give: no set, not counted)
+    auto f8 = lb.Finish(8);
+    if (!f8->light_sets.empty() || f8->light_set_draws != 0 || f8->light_set_reason[size_t(capture::LightSetReason::kTooMany)] != 0 ||
+        render::LightSetOf(*f8, *LightOf(*f8, f8->draws[0])) || f7->light_sets.size() != capture::kMaxFrameLightSets) {
+      return 159;
+    }
   }
 
   // --- the frame's light block: the first valid one offered inside the scene ---

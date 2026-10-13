@@ -59,6 +59,16 @@ struct FrameScene {
   // set at most and eight a frame at most (light_block.h, LightBlockTries).
   capture::LightBlock light{};
   uint32_t light_tries = 0;
+  // Side array of `lights` (local lights): the frame's distinct light sets (capture::MakeLightSet,
+  // valid ones only, at most capture::kMaxFrameLightSets), each named by the LightInputs::light_set
+  // of the lit records of a multi-light family or the leaves that were read under it (LightSetOf).
+  // Built, handed over and left alone like `lights`. light_set_draws: the lit records that name
+  // one; light_set_reason: the offers that were refused (one per draw of those families the
+  // capture read a set for, FrameBuilder::AddLightSet), by reason (index: LightSetReason; kTooMany:
+  // a valid set past the frame's cap).
+  std::vector<capture::LightSet> light_sets;
+  uint32_t light_set_draws = 0;
+  uint32_t light_set_reason[size_t(capture::LightSetReason::kCount)] = {};
   // The game's two sun shadow passes of the frame (frame-map section 15), drawn
   // before the main scene: [0] the near map's draws, [1] the far map's, in the
   // order the game issued them, each a DrawRecord as a scene draw's
@@ -291,6 +301,13 @@ inline const capture::TerrainPatch* TerrainOf(const FrameScene& scene, const cap
 inline const capture::LightInputs* LightOf(const FrameScene& scene, const capture::DrawRecord& r) {
   if (r.light_index == capture::kNoSideIndex || r.light_index >= scene.lights.size()) return nullptr;
   return &scene.lights[r.light_index];
+}
+
+// The light set of a lit record's inputs `l` (an entry of scene.lights), with TerrainOf's rules:
+// null for inputs without a set and for an index the scene's sets do not hold.
+inline const capture::LightSet* LightSetOf(const FrameScene& scene, const capture::LightInputs& l) {
+  if (l.light_set == capture::kNoSideIndex || l.light_set >= scene.light_sets.size()) return nullptr;
+  return &scene.light_sets[l.light_set];
 }
 
 // The wind inputs of record `r` of `scene.draws`, with TerrainOf's rules: null for a record
@@ -625,13 +642,14 @@ class SceneBufferPool {
     std::vector<capture::DrawRecord> draws;
     std::vector<capture::TerrainPatch> terrain;
     std::vector<capture::LightInputs> lights;
+    std::vector<capture::LightSet> light_sets;        // (without memory unless a frame had a set)
     std::vector<capture::DrawRecord> shadow_draws[2];
     std::vector<capture::ShadowCaster> shadow_casters[2];
     std::vector<capture::WindInputs> wind;            // (without memory unless a frame had the wind)
     std::vector<capture::WindInputs> shadow_wind[2];
 
     bool HasMemory() const {
-      return draws.capacity() != 0 || terrain.capacity() != 0 || lights.capacity() != 0 ||
+      return draws.capacity() != 0 || terrain.capacity() != 0 || lights.capacity() != 0 || light_sets.capacity() != 0 ||
              shadow_draws[0].capacity() != 0 || shadow_draws[1].capacity() != 0 ||
              shadow_casters[0].capacity() != 0 || shadow_casters[1].capacity() != 0 || wind.capacity() != 0 ||
              shadow_wind[0].capacity() != 0 || shadow_wind[1].capacity() != 0;
@@ -741,6 +759,8 @@ class FrameBuilder {
       if (lit) {
         ++light_family_[size_t(light->family)];
         light_multi_ += light->multi ? 1 : 0;
+        // (an index past the frame's sets is kept as it came: LightSetOf refuses it)
+        if (light->light_set != capture::kNoSideIndex && light->light_set < light_sets_.size()) ++light_set_draws_;
       } else {
         const bool given = !light && light_reason != capture::LightReason::kNone &&
                            size_t(light_reason) < size_t(capture::LightReason::kCount);
@@ -776,6 +796,29 @@ class FrameBuilder {
     if (open_) ++light_tries_;
   }
   bool HasLight() const { return light_.valid; }
+
+  // A draw's light set (capture::MakeLightSet; FrameScene::light_sets), offered just before the
+  // draw's Add: its index in the frame's sets, an existing entry when one is equal (LightSetEqual),
+  // else a new one; kNoSideIndex, counted too-many, past capture::kMaxFrameLightSets. An invalid
+  // set is counted by its reason and gives kNoSideIndex. Outside the bracket: nothing, kNoSideIndex.
+  uint16_t AddLightSet(const capture::LightSet& s) {
+    if (!open_) return capture::kNoSideIndex;
+    if (!s.valid) {
+      const size_t why = size_t(s.reason) < size_t(capture::LightSetReason::kCount) ? size_t(s.reason)
+                                                                                     : size_t(capture::LightSetReason::kUnread);
+      ++light_set_reason_[why];
+      return capture::kNoSideIndex;
+    }
+    for (size_t i = 0; i < light_sets_.size(); ++i) {
+      if (capture::LightSetEqual(light_sets_[i], s)) return uint16_t(i);
+    }
+    if (light_sets_.size() >= capture::kMaxFrameLightSets) {
+      ++light_set_reason_[size_t(capture::LightSetReason::kTooMany)];
+      return capture::kNoSideIndex;
+    }
+    light_sets_.push_back(s);
+    return uint16_t(light_sets_.size() - 1);
+  }
 
   // --- The two shadow passes (FrameScene::shadow_draws, ::shadow) ---
   // Whether shadow records are taken from now on (the capture sets it at a
@@ -1136,6 +1179,7 @@ class FrameBuilder {
         back.draws = std::move(scene->draws);
         back.terrain = std::move(scene->terrain);
         back.lights = std::move(scene->lights);
+        back.light_sets = std::move(scene->light_sets);
         back.wind = std::move(scene->wind);
         for (size_t c = 0; c < 2; ++c) {
           back.shadow_draws[c] = std::move(scene->shadow_draws[c]);
@@ -1165,6 +1209,10 @@ class FrameBuilder {
     std::fill(std::begin(light_family_), std::end(light_family_), 0u);
     s->light_multi = light_multi_;
     light_multi_ = 0;
+    s->light_set_draws = light_set_draws_;
+    light_set_draws_ = 0;
+    std::copy(std::begin(light_set_reason_), std::end(light_set_reason_), std::begin(s->light_set_reason));
+    std::fill(std::begin(light_set_reason_), std::end(light_set_reason_), 0u);
     std::copy(std::begin(light_reason_), std::end(light_reason_), std::begin(s->light_reason));
     std::fill(std::begin(light_reason_), std::end(light_reason_), 0u);
     const size_t unknown = light_unknown_ps_.Top(0, top, kUntexturedTop);
@@ -1396,26 +1444,34 @@ class FrameBuilder {
     std::fill(std::begin(water_refused_), std::end(water_refused_), 0u);
     water_.clear();
     water_seen_[0] = water_seen_[1] = water_answered_ = 0;
-    if (!draws_.empty() || !terrain_.empty() || !lights_.empty() || !shadow_draws_[0].empty() || !shadow_draws_[1].empty()) {
+    // (light sets come with lit records only, but one offered for a record that was then skipped
+    // is a set without records: it is handed over too, so that the next frame starts with none)
+    if (!draws_.empty() || !terrain_.empty() || !lights_.empty() || !light_sets_.empty() || !shadow_draws_[0].empty() ||
+        !shadow_draws_[1].empty()) {
       const size_t shadows[2] = {shadow_draws_[0].size(), shadow_draws_[1].size()};
       const size_t records = draws_.size(), patches = terrain_.size(), lit = lights_.size(), swaying = wind_.size();
+      const size_t sets = light_sets_.size();
       const size_t shadow_swaying[2] = {shadow_wind_[0].size(), shadow_wind_[1].size()};
       s->draws = std::move(draws_);
       s->terrain = std::move(terrain_);
       s->lights = std::move(lights_);
+      s->light_sets = std::move(light_sets_);
       s->wind = std::move(wind_);
       SceneBufferPool::Buffers next = pool_->Take();
       draws_ = std::move(next.draws);
       terrain_ = std::move(next.terrain);
       lights_ = std::move(next.lights);
+      light_sets_ = std::move(next.light_sets);
       wind_ = std::move(next.wind);
       draws_.clear();
       terrain_.clear();
       lights_.clear();
+      light_sets_.clear();
       wind_.clear();
       ReserveWithSlack(draws_, records);
       ReserveWithSlack(terrain_, patches);
       ReserveWithSlack(lights_, lit);
+      ReserveWithSlack(light_sets_, sets);  // (0 without sets: nothing is allocated)
       ReserveWithSlack(wind_, swaying);  // (0 without the wind: nothing is allocated)
       for (size_t c = 0; c < 2; ++c) {
         s->shadow_draws[c] = std::move(shadow_draws_[c]);
@@ -1492,6 +1548,9 @@ class FrameBuilder {
   uint32_t light_family_[size_t(capture::LightFamily::kCount)] = {};
   uint32_t light_multi_ = 0;
   uint32_t light_reason_[size_t(capture::LightReason::kCount)] = {};
+  std::vector<capture::LightSet> light_sets_;  // side array of lights_ (FrameScene::light_sets)
+  uint32_t light_set_draws_ = 0;
+  uint32_t light_set_reason_[size_t(capture::LightSetReason::kCount)] = {};
   capture::ShaderTally<kUntexturedTallySize> light_unknown_ps_;
   // The shadow passes of the frame so far (FrameScene::shadow_draws, ...).
   bool shadows_on_ = false;

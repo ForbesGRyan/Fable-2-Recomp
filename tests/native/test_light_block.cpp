@@ -1133,6 +1133,19 @@ int main() {
           s7.lights[4].axis[2] == 1.0f && s7.lights[4].blend == 1.0f && s7.lights[4].shadow == 0.0f);
     CHECK(std::strcmp(LightSetReasonName(LightSetReason::kTooMany), "too-many") == 0);
   }
+  // The per-thread cache of sets by upload: a hit within the frame, none across frames, 16 entries.
+  {
+    LightSetCache cache;
+    Bank b = FourLight();
+    const LightSet s = MakeLightSet(b.reg, b.have, true);
+    CHECK(cache.Find(7, 100) == nullptr);
+    cache.Put(7, 100, s);
+    CHECK(cache.Find(7, 100) != nullptr && LightSetEqual(*cache.Find(7, 100), s));
+    CHECK(cache.Find(8, 100) == nullptr);   // another frame: empty (and the entry of frame 7 is gone)
+    CHECK(cache.Find(7, 100) == nullptr);
+    for (uint64_t u = 1; u <= 20; ++u) cache.Put(9, u, s);
+    CHECK(cache.Find(9, 20) != nullptr && cache.Find(9, 1) == nullptr);  // the oldest entries make room
+  }
   std::printf("PASS: light block\n");
   return 0;
 }

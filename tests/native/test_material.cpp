@@ -684,7 +684,7 @@ static int LightTests() {
     if (MakeLightInputs(o.d, &l) != LightReason::kNone || l.world_pos[2] != 0.0f || l.wrap != 0.0f) return 387;
     const LightInputs fresh;
     if (fresh.world_pos[0] != 0.0f || fresh.world_pos[1] != 0.0f || fresh.world_pos[2] != 0.0f || fresh.wrap != 0.0f) return 388;
-    static_assert(sizeof(LightInputs) == 332);
+    static_assert(sizeof(LightInputs) == 336);
     // Every value it reads is a number, the translation and the wrap included; an object's
     // translation is not read (case 264 above).
     for (uint32_t reg = 4; reg <= 6; ++reg) {
@@ -871,7 +871,7 @@ static int LightTests() {
     if (!Fails(c.d, LightReason::kLightUnknown, "vertex-shader")) return 351;
   }
   // The entry's size: one per lit draw is copied into the frame.
-  if (sizeof(LightInputs) != 332 || sizeof(LightElement) != 16) {  // (312 before the leaves' four floats, plan Task 8c; 328 before the trees' fog scale)
+  if (sizeof(LightInputs) != 336 || sizeof(LightElement) != 16) {  // (312 before the leaves' four floats, plan Task 8c; 328 before the trees' fog scale, 332 before the light set)
     std::printf("FAIL: sizeof(LightInputs) = %zu, sizeof(LightElement) = %zu\n", sizeof(LightInputs), sizeof(LightElement));
     return 352;
   }

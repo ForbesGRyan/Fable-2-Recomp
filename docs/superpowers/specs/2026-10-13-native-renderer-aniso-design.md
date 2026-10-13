@@ -119,8 +119,8 @@ holds.
 ### 4. What the pass says
 
 The clay "ready" log line names the filtering ("texture filtering linear" or "4x anisotropic,
-anisotropic_override 3"); a rebuild for a mode change logs one line. `ClayStats` carries the mode
-for the F3 Geometry line as `filter: linear|4x`.
+anisotropic_override mode 3"); a rebuild for a mode change logs one line. `ClayStats` carries the
+mode (`filter_mode`) for tests and later status text; no new F3 line in this sub-project.
 
 ### 5. Switches
 

@@ -327,6 +327,46 @@ static bool ReadsBlock(const std::string& listing, const char* block) {
   return false;
 }
 
+// The registers of the constant buffer `block` ("cb2") at index `from` or past it that the compiled shader's
+// instructions read: how many instruction lines read one, the lowest and the highest index read, and whether
+// one is read by a computed index (an operand cb2[r0.x + 334], which counts by its offset).
+struct BlockReads {
+  int lines = 0, lowest = -1, highest = -1;
+  bool dynamic = false;
+};
+static BlockReads ReadsBlockFrom(const std::string& listing, const char* block, int from) {
+  BlockReads r;
+  const std::string needle = std::string(block) + "[";
+  size_t at = 0;
+  while (at < listing.size()) {
+    size_t end = listing.find('\n', at);
+    if (end == std::string::npos) end = listing.size();
+    const size_t first = listing.find_first_not_of(" \t", at);
+    if (first < end && listing[first] != '/' && listing.compare(first, 4, "dcl_") != 0) {
+      bool counted = false;
+      for (size_t p = listing.find(needle, first); p != std::string::npos && p < end; p = listing.find(needle, p + 1)) {
+        size_t q = p + needle.size();
+        bool computed = false;
+        if (q < end && !isdigit(static_cast<unsigned char>(listing[q]))) {
+          const size_t plus = listing.find('+', q), close = listing.find(']', q);
+          if (plus == std::string::npos || close == std::string::npos || plus > close) continue;
+          q = listing.find_first_not_of(' ', plus + 1);
+          computed = true;
+        }
+        const int index = atoi(listing.c_str() + q);
+        if (index < from) continue;
+        r.dynamic = r.dynamic || computed;
+        r.lowest = r.lowest < 0 || index < r.lowest ? index : r.lowest;
+        r.highest = index > r.highest ? index : r.highest;
+        if (!counted) ++r.lines;
+        counted = true;
+      }
+    }
+    at = end + 1;
+  }
+  return r;
+}
+
 // Whether an instruction of the compiled shader reads component `component` of the operand `operand`
 // ("cb2[2]"): the operand followed by a swizzle that has the component.
 static bool ReadsComponent(const std::string& listing, const char* operand, char component) {
@@ -606,8 +646,8 @@ static bool ReadsFrameBeyondPost(const std::string& listing) {
 //                    clay_lit, the plants' and the leaves' among them (in all four shaders that light);
 //   kPinVsMain       the vertex shader's whole main (position, the wind's block under CLAY_WIND, coordinates, the terrain normal, the
 //                    object's normal, the vector of t, the stream colour and the probe colour; an
-//                    instanced plant's normal, bend and colour; a leaf's normal, ambient and two light
-//                    scalars);
+//                    instanced plant's normal, bend and colour; a leaf's normal, ambient and two colour
+//                    sums, the sun's and, under the lantern bit, the draw's lanterns');
 //   kPinTexturedMain the textured pixel shader from clay_linear to the end of main (the object's, the
 //                    plants' and the leaves' lit paths);
 //   kPinTerrainCommon the terrain shaders' functions: sample_colour, sample_base, terrain_fade_in,
@@ -664,17 +704,53 @@ float3 light_ambient(float3 base, float3 tint, float tint_pow, float3 add, float
 float3 light_sun(float3 sun_col, float n_dot_sun, float sun_gate) {
   return sun_col * (saturate(n_dot_sun) * sun_gate);
 }
+// One local light (light_formulas.local_light): pos_w = (c(80+j).xyz, w), col_blend = (c(87+j).xyz, c94[j]),
+// terms = (c96[j], c105[j], c107[j], c112[j]), axis = c(98+j).xyz. The distance is d2 * rsqrt(d2), as the
+// fog's: the pixel shaders call no square root.
+float3 LocalLight(float3 P, float3 N, float4 pos_w, float4 col_blend, float4 terms, float3 axis, float mask, float facing) {
+  float3 v = pos_w.xyz - P * pos_w.w;
+  float d2 = dot(v, v);
+  float d = (d2 > 0.0 && d2 < 3.0e38) ? d2 * rsqrt(d2) : 0.0;
+  float3 l = light_normalize(v);
+  float n_dot = saturate(dot(N, l));
+  float shadow = (1.0 - saturate(facing) * saturate(mask)) * terms.w;
+  float rng = saturate(1.0 - d * terms.x);
+  float cone = saturate((dot(l, axis) - terms.y) * terms.z);
+  float gate = (1.0 - shadow) * (1.0 + col_blend.w * (cone * rng - 1.0));
+  return col_blend.xyz * (n_dot * gate);
+}
+// The sum over the draw's lanterns (light_formulas.local_lights): the range in the draw word's upper
+// bits (kLightModeLanterns, LightModeLanterns in clay_logic.h); nothing without the bit. At most six
+// (kMaxLightSetLanterns), unrolled, each under its own test: no clay shader has a loop, and no lantern
+// past the frame's 64 is read (the buffer is bound by address). A program that declares no f_lanterns
+// (the depth-only programs) has the sum without the lanterns: nothing.
+float3 LocalLights(float3 P, float3 N, float mask, float facing, uint light_mode) {
+  float3 sum = float3(0.0, 0.0, 0.0);
+#if defined(CLAY_FOG) || defined(CLAY_LANTERNS_VS)
+  [branch] if (light_mode & 2048) {
+    uint first = (light_mode >> 16) & 63;
+    uint count = (light_mode >> 22) & 7;
+    [unroll] for (uint j = 0; j < 6; ++j) {
+      [branch] if (j < count && first + j < 64) {
+        uint at = (first + j) * 4;
+        sum += LocalLight(P, N, f_lanterns[at], f_lanterns[at + 1], f_lanterns[at + 2], f_lanterns[at + 3].xyz, mask, facing);
+      }
+    }
+  }
+#endif
+  return sum;
+}
 float3 LightTerrainLayer(float3 A, float3 baked, float3 tint, float tint_pow, float3 add, float3 amb_floor, float t,
-                         float n_dot_sun, float3 sun_col, float c11x, float sun_gate) {
-  return A * (c11x * light_ambient(baked, tint, tint_pow, add, amb_floor, t) + light_sun(sun_col, n_dot_sun, sun_gate));
+                         float n_dot_sun, float3 sun_col, float c11x, float sun_gate, float3 lights) {
+  return A * (c11x * light_ambient(baked, tint, tint_pow, add, amb_floor, t) + light_sun(sun_col, n_dot_sun, sun_gate) + lights);
 }
 float3 LightTerrainFar(float3 F, float3 baked, float3 tint, float tint_pow, float3 add, float3 amb_floor, float t,
                        float n_dot_sun, float3 sun_col, float c11x) {
   return F * (light_ambient(baked, tint, tint_pow, add, amb_floor, t) + c11x * light_sun(sun_col, n_dot_sun, 1.0));
 }
 float3 LightObject(float3 A, float3 vcolour, float3 tint, float tint_pow, float3 add, float3 amb_floor, float t,
-                   float n_dot_sun, float3 sun_col, float c27w, float sun_gate, float3 c49) {
-  return A * (c27w * light_ambient(vcolour, tint, tint_pow, add, amb_floor, t) + light_sun(sun_col, n_dot_sun, sun_gate)) * c49;
+                   float n_dot_sun, float3 sun_col, float c27w, float sun_gate, float3 c49, float3 lights) {
+  return A * (c27w * light_ambient(vcolour, tint, tint_pow, add, amb_floor, t) + light_sun(sun_col, n_dot_sun, sun_gate) + lights) * c49;
 }
 // The instanced plants (lighting-formulas.md, "Instanced plants"; the mirrors are in clay_logic.h). The
 // game's vertex shaders make the colour of the vertex's copy and the bend of the normal, its pixel
@@ -691,18 +767,20 @@ float3 PlantNormal(float3 normal, float4 bend) {
   float3 n = light_normalize(normal);
   return light_normalize(n + (bend.xyz - n) * saturate(bend.w));
 }
-float3 LightPlant(float3 A, float3 vs_ambient, float n_dot_sun, float3 sun_col, float sun_gate) {
-  return A * (vs_ambient + light_sun(sun_col, n_dot_sun, sun_gate));
+float3 LightPlant(float3 A, float3 vs_ambient, float n_dot_sun, float3 sun_col, float sun_gate, float3 lights) {
+  return A * (vs_ambient + light_sun(sun_col, n_dot_sun, sun_gate) + lights);
 }
 float3 LightPlantLit(float3 A, float3 vs_base, float3 add, float3 amb_floor, float t, float n_dot_sun, float3 sun_col,
-                     float sun_gate) {
-  return A * (vs_base * AmbientFactor(amb_floor, t) + add + light_sun(sun_col, n_dot_sun, sun_gate));
+                     float sun_gate, float3 lights) {
+  return A * (vs_base * AmbientFactor(amb_floor, t) + add + light_sun(sun_col, n_dot_sun, sun_gate) + lights);
 }
 // The tree leaves (lighting-formulas.md, "Tree leaves"; the mirrors are in clay_logic.h). The game's leaf
 // vertex shaders make the ambient and the light's two scalars on the side of the card the viewer sees
 // (the cards are drawn without culling; the normal, used as it is, is turned to the viewer); its pixel
 // shader adds them on the albedo, the back light on leaf texels only. Split the same way. The one
 // division of the light is LeafLight's by 1 + wrap (the pass refuses a draw whose wrap is negative).
+// LightLeaf takes the two colour sums of the vertex side (light_formulas.tree_leaf_sums): front3 the sum
+// over the lights of colour * front, back3 the same of back.
 float2 LeafLight(float3 normal, float3 view, float3 light_dir, float wrap, float spot) {
   float3 n = (dot(view, normal) < 0.0) ? -normal : normal;
   float nl = dot(light_dir, n);
@@ -715,10 +793,9 @@ float2 LeafMask(float mask, float gain, float bias) {
   float m1 = saturate(mask) * gain + bias;
   return float2(m1, m1 * gain + bias);
 }
-float3 LightLeaf(float3 A, float3 vs_ambient, float front, float back, float3 sun_col, float c27w, float m1, float m2,
-                 float3 c49) {
+float3 LightLeaf(float3 A, float3 vs_ambient, float3 front3, float3 back3, float c27w, float m1, float m2, float3 c49) {
   float green = (A.g >= A.r) ? 1.0 : 0.0;
-  return (A * (vs_ambient * c27w + m1 * sun_col * front) + green * A * m2 * sun_col * back) * c49;
+  return (A * (vs_ambient * c27w + m1 * front3) + green * A * m2 * back3) * c49;
 }
 // What a lit draw writes: the value itself, a number, not negative, at most 64 (ClayLit in clay_logic.h).
 float3 clay_lit(float3 v) { return (v > 0.0) ? min(v, 64.0) : float3(0.0, 0.0, 0.0); }
@@ -835,6 +912,7 @@ static const char kPinVsMain[] = R"pin(VsOut main(uint vid : SV_VertexID) {
   o.axis = float3(0, 0, 0);
   o.vcolour = float3(0, 0, 0);
   o.bend = float4(0, 0, 0, 0);
+  o.back = float3(0, 0, 0);
   bool has_light = in_range && uint(v) < light_count;
 #ifndef CLAY_WIND
   [branch] if ((light_mode & 1) && has_light) {
@@ -892,9 +970,11 @@ static const char kPinVsMain[] = R"pin(VsOut main(uint vid : SV_VertexID) {
     // A tree leaf, as the game's leaf vertex shaders: the normal through the rows, as it is; the probe
     // colour (the set at t11 clamped, the weights at t12) raised to c18.w * 0.4545 (2.2 * c21.w * 0.4545)
     // times c18.xyz (c21.xyz) plus c54.xyz (c20.xyz); the world position (M p) / c7.w + c4..c6 .w and
-    // the unit vector from it to the eye; and the sun's two scalars on the side of the card the viewer
-    // sees (the frame's sun stands in the vertex side's light set: a direction, no cone, no range), in
-    // the first two components of the bend's interpolator. A leaf has no vector of t.
+    // the unit vector from it to the eye; and the light's two colour sums on the side of the card the
+    // viewer sees: the frame's sun (a direction, no cone, no range) and, under light_mode's lantern bit,
+    // the draw's lanterns (leaf_light with spot = 1 + c90[j] * (cone * range - 1): the vertex side's
+    // light set is the pixel side's four registers lower), front3 in the bend's interpolator, back3 in
+    // `back`. A leaf has no vector of t.
     float3 n = normals[v];
     float3 N = float3(dot(o_rot0.xyz, n), dot(o_rot1.xyz, n), dot(o_rot2.xyz, n));
     o.normal = N;
@@ -905,7 +985,31 @@ static const char kPinVsMain[] = R"pin(VsOut main(uint vid : SV_VertexID) {
     o.vcolour = InstanceAmbient(probe, f_tint, o_colour_power * f_tint_pow, f_add);
     o.world = float3(dot(o_rot0.xyz, p.xyz), dot(o_rot1.xyz, p.xyz), dot(o_rot2.xyz, p.xyz)) * o_leaf.y +
               float3(o_rot0.w, o_rot1.w, o_rot2.w);
-    o.bend = float4(LeafLight(N, light_normalize(f_eye - o.world), light_normalize(f_sun_dir), o_leaf.x, 1.0), 0, 0);
+    float3 view = light_normalize(f_eye - o.world);
+    float2 sun_fb = LeafLight(N, view, light_normalize(f_sun_dir), o_leaf.x, 1.0);
+    float3 front3 = f_sun_col * sun_fb.x, back3 = f_sun_col * sun_fb.y;
+    [branch] if (light_mode & 2048) {
+      uint first = (light_mode >> 16) & 63;
+      uint count = (light_mode >> 22) & 7;
+      [unroll] for (uint j = 0; j < 6; ++j) {
+        [branch] if (j < count && first + j < 64) {
+          uint at = (first + j) * 4;
+          float4 pos_w = f_lanterns[at], col_blend = f_lanterns[at + 1], terms = f_lanterns[at + 2];
+          float3 v = pos_w.xyz - o.world * pos_w.w;
+          float d2 = dot(v, v);
+          float d = (d2 > 0.0 && d2 < 3.0e38) ? d2 * rsqrt(d2) : 0.0;
+          float3 ld = light_normalize(v);
+          float rng = saturate(1.0 - d * terms.x);
+          float cone = saturate((dot(ld, f_lanterns[at + 3].xyz) - terms.y) * terms.z);
+          float spot = 1.0 + col_blend.w * (cone * rng - 1.0);
+          float2 fb = LeafLight(N, view, ld, o_leaf.x, spot);
+          front3 += col_blend.xyz * fb.x;
+          back3 += col_blend.xyz * fb.y;
+        }
+      }
+    }
+    o.bend = float4(front3, 0.0);
+    o.back = back3;
   }
   return o;
 })pin";
@@ -917,7 +1021,7 @@ static const char kPinTexturedMain[] = R"pin(float3 clay_linear(float3 d) { d = 
 #endif
 float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOORD1, float3 world : TEXCOORD2,
             float3 normal : TEXCOORD3, float3 axis : TEXCOORD4, float3 vcolour : TEXCOORD5,
-            float4 bend : TEXCOORD6) : SV_Target {
+            float4 bend : TEXCOORD6, float3 back : TEXCOORD7) : SV_Target {
   float3 n = normalize(cross(ddx(ndc), ddy(ndc)));
   float facet = saturate(abs(dot(n, normalize(float3(0.4, 0.6, -0.7)))));
   float3 base;
@@ -970,23 +1074,25 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
         float3 Np = PlantNormal(normal, bend);
         if (light_mode & 32) {
           lit = LightPlantLit(clay_linear(t.rgb), vcolour, f_add, f_floor, AmbientT(axis, Np), dot(Np, f_sun_dir), f_sun_col,
-                              SunGateSingle(mask, 1.0));
+                              SunGateSingle(mask, 1.0), LocalLights(world, Np, mask, 1.0, light_mode));
         } else {
-          lit = LightPlant(clay_linear(t.rgb), vcolour, dot(Np, f_sun_dir), f_sun_col, SunGateSingle(mask, 1.0));
+          lit = LightPlant(clay_linear(t.rgb), vcolour, dot(Np, f_sun_dir), f_sun_col, SunGateSingle(mask, 1.0),
+                           LocalLights(world, Np, mask, 1.0, light_mode));
         }
         lit = FogForm(lit, fog, 0.0, 0.0);
       } else if (light_mode & 64) {
-        // A tree leaf: the vertex side's ambient and the sun's two scalars (bend.x front, bend.y back)
+        // A tree leaf: the vertex side's ambient and the light's two colour sums (bend.xyz front, back)
         // on A, the back light on leaf texels only; the mask through the shader's two literals (0.6
         // and 0.4: once on the front light, twice on the back light; both factors are 1 at a mask
         // of 1); c27.w, c49 and c26 as an object's.
         float2 m = LeafMask(mask, 0.6, 0.4);
-        lit = LightLeaf(clay_linear(t.rgb), vcolour, bend.x, bend.y, f_sun_col, o_c27w, m.x, m.y, o_c49);
+        lit = LightLeaf(clay_linear(t.rgb), vcolour, bend.xyz, back, o_c27w, m.x, m.y, o_c49);
         lit = FogForm(lit, fog, o_leaf.z, o_leaf.w) * o_c26;
       } else {
         float3 N = light_normalize(normal);
         lit = LightObject(clay_linear(t.rgb), vcolour, f_tint, f_tint_pow, f_add, f_floor, AmbientT(axis, normal),
-                          dot(N, f_sun_dir), f_sun_col, o_c27w, SunGateSingle(mask, 1.0), o_c49);
+                          dot(N, f_sun_dir), f_sun_col, o_c27w, SunGateSingle(mask, 1.0), o_c49,
+                          LocalLights(world, N, mask, 1.0, light_mode));
         lit = FogForm(lit, fog, o_leaf.z, o_leaf.w) * o_c26;
       }
       return float4(clay_lit(lit * f_exposure), (alpha_mode & 0x80) ? saturate(a) : 1.0);
@@ -1012,8 +1118,8 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
 #undef main
 float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOORD1, float3 world : TEXCOORD2,
             float3 normal : TEXCOORD3, float3 axis : TEXCOORD4, float3 vcolour : TEXCOORD5,
-            float4 bend : TEXCOORD6) : SV_Target {
-  return float4(clay_textured(pos, ndc, uv, world, normal, axis, vcolour, bend).rgb, 0.5);
+            float4 bend : TEXCOORD6, float3 back : TEXCOORD7) : SV_Target {
+  return float4(clay_textured(pos, ndc, uv, world, normal, axis, vcolour, bend, back).rgb, 0.5);
 }
 #endif
 #endif)pin";
@@ -1118,7 +1224,8 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
     // The sun's shadow at the pixel, on the sun term with the facing factor.
     float mask = shadow_mask.SampleLevel(s_linear_clamp, (pos.xy - 0.5) * float2(f_mask_du, f_mask_dv), 0).r;
     lin = LightTerrainLayer(lin, sample_base(base_at, base_d).rgb, f_tint, f_tint_pow, f_add, f_floor,
-                            AmbientT(axis, normal), dot(N, f_sun_dir), f_sun_col, t_c11x, SunGateSingle(mask, facing));
+                            AmbientT(axis, normal), dot(N, f_sun_dir), f_sun_col, t_c11x, SunGateSingle(mask, facing),
+                            LocalLights(world, N, mask, facing, light_mode));
     // The fog (the ground form), on the layer's own colour before its blend, as the game fogs each layer.
     lin = FogForm(lin, FogCoords(pos), 0.0, 0.0);
   }
@@ -1517,24 +1624,32 @@ int main() {
     const char* axis = strstr(kClayVs, "float3 axis : TEXCOORD4;");
     const char* vcolour = strstr(kClayVs, "float3 vcolour : TEXCOORD5;");
     const char* bend = strstr(kClayVs, "float4 bend : TEXCOORD6;");
-    if (!out || !world || !normal || !axis || !vcolour || !bend ||
-        !(out < world && world < normal && normal < axis && axis < vcolour && vcolour < bend)) return 31;
+    const char* back = strstr(kClayVs, "float3 back : TEXCOORD7;");
+    if (!out || !world || !normal || !axis || !vcolour || !bend || !back ||
+        !(out < world && world < normal && normal < axis && axis < vcolour && vcolour < bend && bend < back)) return 31;
     const char* head = strstr(kClayTexturedPs, "float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOORD1, "
                                                "float3 world : TEXCOORD2,");
     const char* tail = strstr(kClayTexturedPs, "float3 normal : TEXCOORD3, float3 axis : TEXCOORD4, float3 vcolour : TEXCOORD5,");
-    const char* last = strstr(kClayTexturedPs, "float4 bend : TEXCOORD6) : SV_Target {");
+    const char* last = strstr(kClayTexturedPs, "float4 bend : TEXCOORD6, float3 back : TEXCOORD7) : SV_Target {");
     if (!head || !tail || !last || !(head < tail && tail < last)) return 31;
-    // The plants' bend (plan Task 8b) is the vertex shader's last output and the textured shader's last
-    // input, four components at one register in both compiled shaders; the other pixel shaders do not
-    // take it, and a draw that is no plant gets zeros there (per light_mode, below).
+    // The plants' bend (plan Task 8b; a leaf's front sum since the local lights) and, since the local
+    // lights, the leaf's back sum (`back`) are the vertex shader's last two outputs and the textured
+    // shader's last two inputs, four and three components at one register each in both compiled shaders;
+    // the other pixel shaders take neither, and a draw that is no plant and no leaf gets zeros there (per
+    // light_mode, below).
     unsigned vs_mask = 0, ps_mask = 0, none = 0;
     const int vs_reg = TexcoordRegister("clay_vs", kClayVs, "vs_5_0", true, 6, &vs_mask);
     const int ps_reg = TexcoordRegister("clay_textured_ps", kClayTexturedPs, "ps_5_0", false, 6, &ps_mask);
     if (vs_reg < 0 || vs_reg != ps_reg || vs_mask != 0xF || ps_mask != 0xF) return 98;
-    if (TexcoordRegister("clay_terrain_layer_ps", kClayTerrainLayerPs, "ps_5_0", false, 6, &none) != -1 ||
-        TexcoordRegister("clay_terrain_far_ps", kClayTerrainFarPs, "ps_5_0", false, 6, &none) != -1 ||
-        TexcoordRegister("clay_ps", kClayPs, "ps_5_0", false, 6, &none) != -1 ||
-        TexcoordRegister("clay_vs", kClayVs, "vs_5_0", true, 7, &none) != -1) return 98;
+    const int vs_back = TexcoordRegister("clay_vs", kClayVs, "vs_5_0", true, 7, &vs_mask);
+    const int ps_back = TexcoordRegister("clay_textured_ps", kClayTexturedPs, "ps_5_0", false, 7, &ps_mask);
+    if (vs_back != vs_reg + 1 || vs_back != ps_back || vs_mask != 0x7 || ps_mask != 0x7) return 98;
+    for (unsigned index : {6u, 7u}) {
+      if (TexcoordRegister("clay_terrain_layer_ps", kClayTerrainLayerPs, "ps_5_0", false, index, &none) != -1 ||
+          TexcoordRegister("clay_terrain_far_ps", kClayTerrainFarPs, "ps_5_0", false, index, &none) != -1 ||
+          TexcoordRegister("clay_ps", kClayPs, "ps_5_0", false, index, &none) != -1) return 98;
+    }
+    if (TexcoordRegister("clay_vs", kClayVs, "vs_5_0", true, 8, &none) != -1) return 98;
     // (the vertex colour, one register before it, likewise: three components)
     if (TexcoordRegister("clay_vs", kClayVs, "vs_5_0", true, 5, &vs_mask) != TexcoordRegister("clay_textured_ps", kClayTexturedPs, "ps_5_0", false, 5, &ps_mask) ||
         vs_mask != 0x7 || ps_mask != 0x7) return 98;
@@ -1775,16 +1890,28 @@ int main() {
         "float SunGateSingle(float mask, float facing) { return saturate(facing) * saturate(mask); }",
         "return light_pow(base, tint_pow) * tint * AmbientFactor(amb_floor, t) + add;",
         "return sun_col * (saturate(n_dot_sun) * sun_gate);",
+        // one local light (light_formulas.local_light) and the sum over the draw's lanterns
+        "float3 LocalLight(float3 P, float3 N, float4 pos_w, float4 col_blend, float4 terms, float3 axis, float mask, float facing) {",
+        "float3 v = pos_w.xyz - P * pos_w.w;",
+        "float d = (d2 > 0.0 && d2 < 3.0e38) ? d2 * rsqrt(d2) : 0.0;",
+        "float n_dot = saturate(dot(N, l));",
+        "float shadow = (1.0 - saturate(facing) * saturate(mask)) * terms.w;",
+        "float rng = saturate(1.0 - d * terms.x);",
+        "float cone = saturate((dot(l, axis) - terms.y) * terms.z);",
+        "float gate = (1.0 - shadow) * (1.0 + col_blend.w * (cone * rng - 1.0));",
+        "return col_blend.xyz * (n_dot * gate);",
+        "float3 LocalLights(float3 P, float3 N, float mask, float facing, uint light_mode) {",
+        "sum += LocalLight(P, N, f_lanterns[at], f_lanterns[at + 1], f_lanterns[at + 2], f_lanterns[at + 3].xyz, mask, facing);",
         // the three families, with the argument lists of light_formulas.py
         "float3 LightTerrainLayer(float3 A, float3 baked, float3 tint, float tint_pow, float3 add, float3 amb_floor, float t,",
-        "                         float n_dot_sun, float3 sun_col, float c11x, float sun_gate) {",
-        "return A * (c11x * light_ambient(baked, tint, tint_pow, add, amb_floor, t) + light_sun(sun_col, n_dot_sun, sun_gate));",
+        "                         float n_dot_sun, float3 sun_col, float c11x, float sun_gate, float3 lights) {",
+        "return A * (c11x * light_ambient(baked, tint, tint_pow, add, amb_floor, t) + light_sun(sun_col, n_dot_sun, sun_gate) + lights);",
         "float3 LightTerrainFar(float3 F, float3 baked, float3 tint, float tint_pow, float3 add, float3 amb_floor, float t,",
         "                       float n_dot_sun, float3 sun_col, float c11x) {",
         "return F * (light_ambient(baked, tint, tint_pow, add, amb_floor, t) + c11x * light_sun(sun_col, n_dot_sun, 1.0));",
         "float3 LightObject(float3 A, float3 vcolour, float3 tint, float tint_pow, float3 add, float3 amb_floor, float t,",
-        "                   float n_dot_sun, float3 sun_col, float c27w, float sun_gate, float3 c49) {",
-        "return A * (c27w * light_ambient(vcolour, tint, tint_pow, add, amb_floor, t) + light_sun(sun_col, n_dot_sun, sun_gate)) * c49;",
+        "                   float n_dot_sun, float3 sun_col, float c27w, float sun_gate, float3 c49, float3 lights) {",
+        "return A * (c27w * light_ambient(vcolour, tint, tint_pow, add, amb_floor, t) + light_sun(sun_col, n_dot_sun, sun_gate) + lights) * c49;",
         // the instanced plants: the vertex side's colour, height blend and bend, the pixel side's bent
         // normal, and the two families' functions
         "float3 InstanceAmbient(float3 instance_colour, float3 tint, float tint_pow, float3 add) {",
@@ -1796,10 +1923,11 @@ int main() {
         "float3 PlantNormal(float3 normal, float4 bend) {",
         "float3 n = light_normalize(normal);",
         "return light_normalize(n + (bend.xyz - n) * saturate(bend.w));",
-        "float3 LightPlant(float3 A, float3 vs_ambient, float n_dot_sun, float3 sun_col, float sun_gate) {",
-        "return A * (vs_ambient + light_sun(sun_col, n_dot_sun, sun_gate));",
+        "float3 LightPlant(float3 A, float3 vs_ambient, float n_dot_sun, float3 sun_col, float sun_gate, float3 lights) {",
+        "return A * (vs_ambient + light_sun(sun_col, n_dot_sun, sun_gate) + lights);",
         "float3 LightPlantLit(float3 A, float3 vs_base, float3 add, float3 amb_floor, float t, float n_dot_sun, float3 sun_col,",
-        "return A * (vs_base * AmbientFactor(amb_floor, t) + add + light_sun(sun_col, n_dot_sun, sun_gate));",
+        "                     float sun_gate, float3 lights) {",
+        "return A * (vs_base * AmbientFactor(amb_floor, t) + add + light_sun(sun_col, n_dot_sun, sun_gate) + lights);",
         // the tree leaves: the two scalars of the light on the side the viewer sees (the normal turned to
         // him, the wrapped cosine guarded where 1 + wrap is zero, the back light through the card), the
         // two factors of the mask, and the family's function with the back light on leaf texels only
@@ -1813,9 +1941,9 @@ int main() {
         "float2 LeafMask(float mask, float gain, float bias) {",
         "float m1 = saturate(mask) * gain + bias;",
         "return float2(m1, m1 * gain + bias);",
-        "float3 LightLeaf(float3 A, float3 vs_ambient, float front, float back, float3 sun_col, float c27w, float m1, float m2,",
+        "float3 LightLeaf(float3 A, float3 vs_ambient, float3 front3, float3 back3, float c27w, float m1, float m2, float3 c49) {",
         "float green = (A.g >= A.r) ? 1.0 : 0.0;",
-        "return (A * (vs_ambient * c27w + m1 * sun_col * front) + green * A * m2 * sun_col * back) * c49;",
+        "return (A * (vs_ambient * c27w + m1 * front3) + green * A * m2 * back3) * c49;",
         // what a lit draw writes
         "float3 clay_lit(float3 v) { return (v > 0.0) ? min(v, 64.0) : float3(0.0, 0.0, 0.0); }",
     };
@@ -1937,8 +2065,10 @@ int main() {
       // vertex shaders do not normalise it), no vector of t, the probe colour of the clamped set and the
       // weights, the ambient with the exponent's factor and the frame's tint, exponent and added light,
       // the world position (M p) / c7.w + the translation, and the two scalars of the sun from the unit
-      // vector to the eye, the unit sun direction and the wrap, with no cone or range (spot 1), in the
-      // first two components of the bend.
+      // vector to the eye, the unit sun direction and the wrap, with no cone or range (spot 1), times the
+      // sun's colour: the two colour sums, to which (since the local lights) each of the draw's lanterns
+      // adds its colour times its two scalars, from the world position, with its spot; front3 in the
+      // bend's first three components, back3 in `back`.
       const char* leaf = strstr(v, "[branch] if ((light_mode & 90) == 74 && has_light) {");
       const char* ln = leaf ? strstr(leaf, "float3 n = normals[v];") : nullptr;
       const char* big_n = strstr(v, "float3 N = float3(dot(o_rot0.xyz, n), dot(o_rot1.xyz, n), dot(o_rot2.xyz, n));");
@@ -1950,13 +2080,23 @@ int main() {
       const char* lamb = strstr(v, "o.vcolour = InstanceAmbient(probe, f_tint, o_colour_power * f_tint_pow, f_add);");
       const char* where = leaf ? strstr(leaf, "o.world = float3(dot(o_rot0.xyz, p.xyz), dot(o_rot1.xyz, p.xyz), dot(o_rot2.xyz, p.xyz)) * o_leaf.y +") : nullptr;
       const char* shift = where ? strstr(where, "float3(o_rot0.w, o_rot1.w, o_rot2.w);") : nullptr;
-      const char* sides = strstr(v, "o.bend = float4(LeafLight(N, light_normalize(f_eye - o.world), light_normalize(f_sun_dir), o_leaf.x, 1.0), 0, 0);");
-      if (!leaf || !ln || !big_n || !keep || !no_t || !set || !lw || !lprobe || !lamb || !where || !shift || !sides) return 166;
+      const char* view = strstr(v, "float3 view = light_normalize(f_eye - o.world);");
+      const char* sun_fb = strstr(v, "float2 sun_fb = LeafLight(N, view, light_normalize(f_sun_dir), o_leaf.x, 1.0);");
+      const char* sums = strstr(v, "float3 front3 = f_sun_col * sun_fb.x, back3 = f_sun_col * sun_fb.y;");
+      const char* lanterns = sums ? strstr(sums, "[branch] if (light_mode & 2048) {") : nullptr;   // (LocalLights' is before main)
+      const char* to_lamp = strstr(v, "float3 v = pos_w.xyz - o.world * pos_w.w;");
+      const char* lamp_fb = strstr(v, "float2 fb = LeafLight(N, view, ld, o_leaf.x, spot);");
+      const char* lamp_add = strstr(v, "front3 += col_blend.xyz * fb.x;\n          back3 += col_blend.xyz * fb.y;");
+      const char* sides = strstr(v, "o.bend = float4(front3, 0.0);\n    o.back = back3;");
+      if (!leaf || !ln || !big_n || !keep || !no_t || !set || !lw || !lprobe || !lamb || !where || !shift || !view || !sun_fb || !sums ||
+          !lanterns || !to_lamp || !lamp_fb || !lamp_add || !sides) return 166;
       if (!(amb < leaf && leaf < ln && ln < big_n && big_n < keep && keep < no_t && no_t < set && set < lw && lw < lprobe &&
-            lprobe < lamb && lamb < where && where < shift && shift < sides && sides < strstr(leaf, "return o;"))) return 166;
-      // (one call of LeafLight in main, and the leaf's normal is never normalised: N is used as made)
-      if (count(main_at, "LeafLight(") != 1 || strstr(v, "light_normalize(N)") || strstr(v, "normalize(N)") ||
-          count(main_at, "o_leaf.") != 3 || count(main_at, "f_eye") != 1) return 166;
+            lprobe < lamb && lamb < where && where < shift && shift < view && view < sun_fb && sun_fb < sums && sums < lanterns &&
+            lanterns < to_lamp && to_lamp < lamp_fb && lamp_fb < lamp_add && lamp_add < sides && sides < strstr(leaf, "return o;"))) return 166;
+      // (two calls of LeafLight in main, the sun's and a lantern's, and the leaf's normal is never
+      // normalised: N is used as made)
+      if (count(main_at, "LeafLight(") != 2 || strstr(v, "light_normalize(N)") || strstr(v, "normalize(N)") ||
+          count(main_at, "o_leaf.") != 4 || count(main_at, "f_eye") != 1 || count(main_at, "o.back = ") != 2) return 166;
       if (!strstr(v, "float4 o_leaf;") || !strstr(kClayTexturedPs, "float4 o_leaf;") || !strstr(v, "float3 f_eye; uint f_eye_on;")) return 166;
     }
     // The object (kClayTexturedPs): A is the albedo squared, clamped to [0, 1] before the square as the
@@ -1971,7 +2111,9 @@ int main() {
       const char* n = strstr(t, "float3 N = light_normalize(normal);");
       const char* call = strstr(t, "lit = LightObject(clay_linear(t.rgb), vcolour, f_tint, f_tint_pow, f_add, f_floor, AmbientT(axis, normal),");
       // (c26 comes after the fog, which comes after the lit colour with its c49: the game's order)
-      const char* rest = strstr(t, "dot(N, f_sun_dir), f_sun_col, o_c27w, SunGateSingle(mask, 1.0), o_c49);\n"
+      // (the local lights' sum beside the sun: at the pixel's world position with its normal and mask)
+      const char* rest = strstr(t, "dot(N, f_sun_dir), f_sun_col, o_c27w, SunGateSingle(mask, 1.0), o_c49,\n"
+                                   "                          LocalLights(world, N, mask, 1.0, light_mode));\n"
                                    "        lit = FogForm(lit, fog, o_leaf.z, o_leaf.w) * o_c26;");
       const char* out = strstr(t, "return float4(clay_lit(lit * f_exposure), (alpha_mode & 0x80) ? saturate(a) : 1.0);");
       const char* unlit = strstr(t, "return float4(clay_linear(t.rgb * (0.75 + 0.25 * facet)) * f_post, (alpha_mode & 0x80) ? saturate(a) : 1.0);");
@@ -1988,16 +2130,20 @@ int main() {
       const char* np = strstr(t, "float3 Np = PlantNormal(normal, bend);");
       const char* family = strstr(t, "if (light_mode & 32) {");
       const char* lit_call = strstr(t, "lit = LightPlantLit(clay_linear(t.rgb), vcolour, f_add, f_floor, AmbientT(axis, Np), dot(Np, f_sun_dir), f_sun_col,");
-      const char* plant_call = strstr(t, "lit = LightPlant(clay_linear(t.rgb), vcolour, dot(Np, f_sun_dir), f_sun_col, SunGateSingle(mask, 1.0));");
-      if (!declared || !plant || !np || !family || !lit_call || !plant_call) return 99;
+      const char* plant_call = strstr(t, "lit = LightPlant(clay_linear(t.rgb), vcolour, dot(Np, f_sun_dir), f_sun_col, SunGateSingle(mask, 1.0),\n"
+                                         "                           LocalLights(world, Np, mask, 1.0, light_mode));");
+      // (the local lights' sum of both by the bent normal)
+      const char* lit_lights = strstr(t, "SunGateSingle(mask, 1.0), LocalLights(world, Np, mask, 1.0, light_mode));");
+      if (!declared || !plant || !np || !family || !lit_call || !plant_call || !lit_lights || !(lit_call < lit_lights && lit_lights < plant_call)) return 99;
       if (!(branch < declared && declared < plant && plant < np && np < family && family < lit_call && lit_call < plant_call &&
             plant_call < n && n < call)) return 99;
       // The tree leaf (plan Task 8c), between the plants' paths and the object's, under the leaf bit:
       // the mask's two factors of a mask of 1 with the shader's literals, and the family's function on
-      // the vertex side's ambient and two scalars with the frame's sun colour, c27.w, c49, then c26.
+      // the vertex side's ambient and two colour sums (since the local lights: bend.xyz and back), c27.w,
+      // c49, then c26.
       const char* leaf = strstr(t, "} else if (light_mode & 64) {");
       const char* mask_factors = strstr(t, "float2 m = LeafMask(mask, 0.6, 0.4);");
-      const char* leaf_call = strstr(t, "lit = LightLeaf(clay_linear(t.rgb), vcolour, bend.x, bend.y, f_sun_col, o_c27w, m.x, m.y, o_c49);\n"
+      const char* leaf_call = strstr(t, "lit = LightLeaf(clay_linear(t.rgb), vcolour, bend.xyz, back, o_c27w, m.x, m.y, o_c49);\n"
                                         "        lit = FogForm(lit, fog, o_leaf.z, o_leaf.w) * o_c26;");
       if (!leaf || !mask_factors || !leaf_call) return 167;
       if (!(plant_call < leaf && leaf < mask_factors && mask_factors < leaf_call && leaf_call < n)) return 167;
@@ -2022,7 +2168,9 @@ int main() {
       const char* n = strstr(l, "float3 N = light_normalize(normal);");
       const char* facing = strstr(l, "float facing = FacingGate(dot(N, f_sun_dir), t_facing_scale);");
       const char* call = strstr(l, "lin = LightTerrainLayer(lin, sample_base(base_at, base_d).rgb, f_tint, f_tint_pow, f_add, f_floor,");
-      const char* rest = strstr(l, "AmbientT(axis, normal), dot(N, f_sun_dir), f_sun_col, t_c11x, SunGateSingle(mask, facing));");
+      // (the local lights' sum beside the sun, with the layer's facing factor on their shadow)
+      const char* rest = strstr(l, "AmbientT(axis, normal), dot(N, f_sun_dir), f_sun_col, t_c11x, SunGateSingle(mask, facing),\n"
+                                   "                            LocalLights(world, N, mask, facing, light_mode));");
       const char* out = strstr(l, "return terrain_out(lin, a, pos, ndc);");
       if (!at || !d || !cull || !alpha || !branch || !n || !facing || !call || !rest || !out) return 84;
       if (!(at < d && d < cull && alpha < branch && branch < n && n < facing && facing < call && call < rest && rest < out)) return 84;
@@ -2612,14 +2760,17 @@ int main() {
         const bool loads_light = ReadsResource(listing, 9) || ReadsResource(listing, 10) || ReadsResource(listing, 11) || ReadsResource(listing, 12);
         if (loads_light && !HasLineWith(listing, "ult", "cb0[8].z")) return 160;
         // The bend: a plant's program writes it from its inputs (and zeros for a vertex past its
-        // buffers); a leaf's writes its two scalars in the first two components (zeros for a vertex
-        // past its buffers) and zeros in the other two, with the one division of the light, saturated;
-        // every other program writes zeros alone (so the interpolator a pixel shader may read is never
-        // left unwritten, and never another draw's).
+        // buffers); a leaf's writes its front colour sum in the first three components (zeros for a
+        // vertex past its buffers) and zero in the fourth, with the one division of the light, saturated,
+        // and its back colour sum in `back` (o8: the sun's colour times its back scalar; the lanterns'
+        // terms are folded away without the lantern bit); every other program writes zeros alone, in both
+        // (so the interpolator a pixel shader may read is never left unwritten, and never another draw's).
         const bool zero_bend = HasLineWith(listing, "mov", "o7.xyzw, l(0,0,0,0)");
-        const bool leaf_bend = HasLineWith(listing, "mov", "o7.zw, l(0,0,0,0)") && HasLineWith(listing, "mov", "o7.xy, r") &&
+        const bool leaf_bend = HasLineWith(listing, "mov", "o7.w, l(0)") && HasLineWith(listing, "mov", "o7.xyz, r") &&
                                HasOp(listing, "div_sat");
-        if (zero_bend == leaf || leaf_bend != leaf || HasLineWith(listing, "mul", "o7.xyzw") != plant || (!leaf && HasOp(listing, "div_sat"))) {
+        const bool zero_back = HasLineWith(listing, "mov", "o8.xyz, l(0,0,0,0)"), leaf_back = HasLineWith(listing, "mul", "o8.xyz, r");
+        if (zero_bend == leaf || leaf_bend != leaf || HasLineWith(listing, "mul", "o7.xyzw") != plant || (!leaf && HasOp(listing, "div_sat")) ||
+            !zero_back || leaf_back != leaf || (!leaf && listing.find(" o8.xyz, r") != std::string::npos)) {
           std::cerr << "light_mode " << mode << ": the bend output is not " << (plant ? "the plant's" : leaf ? "the leaf's" : "zero") << "\n";
           return 160;
         }
@@ -2731,6 +2882,84 @@ int main() {
       const std::string leaking_vs = Disassembly("leaking_vs", WithLightMode(leak.c_str(), 0).c_str(), "vs_5_0");
       if (leaking_vs.empty() || !ReadsBlock(leaking_vs, "cb2")) return 162;
     }
+  }
+  // 168: the local lights (plan Task 7): the lantern range of the draw word (kLightModeLanterns, the first
+  // lantern in bits 16 to 21, the count in bits 22 to 24: LightModeLanterns) on the program a draw with that
+  // word runs. For every range that fits the frame's 64 (first 0, 21, 42, 63; count 1 to 6), lit, in each mesh
+  // form of the textured shader (an object 2, an instanced plant 16, a plant with the ambient factor 16 | 32)
+  // and for the terrain layer (1): it compiles and reads the frame's lantern registers (cb2 from 5344 / 16 = 334
+  // on) exactly over the draw's range, four registers a lantern (the lowest 334 + 4 first, the highest
+  // 334 + 4 (first + count) - 1), by more instructions for each lantern more; a leaf's are read by the vertex
+  // stage (its colour sums) over the same range and by none of its pixel program. Without the bit no program
+  // reads a register at or past 334, and a mesh form's vertex program but the leaf's reads none with it. A
+  // word the pass never makes (a range past the 64th lantern) reads no register past the buffer's end. The
+  // whole programs (the word a root word) read the lanterns by a computed index.
+  {
+    using fable2::native::render::kLightModeLanterns;
+    using fable2::native::render::kLightModeLanternFirstShift;
+    using fable2::native::render::kLightModeLanternCountShift;
+    static_assert(kLightModeLanterns == 2048 && kLightModeLanternFirstShift == 16 && kLightModeLanternCountShift == 22 &&
+                  kClayFrameLanternSize / 16 == 334);
+    const int base = int(kClayFrameLanternSize / 16);
+    const struct {
+      const char* name;
+      const char* src;
+      const char* target;
+      unsigned form;
+      bool reads;  // (whether the program reads the draw's lanterns)
+    } programs[] = {{"clay_textured_ps_object", kClayTexturedPs, "ps_5_0", 4 | 2, true},
+                    {"clay_textured_ps_plant", kClayTexturedPs, "ps_5_0", 4 | 16 | 2, true},
+                    {"clay_textured_ps_plant_lit", kClayTexturedPs, "ps_5_0", 4 | 32 | 16 | 2, true},
+                    {"clay_textured_ps_leaf", kClayTexturedPs, "ps_5_0", 4 | 64 | 8 | 2, false},
+                    {"clay_terrain_layer_ps", kClayTerrainLayerPs, "ps_5_0", 4 | 1, true},
+                    {"clay_vs_leaf", kClayVs, "vs_5_0", 4 | 64 | 8 | 2, true},
+                    {"clay_vs_object", kClayVs, "vs_5_0", 4 | 2, false},
+                    {"clay_vs_plant", kClayVs, "vs_5_0", 4 | 16 | 2, false}};
+    for (const auto& s : programs) {
+      const std::string plain = Disassembly(s.name, WithLightMode(s.src, s.form).c_str(), s.target);
+      if (plain.empty() || ReadsBlockFrom(plain, "cb2", base).lines != 0) {
+        std::cerr << s.name << ": the program without the lantern bit reads the frame's lanterns\n";
+        return 168;
+      }
+      for (unsigned first = 0; first < 64; first += 21) {
+        int lines_before = 0;
+        for (unsigned count = 1; count <= 6 && first + count <= 64; ++count) {
+          const unsigned mode = s.form | kLightModeLanterns | first << kLightModeLanternFirstShift | count << kLightModeLanternCountShift;
+          const std::string listing = Disassembly(s.name, WithLightMode(s.src, mode).c_str(), s.target);
+          const BlockReads r = ReadsBlockFrom(listing, "cb2", base);
+          const bool right = s.reads ? (r.lines > lines_before && !r.dynamic && r.lowest == base + int(4 * first) &&
+                                        r.highest == base + int(4 * (first + count)) - 1)
+                                     : r.lines == 0;
+          if (listing.empty() || !right || LoopInstructions(listing) != 0) {
+            std::cerr << s.name << " first " << first << " count " << count << ": " << r.lines << " lines read the lanterns, registers "
+                      << r.lowest << " to " << r.highest << (r.dynamic ? " (by a computed index)" : "") << "\n";
+            return 168;
+          }
+          lines_before = r.lines;
+        }
+      }
+      // (a word past the buffer's end, which LightModeLanterns refuses: lanterns 60 to 65, of which 60 to 63 are read)
+      if (s.reads) {
+        const unsigned past = s.form | kLightModeLanterns | 60u << kLightModeLanternFirstShift | 6u << kLightModeLanternCountShift;
+        const BlockReads r = ReadsBlockFrom(Disassembly(s.name, WithLightMode(s.src, past).c_str(), s.target), "cb2", base);
+        if (fable2::native::render::LightModeLanterns(60, 6) != 0 || r.lowest != base + 240 || r.highest != base + 255) return 168;
+      }
+    }
+    // The whole programs: the lanterns by a computed index (the lantern's number; the compiler folds the six
+    // blocks' own offsets into the operands) from the buffer's first lantern register on, inside the six
+    // lanterns' 24 registers past the first, and no loop (each of the six is its own block).
+    for (const auto& s : {programs[0], programs[4], programs[5]}) {
+      const std::string whole = Disassembly(s.name, s.src, s.target);
+      const BlockReads r = ReadsBlockFrom(whole, "cb2", base);
+      if (whole.empty() || !r.dynamic || r.lowest != base || r.highest < base + 3 || r.highest >= base + 24 || LoopInstructions(whole) != 0) {
+        std::cerr << s.name << ": the whole program reads the lanterns at " << r.lowest << " to " << r.highest << "\n";
+        return 168;
+      }
+    }
+    // Control: a program that reads the lanterns without the bit is reported.
+    const std::string always = Changed(kClayTexturedPs, "  [branch] if (light_mode & 2048) {\n    uint first = (light_mode >> 16) & 63;\n    uint count = (light_mode >> 22) & 7;",
+                                       "  [branch] if (true) {\n    uint first = 0;\n    uint count = 1;");
+    if (always.empty() || ReadsBlockFrom(Disassembly("always_ps", WithLightMode(always.c_str(), 6).c_str(), "ps_5_0"), "cb2", base).lines == 0) return 168;
   }
   // 166: the exposure changes the program of no draw without light (the final fix wave). Each clay
   // shader against its own text as it was before (WithoutExposure: commit 24c1751's), compiled with
@@ -2877,8 +3106,8 @@ int main() {
           {"plant sun", 1, "lit = LightPlant(clay_linear(t.rgb), vcolour, dot(Np, f_sun_dir),",
            "lit = LightPlant(clay_linear(t.rgb), vcolour, dot(normal, f_sun_dir),", 2},
           {"plant-lit t", 1, "AmbientT(axis, Np)", "AmbientT(axis, normal)", 2},
-          {"plant c26", 1, "f_sun_col, SunGateSingle(mask, 1.0));\n        }\n        lit = FogForm(lit, fog, 0.0, 0.0);\n      } else if (light_mode & 64) {",
-           "f_sun_col, SunGateSingle(mask, 1.0));\n        }\n        lit = FogForm(lit, fog, 0.0, 0.0);\n        lit *= o_c26;\n      } else if (light_mode & 64) {", 2},
+          {"plant c26", 1, "light_mode));\n        }\n        lit = FogForm(lit, fog, 0.0, 0.0);\n      } else if (light_mode & 64) {",
+           "light_mode));\n        }\n        lit = FogForm(lit, fog, 0.0, 0.0);\n        lit *= o_c26;\n      } else if (light_mode & 64) {", 2},
           {"PlantBend", 0, "  float h = saturate(height);", "  float h = height;", 6},
           {"PlantNormal", 1, "  float3 n = light_normalize(normal);\n  return light_normalize(n + (bend.xyz - n)",
            "  float3 n = normal;\n  return light_normalize(n + (bend.xyz - n)", 6},
@@ -2896,11 +3125,11 @@ int main() {
           {"LeafLight back", 0, "saturate(-nl) * (1.0 - turn * turn)", "saturate(-nl)", 6},
           {"LeafMask", 1, "  return float2(m1, m1 * gain + bias);", "  return float2(m1, m1);", 6},
           {"LightLeaf green", 1, "  float green = (A.g >= A.r) ? 1.0 : 0.0;", "  float green = 1.0;", 6},
-          {"LightLeaf c27w", 1, "(vs_ambient * c27w + m1 * sun_col * front)", "((vs_ambient + m1 * sun_col * front) * c27w)", 6},
+          {"LightLeaf c27w", 1, "(vs_ambient * c27w + m1 * front3)", "((vs_ambient + m1 * front3) * c27w)", 6},
           {"leaf normal", 0, "    o.normal = N;\n", "    N = light_normalize(N);\n    o.normal = N;\n", 1},
           {"leaf exponent", 0, "InstanceAmbient(probe, f_tint, o_colour_power * f_tint_pow, f_add);",
            "InstanceAmbient(probe, f_tint, f_tint_pow, f_add);", 1},
-          {"leaf translation", 0, " * o_leaf.y +\n              float3(o_rot0.w, o_rot1.w, o_rot2.w);\n    o.bend", " * o_leaf.y;\n    o.bend", 1},
+          {"leaf translation", 0, " * o_leaf.y +\n              float3(o_rot0.w, o_rot1.w, o_rot2.w);\n    float3 view", " * o_leaf.y;\n    float3 view", 1},
           {"leaf scale", 0, "f_add);\n    o.world = float3(dot(o_rot0.xyz, p.xyz), dot(o_rot1.xyz, p.xyz), dot(o_rot2.xyz, p.xyz)) * o_leaf.y +",
            "f_add);\n    o.world = float3(dot(o_rot0.xyz, p.xyz), dot(o_rot1.xyz, p.xyz), dot(o_rot2.xyz, p.xyz)) +", 1},
           {"leaf view", 0, "light_normalize(f_eye - o.world)", "light_normalize(o.world - f_eye)", 1},
@@ -2910,7 +3139,7 @@ int main() {
           {"object scale", 0, "at rest.\n    o.world = float3(dot(o_rot0.xyz, p.xyz), dot(o_rot1.xyz, p.xyz), dot(o_rot2.xyz, p.xyz)) * o_leaf.y +",
            "at rest.\n    o.world = float3(dot(o_rot0.xyz, p.xyz), dot(o_rot1.xyz, p.xyz), dot(o_rot2.xyz, p.xyz)) +", 1},
           {"object world position", 0, "at rest.\n    o.world = float3(dot(o_rot0.xyz, p.xyz),", "at rest.\n    o.world = float3(dot(o_rot0.xyz, n),", 1},
-          {"leaf wrap", 0, "o_leaf.x, 1.0), 0, 0);", "0.0, 1.0), 0, 0);", 1},
+          {"leaf wrap", 0, "light_normalize(f_sun_dir), o_leaf.x, 1.0);", "light_normalize(f_sun_dir), 0.0, 1.0);", 1},
           {"leaf clamp", 0, "uint a0 = min(colours[v], 8u);", "uint a0 = colours[v];", 1},
           {"leaf axis", 0, "    o.normal = N;\n    o.axis = float3(0, 0, 0);", "    o.normal = N;\n    o.axis = AmbientAxis(N, f_axis);", 1},
           {"leaf c26", 1, "lit = FogForm(lit, fog, o_leaf.z, o_leaf.w) * o_c26;", "lit = FogForm(lit, fog, o_leaf.z, o_leaf.w);", 2},
@@ -2936,15 +3165,28 @@ int main() {
           {"far fog after the fade", 3, "    lin = FogForm(lin, FogCoords(pos), 0.0, 0.0);\n  }\n  if (t_flags & 1) lin *= terrain_fade_in(world);",
            "  }\n  if (t_flags & 1) lin *= terrain_fade_in(world);\n  if (light_mode & 4) lin = FogForm(lin, FogCoords(pos), 0.0, 0.0);", 5},
           {"fog at another depth", 2, "lin = FogForm(lin, FogCoords(pos), 0.0, 0.0);", "lin = FogForm(lin, FogCoords(float4(pos.xy, 1.0, 1.0)), 0.0, 0.0);", 4},
-          {"leaf sides", 1, "vcolour, bend.x, bend.y, f_sun_col,", "vcolour, bend.y, bend.x, f_sun_col,", 2},
+          {"leaf sides", 1, "vcolour, bend.xyz, back,", "vcolour, back, bend.xyz,", 2},
           {"leaf mask literal", 1, "LeafMask(mask, 0.6, 0.4);", "LeafMask(mask, 0.6, 0.6);", 2},
           // The shadows (plan Task 5 of sub-project 8): the mask dropped from a family's sun term, put on
           // the whole colour, read at another place, or the leaf's taken as 1.
-          {"object without the mask", 1, "o_c27w, SunGateSingle(mask, 1.0), o_c49)", "o_c27w, SunGateSingle(1.0, 1.0), o_c49)", 2},
-          {"plant without the mask", 1, "f_sun_col, SunGateSingle(mask, 1.0));\n        }", "f_sun_col, SunGateSingle(1.0, 1.0));\n        }", 2},
-          {"plant-lit without the mask", 1, "                              SunGateSingle(mask, 1.0));", "                              SunGateSingle(1.0, 1.0));", 2},
+          {"object without the mask", 1, "o_c27w, SunGateSingle(mask, 1.0), o_c49,", "o_c27w, SunGateSingle(1.0, 1.0), o_c49,", 2},
+          {"plant without the mask", 1, "f_sun_col, SunGateSingle(mask, 1.0),\n                           LocalLights(",
+           "f_sun_col, SunGateSingle(1.0, 1.0),\n                           LocalLights(", 2},
+          {"plant-lit without the mask", 1, "                              SunGateSingle(mask, 1.0), LocalLights(",
+           "                              SunGateSingle(1.0, 1.0), LocalLights(", 2},
           {"leaf without the mask", 1, "LeafMask(mask, 0.6, 0.4);", "LeafMask(1.0, 0.6, 0.4);", 2},
-          {"layer without the mask", 2, "SunGateSingle(mask, facing));", "SunGateSingle(1.0, facing));", 4},
+          {"layer without the mask", 2, "SunGateSingle(mask, facing),", "SunGateSingle(1.0, facing),", 4},
+          // The local lights (plan Task 7): a lantern's shadow without the mask and the facing, the object's
+          // lanterns by the vertex normal, the layer's without its facing factor, the plants' by the unbent
+          // normal, the leaf's lantern scalars without the spot, the leaf's two sums exchanged.
+          {"LocalLight shadow", 2, "  float shadow = (1.0 - saturate(facing) * saturate(mask)) * terms.w;", "  float shadow = terms.w;", 6},
+          {"object lanterns by the vertex normal", 1, "LocalLights(world, N, mask, 1.0, light_mode));\n        lit = FogForm",
+           "LocalLights(world, normal, mask, 1.0, light_mode));\n        lit = FogForm", 2},
+          {"layer lanterns without the facing", 2, "LocalLights(world, N, mask, facing, light_mode)", "LocalLights(world, N, mask, 1.0, light_mode)", 4},
+          {"plant lanterns by the unbent normal", 1, "LocalLights(world, Np, mask, 1.0, light_mode));\n        }",
+           "LocalLights(world, normal, mask, 1.0, light_mode));\n        }", 2},
+          {"leaf lantern without the spot", 0, "LeafLight(N, view, ld, o_leaf.x, spot);", "LeafLight(N, view, ld, o_leaf.x, 1.0);", 1},
+          {"leaf sums exchanged", 0, "    o.bend = float4(front3, 0.0);\n    o.back = back3;", "    o.bend = float4(back3, 0.0);\n    o.back = front3;", 1},
           {"mask on the whole colour", 1, "      return float4(clay_lit(lit * f_exposure),", "      lit *= mask;\n      return float4(clay_lit(lit * f_exposure),", 2},
           {"mask at another place", 2, "(pos.xy - 0.5) * float2(f_mask_du, f_mask_dv), 0).r;", "(pos.xy - 0.5) * float2(f_mask_dv, f_mask_du), 0).r;", 4},
           {"mask at the pixel's centre", 2, "(pos.xy - 0.5) * float2(f_mask_du, f_mask_dv), 0).r;", "pos.xy * float2(f_mask_du, f_mask_dv), 0).r;", 4},
@@ -3118,7 +3360,9 @@ int main() {
       // light text has the fog's tail of the frame's block and the fog's functions under it, with
       // names that do nothing in its place otherwise)
       if (strstr(p.colour, "#define CLAY_DEPTH_ONLY") || Count(p.colour, "#ifdef CLAY_DEPTH_ONLY") != 1 || Count(p.colour, "#else") != 2 ||
-          Count(p.colour, "#endif") != (i == 0 ? 10 : 4) || Count(p.colour, "#ifdef CLAY_WIND") != (i == 0 ? 1 : 0) ||  // (the object block's wind tail: the textured shader's text has the block; case 52 holds its compiled bytes to those of before)
+          Count(p.colour, "#endif") != (i == 0 ? 11 : 5) || Count(p.colour, "#ifdef CLAY_WIND") != (i == 0 ? 1 : 0) ||
+          // (the local lights' sum, plan Task 7: its lanterns under the one block a program with f_lanterns has)
+          Count(p.colour, "#if defined(CLAY_FOG) || defined(CLAY_LANTERNS_VS)") != 1 ||  // (the object block's wind tail: the textured shader's text has the block; case 52 holds its compiled bytes to those of before)
           Count(p.colour, "#ifdef CLAY_COVERAGE") != (i == 0 ? 3 : 0) ||  // (the half program's three blocks, each with its #endif: the textured shader's text alone; case 53 holds the compiled bytes to those of before)
           Count(p.colour, "#ifdef CLAY_FOG") != 2 || Count(p.colour, "#ifndef CLAY_DEPTH_ONLY") != 1 ||
           Count(p.colour, "#define CLAY_FOG 1") != 1 || strstr(p.colour, "#ifndef CLAY_DEPTH_ONLY") != p.colour) return 192;
@@ -3864,7 +4108,9 @@ int main() {
       const char* flat_fog = strstr(kClayPs, "if (light_mode & 128) return float4(FogUnlit(clay_linear(base * shade) * f_post, FogCoords(pos), 1.0), 1.0);");
       const char* flat = strstr(kClayPs, "return float4(clay_linear(base * shade) * f_post, 1.0);");
       if (!flat_tree || !flat_fog || !flat || !(flat_tree < flat_fog && flat_fog < flat) || Count(kClayPs, "FogUnlit(") != 3 ||
-          Count(kClayPs, "FogUnlitTree(") != 3 || Count(kClayPs, "light_mode &") != 2) return 212;
+          // (three tests of light_mode: the flat shader's two and the local lights' sum in the shared light text,
+          // which the flat shader does not call)
+          Count(kClayPs, "FogUnlitTree(") != 3 || Count(kClayPs, "light_mode &") != 3 || Count(kClayPs, "LocalLights(") != 1) return 212;
       const char* t = kClayTexturedPs;
       const char* lit = strstr(t, "return float4(clay_lit(lit * f_exposure),");
       const char* written = strstr(t, "float3 hazed = FogUnlit(clay_linear(t.rgb * (0.75 + 0.25 * facet)) * f_post, FogCoords(pos), (light_mode & 256) ? saturate(a) : 1.0);");
@@ -4999,12 +5245,12 @@ int main() {
       uint64_t hash;
       size_t size;
     } before[] = {
-        {"clay_vs", kClayVs, "vs_5_0", 0xF2F04B1393A09DEBull, 10600},
+        {"clay_vs", kClayVs, "vs_5_0", 0x470B298411E5DC84ull, 17168},
         {"clay_ps", kClayPs, "ps_5_0", 0x641C4964951B95DDull, 8140},
-        {"clay_textured_ps", kClayTexturedPs, "ps_5_0", 0x32CE7FFFD48D9D1Full, 24024},
-        {"clay_terrain_layer_ps", kClayTerrainLayerPs, "ps_5_0", 0x16571B05FB1B94CEull, 16540},
+        {"clay_textured_ps", kClayTexturedPs, "ps_5_0", 0xDAC4C0AC029E860Eull, 42396},
+        {"clay_terrain_layer_ps", kClayTerrainLayerPs, "ps_5_0", 0xDEF0ECD91DC3278Full, 22600},
         {"clay_terrain_far_ps", kClayTerrainFarPs, "ps_5_0", 0x41A819169232191Dull, 13412},
-        {"clay_textured_depth_ps", kClayTexturedDepthPs, "ps_5_0", 0xF057CCDD7BE1C5C7ull, 6016},
+        {"clay_textured_depth_ps", kClayTexturedDepthPs, "ps_5_0", 0xCEAAF477C2ED36C6ull, 6040},
         {"clay_terrain_layer_depth_ps", kClayTerrainLayerDepthPs, "ps_5_0", 0x277FB8D3A19E5FC8ull, 5484},
         {"clay_terrain_far_depth_ps", kClayTerrainFarDepthPs, "ps_5_0", 0x1DB48924B7D66149ull, 2580},
         {"clay_shadow_ps", kClayShadowPs, "ps_5_0", 0x2AEE57793156E0D9ull, 3920},
@@ -5172,10 +5418,10 @@ int main() {
       if (!same_compiler) {
         std::cout << "coverage: NOT JUDGED: this compiler is not the one the textured programs' bytes of before were recorded with\n";
       } else {
-        if (CodeHash("clay_textured_ps", kClayTexturedPs, "ps_5_0", &size) != 0x32CE7FFFD48D9D1Full || size != 24024) return fails(__LINE__);
-        if (CodeHash("clay_textured_depth_ps", kClayTexturedDepthPs, "ps_5_0", &size) != 0xF057CCDD7BE1C5C7ull || size != 6016) return fails(__LINE__);
+        if (CodeHash("clay_textured_ps", kClayTexturedPs, "ps_5_0", &size) != 0xDAC4C0AC029E860Eull || size != 42396) return fails(__LINE__);
+        if (CodeHash("clay_textured_depth_ps", kClayTexturedDepthPs, "ps_5_0", &size) != 0xCEAAF477C2ED36C6ull || size != 6040) return fails(__LINE__);
         // (control: the half program is another program)
-        if (CodeHash("clay_textured_half_ps", kClayTexturedHalfPs, "ps_5_0", &size) == 0x32CE7FFFD48D9D1Full || size == 0) return fails(__LINE__);
+        if (CodeHash("clay_textured_half_ps", kClayTexturedHalfPs, "ps_5_0", &size) == 0xDAC4C0AC029E860Eull || size == 0) return fails(__LINE__);
       }
     }
     // The text's rule: everything of the coverage stands between #ifdef CLAY_COVERAGE and its #endif, three times
@@ -5220,7 +5466,7 @@ int main() {
         std::cerr << "the half program's alpha: " << writes << " writes of o0.w, " << halves << " of them the literal one half\n" << Code(half);
         return fails(__LINE__);
       }
-      const std::string one = Changed(kClayTexturedHalfPs, "bend).rgb, 0.5);", "bend).rgb, 1.0);");
+      const std::string one = Changed(kClayTexturedHalfPs, "bend, back).rgb, 0.5);", "bend, back).rgb, 1.0);");
       if (one.empty() || HasLineWith(Disassembly("clay_textured_half_one", one.c_str(), "ps_5_0"), "mov", "o0.w, l(0.500000)")) return fails(__LINE__);
     }
     // (d) The kept set, evaluated: the coverage block's own text (cut out of the half program) compiled with the
@@ -5353,14 +5599,14 @@ int main() {
         {"kFullscreenVs", kFullscreenVs, "vs_5_0", 0x2CA6AC1051441F86ull, 736},
         {"kPatternPs", kPatternPs, "ps_5_0", 0x335F8BDAD9F39207ull, 1036},
         {"kGridPs", kGridPs, "ps_5_0", 0xA7462A7107F0D99Eull, 784},
-        {"kClayVs", kClayVs, "vs_5_0", 0xF2F04B1393A09DEBull, 10600},
-        {"kClayWindVs", kClayWindVs, "vs_5_0", 0x3C02F85AD59F36F5ull, 19568},
+        {"kClayVs", kClayVs, "vs_5_0", 0x470B298411E5DC84ull, 17168},
+        {"kClayWindVs", kClayWindVs, "vs_5_0", 0xD0C6AE1B128880DBull, 26136},
         {"kClayPs", kClayPs, "ps_5_0", 0x641C4964951B95DDull, 8140},
-        {"kClayTexturedPs", kClayTexturedPs, "ps_5_0", 0x32CE7FFFD48D9D1Full, 24024},
-        {"kClayTexturedDepthPs", kClayTexturedDepthPs, "ps_5_0", 0xF057CCDD7BE1C5C7ull, 6016},
-        {"kClayTexturedHalfPs", kClayTexturedHalfPs, "ps_5_0", 0xB3921E3A06E393EEull, 24000},
-        {"kClayTexturedFullPs", kClayTexturedFullPs, "ps_5_0", 0xCDE38443D7C3884Aull, 24324},
-        {"kClayTerrainLayerPs", kClayTerrainLayerPs, "ps_5_0", 0x16571B05FB1B94CEull, 16540},
+        {"kClayTexturedPs", kClayTexturedPs, "ps_5_0", 0xDAC4C0AC029E860Eull, 42396},
+        {"kClayTexturedDepthPs", kClayTexturedDepthPs, "ps_5_0", 0xCEAAF477C2ED36C6ull, 6040},
+        {"kClayTexturedHalfPs", kClayTexturedHalfPs, "ps_5_0", 0x185B879EA52F6635ull, 42372},
+        {"kClayTexturedFullPs", kClayTexturedFullPs, "ps_5_0", 0x63D6F816F6369DF4ull, 42696},
+        {"kClayTerrainLayerPs", kClayTerrainLayerPs, "ps_5_0", 0xDEF0ECD91DC3278Full, 22600},
         {"kClayTerrainLayerDepthPs", kClayTerrainLayerDepthPs, "ps_5_0", 0x277FB8D3A19E5FC8ull, 5484},
         {"kClayTerrainFarPs", kClayTerrainFarPs, "ps_5_0", 0x41A819169232191Dull, 13412},
         {"kClayTerrainFarDepthPs", kClayTerrainFarDepthPs, "ps_5_0", 0x1DB48924B7D66149ull, 2580},
@@ -5675,14 +5921,14 @@ int main() {
         {"kFullscreenVs", kFullscreenVs, "vs_5_0", 0x2CA6AC1051441F86ull, 736},
         {"kPatternPs", kPatternPs, "ps_5_0", 0x335F8BDAD9F39207ull, 1036},
         {"kGridPs", kGridPs, "ps_5_0", 0xA7462A7107F0D99Eull, 784},
-        {"kClayVs", kClayVs, "vs_5_0", 0xF2F04B1393A09DEBull, 10600},
-        {"kClayWindVs", kClayWindVs, "vs_5_0", 0x3C02F85AD59F36F5ull, 19568},
+        {"kClayVs", kClayVs, "vs_5_0", 0x470B298411E5DC84ull, 17168},
+        {"kClayWindVs", kClayWindVs, "vs_5_0", 0xD0C6AE1B128880DBull, 26136},
         {"kClayPs", kClayPs, "ps_5_0", 0x641C4964951B95DDull, 8140},
-        {"kClayTexturedPs", kClayTexturedPs, "ps_5_0", 0x32CE7FFFD48D9D1Full, 24024},
-        {"kClayTexturedDepthPs", kClayTexturedDepthPs, "ps_5_0", 0xF057CCDD7BE1C5C7ull, 6016},
-        {"kClayTexturedHalfPs", kClayTexturedHalfPs, "ps_5_0", 0xB3921E3A06E393EEull, 24000},
-        {"kClayTexturedFullPs", kClayTexturedFullPs, "ps_5_0", 0xCDE38443D7C3884Aull, 24324},
-        {"kClayTerrainLayerPs", kClayTerrainLayerPs, "ps_5_0", 0x16571B05FB1B94CEull, 16540},
+        {"kClayTexturedPs", kClayTexturedPs, "ps_5_0", 0xDAC4C0AC029E860Eull, 42396},
+        {"kClayTexturedDepthPs", kClayTexturedDepthPs, "ps_5_0", 0xCEAAF477C2ED36C6ull, 6040},
+        {"kClayTexturedHalfPs", kClayTexturedHalfPs, "ps_5_0", 0x185B879EA52F6635ull, 42372},
+        {"kClayTexturedFullPs", kClayTexturedFullPs, "ps_5_0", 0x63D6F816F6369DF4ull, 42696},
+        {"kClayTerrainLayerPs", kClayTerrainLayerPs, "ps_5_0", 0xDEF0ECD91DC3278Full, 22600},
         {"kClayTerrainLayerDepthPs", kClayTerrainLayerDepthPs, "ps_5_0", 0x277FB8D3A19E5FC8ull, 5484},
         {"kClayTerrainFarPs", kClayTerrainFarPs, "ps_5_0", 0x41A819169232191Dull, 13412},
         {"kClayTerrainFarDepthPs", kClayTerrainFarDepthPs, "ps_5_0", 0x1DB48924B7D66149ull, 2580},

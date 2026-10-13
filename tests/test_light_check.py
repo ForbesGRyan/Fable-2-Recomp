@@ -547,6 +547,20 @@ class PinnedForTheRenderer(unittest.TestCase):
         # The scale is in the normal (the game does not normalise it) and not in the world position.
         self.assertAlmostEqual(cases["scaled"][0], (0.5 * 0.5976971893220461 + 0.25) / 1.25, places=12)
 
+    LANTERN = dict(pos=[95.0, 160.0, 44.0], w=1.0, col=[1.5, 0.75, 0.1], blend=1.0, range_scale=0.25,
+                   axis=[0.0, 0.0, 0.0], cone_cos=-1.0, cone_scale=1.0, shadow=0.0)
+
+    def test_lantern_pins(self):
+        P, N = [93.0, 161.0, 42.0], lf.normalize([0.3, 0.1, 1.0])
+        one = lf.local_light(P, N, **self.LANTERN)
+        two = lf.local_lights(P, N, [self.LANTERN, dict(self.LANTERN, pos=[92.0, 160.0, 43.5], shadow=0.5)], mask=0.5, facing=0.75)
+        obj = lf.lit_object(self.A, [0.5, 0.5, 0.5], self.TINT, self.TINT_POW, self.ADD, self.FLOOR, 0.5, 0.25, self.SUN_COL,
+                            c49=[1.0, 1.0, 1.0], lights=two)
+        print("LANTERN PINS", repr(one), repr(two), repr(obj))        # tests/native/test_clay_logic.cpp, cases 874 to 876, hold these
+        self.assertTrue(all(x > 0.0 for x in one))
+        # The second lantern is in range and its shadow takes the mask and the facing: the sum is more than the first.
+        self.assertTrue(all(t > o for t, o in zip(two, one)))
+
 
 LEAF_PINS = {
     "front": [0.7126408495157472, 0.0, 0.46369198767397196, 0.16310554084116385, 0.5053389422232634, 0.3507619286083685, 0.377298722969617, 0.15807905640591247],

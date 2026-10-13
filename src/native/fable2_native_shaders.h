@@ -117,8 +117,11 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
 // vertex's copy, and t12 (probe_or_bend) holds the copy's up axis and the
 // vertex's height, the inputs of the bent normal; bit 5 (with bit 4): the
 // plant's pixel shader has the ambient factor. Bit 6 (with bits 1 and 3): a
-// tree leaf, a probe record whose vertex stage also makes the sun's two
-// scalars on the side of the card the viewer sees. The three mesh blocks of
+// tree leaf, a probe record whose vertex stage also makes the light's two
+// colour sums on the side of the card the viewer sees. Bit 11 (kLightModeLanterns,
+// with the range of the frame's lanterns in bits 16 to 24): the draw's lanterns
+// are added beside the sun, by the lit pixel paths (LocalLights) and by the leaf's
+// vertex sums; at most six, each under its own test. The three mesh blocks of
 // the vertex shader exclude each other by these bits (clay_logic.h,
 // LightModeBlockOf). A light buffer is read only for a vertex below
 // light_count, and only by a draw whose light_mode names it: the reads are
@@ -273,17 +276,53 @@ float3 light_ambient(float3 base, float3 tint, float tint_pow, float3 add, float
 float3 light_sun(float3 sun_col, float n_dot_sun, float sun_gate) {
   return sun_col * (saturate(n_dot_sun) * sun_gate);
 }
+// One local light (light_formulas.local_light): pos_w = (c(80+j).xyz, w), col_blend = (c(87+j).xyz, c94[j]),
+// terms = (c96[j], c105[j], c107[j], c112[j]), axis = c(98+j).xyz. The distance is d2 * rsqrt(d2), as the
+// fog's: the pixel shaders call no square root.
+float3 LocalLight(float3 P, float3 N, float4 pos_w, float4 col_blend, float4 terms, float3 axis, float mask, float facing) {
+  float3 v = pos_w.xyz - P * pos_w.w;
+  float d2 = dot(v, v);
+  float d = (d2 > 0.0 && d2 < 3.0e38) ? d2 * rsqrt(d2) : 0.0;
+  float3 l = light_normalize(v);
+  float n_dot = saturate(dot(N, l));
+  float shadow = (1.0 - saturate(facing) * saturate(mask)) * terms.w;
+  float rng = saturate(1.0 - d * terms.x);
+  float cone = saturate((dot(l, axis) - terms.y) * terms.z);
+  float gate = (1.0 - shadow) * (1.0 + col_blend.w * (cone * rng - 1.0));
+  return col_blend.xyz * (n_dot * gate);
+}
+// The sum over the draw's lanterns (light_formulas.local_lights): the range in the draw word's upper
+// bits (kLightModeLanterns, LightModeLanterns in clay_logic.h); nothing without the bit. At most six
+// (kMaxLightSetLanterns), unrolled, each under its own test: no clay shader has a loop, and no lantern
+// past the frame's 64 is read (the buffer is bound by address). A program that declares no f_lanterns
+// (the depth-only programs) has the sum without the lanterns: nothing.
+float3 LocalLights(float3 P, float3 N, float mask, float facing, uint light_mode) {
+  float3 sum = float3(0.0, 0.0, 0.0);
+#if defined(CLAY_FOG) || defined(CLAY_LANTERNS_VS)
+  [branch] if (light_mode & 2048) {
+    uint first = (light_mode >> 16) & 63;
+    uint count = (light_mode >> 22) & 7;
+    [unroll] for (uint j = 0; j < 6; ++j) {
+      [branch] if (j < count && first + j < 64) {
+        uint at = (first + j) * 4;
+        sum += LocalLight(P, N, f_lanterns[at], f_lanterns[at + 1], f_lanterns[at + 2], f_lanterns[at + 3].xyz, mask, facing);
+      }
+    }
+  }
+#endif
+  return sum;
+}
 float3 LightTerrainLayer(float3 A, float3 baked, float3 tint, float tint_pow, float3 add, float3 amb_floor, float t,
-                         float n_dot_sun, float3 sun_col, float c11x, float sun_gate) {
-  return A * (c11x * light_ambient(baked, tint, tint_pow, add, amb_floor, t) + light_sun(sun_col, n_dot_sun, sun_gate));
+                         float n_dot_sun, float3 sun_col, float c11x, float sun_gate, float3 lights) {
+  return A * (c11x * light_ambient(baked, tint, tint_pow, add, amb_floor, t) + light_sun(sun_col, n_dot_sun, sun_gate) + lights);
 }
 float3 LightTerrainFar(float3 F, float3 baked, float3 tint, float tint_pow, float3 add, float3 amb_floor, float t,
                        float n_dot_sun, float3 sun_col, float c11x) {
   return F * (light_ambient(baked, tint, tint_pow, add, amb_floor, t) + c11x * light_sun(sun_col, n_dot_sun, 1.0));
 }
 float3 LightObject(float3 A, float3 vcolour, float3 tint, float tint_pow, float3 add, float3 amb_floor, float t,
-                   float n_dot_sun, float3 sun_col, float c27w, float sun_gate, float3 c49) {
-  return A * (c27w * light_ambient(vcolour, tint, tint_pow, add, amb_floor, t) + light_sun(sun_col, n_dot_sun, sun_gate)) * c49;
+                   float n_dot_sun, float3 sun_col, float c27w, float sun_gate, float3 c49, float3 lights) {
+  return A * (c27w * light_ambient(vcolour, tint, tint_pow, add, amb_floor, t) + light_sun(sun_col, n_dot_sun, sun_gate) + lights) * c49;
 }
 // The instanced plants (lighting-formulas.md, "Instanced plants"; the mirrors are in clay_logic.h). The
 // game's vertex shaders make the colour of the vertex's copy and the bend of the normal, its pixel
@@ -300,18 +339,20 @@ float3 PlantNormal(float3 normal, float4 bend) {
   float3 n = light_normalize(normal);
   return light_normalize(n + (bend.xyz - n) * saturate(bend.w));
 }
-float3 LightPlant(float3 A, float3 vs_ambient, float n_dot_sun, float3 sun_col, float sun_gate) {
-  return A * (vs_ambient + light_sun(sun_col, n_dot_sun, sun_gate));
+float3 LightPlant(float3 A, float3 vs_ambient, float n_dot_sun, float3 sun_col, float sun_gate, float3 lights) {
+  return A * (vs_ambient + light_sun(sun_col, n_dot_sun, sun_gate) + lights);
 }
 float3 LightPlantLit(float3 A, float3 vs_base, float3 add, float3 amb_floor, float t, float n_dot_sun, float3 sun_col,
-                     float sun_gate) {
-  return A * (vs_base * AmbientFactor(amb_floor, t) + add + light_sun(sun_col, n_dot_sun, sun_gate));
+                     float sun_gate, float3 lights) {
+  return A * (vs_base * AmbientFactor(amb_floor, t) + add + light_sun(sun_col, n_dot_sun, sun_gate) + lights);
 }
 // The tree leaves (lighting-formulas.md, "Tree leaves"; the mirrors are in clay_logic.h). The game's leaf
 // vertex shaders make the ambient and the light's two scalars on the side of the card the viewer sees
 // (the cards are drawn without culling; the normal, used as it is, is turned to the viewer); its pixel
 // shader adds them on the albedo, the back light on leaf texels only. Split the same way. The one
 // division of the light is LeafLight's by 1 + wrap (the pass refuses a draw whose wrap is negative).
+// LightLeaf takes the two colour sums of the vertex side (light_formulas.tree_leaf_sums): front3 the sum
+// over the lights of colour * front, back3 the same of back.
 float2 LeafLight(float3 normal, float3 view, float3 light_dir, float wrap, float spot) {
   float3 n = (dot(view, normal) < 0.0) ? -normal : normal;
   float nl = dot(light_dir, n);
@@ -324,10 +365,9 @@ float2 LeafMask(float mask, float gain, float bias) {
   float m1 = saturate(mask) * gain + bias;
   return float2(m1, m1 * gain + bias);
 }
-float3 LightLeaf(float3 A, float3 vs_ambient, float front, float back, float3 sun_col, float c27w, float m1, float m2,
-                 float3 c49) {
+float3 LightLeaf(float3 A, float3 vs_ambient, float3 front3, float3 back3, float c27w, float m1, float m2, float3 c49) {
   float green = (A.g >= A.r) ? 1.0 : 0.0;
-  return (A * (vs_ambient * c27w + m1 * sun_col * front) + green * A * m2 * sun_col * back) * c49;
+  return (A * (vs_ambient * c27w + m1 * front3) + green * A * m2 * back3) * c49;
 }
 // What a lit draw writes: the value itself, a number, not negative, at most 64 (ClayLit in clay_logic.h).
 float3 clay_lit(float3 v) { return (v > 0.0) ? min(v, 64.0) : float3(0.0, 0.0, 0.0); }
@@ -555,6 +595,7 @@ struct VsOut {
   float3 axis : TEXCOORD4;
   float3 vcolour : TEXCOORD5;
   float4 bend : TEXCOORD6;
+  float3 back : TEXCOORD7;
 };
 VsOut main(uint vid : SV_VertexID) {
   VsOut o;
@@ -602,6 +643,7 @@ VsOut main(uint vid : SV_VertexID) {
   o.axis = float3(0, 0, 0);
   o.vcolour = float3(0, 0, 0);
   o.bend = float4(0, 0, 0, 0);
+  o.back = float3(0, 0, 0);
   bool has_light = in_range && uint(v) < light_count;
 #ifndef CLAY_WIND
   [branch] if ((light_mode & 1) && has_light) {
@@ -659,9 +701,11 @@ VsOut main(uint vid : SV_VertexID) {
     // A tree leaf, as the game's leaf vertex shaders: the normal through the rows, as it is; the probe
     // colour (the set at t11 clamped, the weights at t12) raised to c18.w * 0.4545 (2.2 * c21.w * 0.4545)
     // times c18.xyz (c21.xyz) plus c54.xyz (c20.xyz); the world position (M p) / c7.w + c4..c6 .w and
-    // the unit vector from it to the eye; and the sun's two scalars on the side of the card the viewer
-    // sees (the frame's sun stands in the vertex side's light set: a direction, no cone, no range), in
-    // the first two components of the bend's interpolator. A leaf has no vector of t.
+    // the unit vector from it to the eye; and the light's two colour sums on the side of the card the
+    // viewer sees: the frame's sun (a direction, no cone, no range) and, under light_mode's lantern bit,
+    // the draw's lanterns (leaf_light with spot = 1 + c90[j] * (cone * range - 1): the vertex side's
+    // light set is the pixel side's four registers lower), front3 in the bend's interpolator, back3 in
+    // `back`. A leaf has no vector of t.
     float3 n = normals[v];
     float3 N = float3(dot(o_rot0.xyz, n), dot(o_rot1.xyz, n), dot(o_rot2.xyz, n));
     o.normal = N;
@@ -672,7 +716,31 @@ VsOut main(uint vid : SV_VertexID) {
     o.vcolour = InstanceAmbient(probe, f_tint, o_colour_power * f_tint_pow, f_add);
     o.world = float3(dot(o_rot0.xyz, p.xyz), dot(o_rot1.xyz, p.xyz), dot(o_rot2.xyz, p.xyz)) * o_leaf.y +
               float3(o_rot0.w, o_rot1.w, o_rot2.w);
-    o.bend = float4(LeafLight(N, light_normalize(f_eye - o.world), light_normalize(f_sun_dir), o_leaf.x, 1.0), 0, 0);
+    float3 view = light_normalize(f_eye - o.world);
+    float2 sun_fb = LeafLight(N, view, light_normalize(f_sun_dir), o_leaf.x, 1.0);
+    float3 front3 = f_sun_col * sun_fb.x, back3 = f_sun_col * sun_fb.y;
+    [branch] if (light_mode & 2048) {
+      uint first = (light_mode >> 16) & 63;
+      uint count = (light_mode >> 22) & 7;
+      [unroll] for (uint j = 0; j < 6; ++j) {
+        [branch] if (j < count && first + j < 64) {
+          uint at = (first + j) * 4;
+          float4 pos_w = f_lanterns[at], col_blend = f_lanterns[at + 1], terms = f_lanterns[at + 2];
+          float3 v = pos_w.xyz - o.world * pos_w.w;
+          float d2 = dot(v, v);
+          float d = (d2 > 0.0 && d2 < 3.0e38) ? d2 * rsqrt(d2) : 0.0;
+          float3 ld = light_normalize(v);
+          float rng = saturate(1.0 - d * terms.x);
+          float cone = saturate((dot(ld, f_lanterns[at + 3].xyz) - terms.y) * terms.z);
+          float spot = 1.0 + col_blend.w * (cone * rng - 1.0);
+          float2 fb = LeafLight(N, view, ld, o_leaf.x, spot);
+          front3 += col_blend.xyz * fb.x;
+          back3 += col_blend.xyz * fb.y;
+        }
+      }
+    }
+    o.bend = float4(front3, 0.0);
+    o.back = back3;
   }
   return o;
 }
@@ -818,7 +886,7 @@ float3 clay_linear(float3 d) { d = saturate(d); return d * d; }
 #endif
 float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOORD1, float3 world : TEXCOORD2,
             float3 normal : TEXCOORD3, float3 axis : TEXCOORD4, float3 vcolour : TEXCOORD5,
-            float4 bend : TEXCOORD6) : SV_Target {
+            float4 bend : TEXCOORD6, float3 back : TEXCOORD7) : SV_Target {
   float3 n = normalize(cross(ddx(ndc), ddy(ndc)));
   float facet = saturate(abs(dot(n, normalize(float3(0.4, 0.6, -0.7)))));
   float3 base;
@@ -871,23 +939,25 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
         float3 Np = PlantNormal(normal, bend);
         if (light_mode & 32) {
           lit = LightPlantLit(clay_linear(t.rgb), vcolour, f_add, f_floor, AmbientT(axis, Np), dot(Np, f_sun_dir), f_sun_col,
-                              SunGateSingle(mask, 1.0));
+                              SunGateSingle(mask, 1.0), LocalLights(world, Np, mask, 1.0, light_mode));
         } else {
-          lit = LightPlant(clay_linear(t.rgb), vcolour, dot(Np, f_sun_dir), f_sun_col, SunGateSingle(mask, 1.0));
+          lit = LightPlant(clay_linear(t.rgb), vcolour, dot(Np, f_sun_dir), f_sun_col, SunGateSingle(mask, 1.0),
+                           LocalLights(world, Np, mask, 1.0, light_mode));
         }
         lit = FogForm(lit, fog, 0.0, 0.0);
       } else if (light_mode & 64) {
-        // A tree leaf: the vertex side's ambient and the sun's two scalars (bend.x front, bend.y back)
+        // A tree leaf: the vertex side's ambient and the light's two colour sums (bend.xyz front, back)
         // on A, the back light on leaf texels only; the mask through the shader's two literals (0.6
         // and 0.4: once on the front light, twice on the back light; both factors are 1 at a mask
         // of 1); c27.w, c49 and c26 as an object's.
         float2 m = LeafMask(mask, 0.6, 0.4);
-        lit = LightLeaf(clay_linear(t.rgb), vcolour, bend.x, bend.y, f_sun_col, o_c27w, m.x, m.y, o_c49);
+        lit = LightLeaf(clay_linear(t.rgb), vcolour, bend.xyz, back, o_c27w, m.x, m.y, o_c49);
         lit = FogForm(lit, fog, o_leaf.z, o_leaf.w) * o_c26;
       } else {
         float3 N = light_normalize(normal);
         lit = LightObject(clay_linear(t.rgb), vcolour, f_tint, f_tint_pow, f_add, f_floor, AmbientT(axis, normal),
-                          dot(N, f_sun_dir), f_sun_col, o_c27w, SunGateSingle(mask, 1.0), o_c49);
+                          dot(N, f_sun_dir), f_sun_col, o_c27w, SunGateSingle(mask, 1.0), o_c49,
+                          LocalLights(world, N, mask, 1.0, light_mode));
         lit = FogForm(lit, fog, o_leaf.z, o_leaf.w) * o_c26;
       }
       return float4(clay_lit(lit * f_exposure), (alpha_mode & 0x80) ? saturate(a) : 1.0);
@@ -913,8 +983,8 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
 #undef main
 float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOORD1, float3 world : TEXCOORD2,
             float3 normal : TEXCOORD3, float3 axis : TEXCOORD4, float3 vcolour : TEXCOORD5,
-            float4 bend : TEXCOORD6) : SV_Target {
-  return float4(clay_textured(pos, ndc, uv, world, normal, axis, vcolour, bend).rgb, 0.5);
+            float4 bend : TEXCOORD6, float3 back : TEXCOORD7) : SV_Target {
+  return float4(clay_textured(pos, ndc, uv, world, normal, axis, vcolour, bend, back).rgb, 0.5);
 }
 #endif
 #endif
@@ -982,8 +1052,8 @@ inline constexpr const char* kClayTexturedFullPs = "#define CLAY_COVERAGE 2\n" F
 // linear curve before the shader sees it (base_linear, under the record's word t_base_gamma:
 // TerrainBaseGamma in clay_logic.h; frame-map section 17, "The base map's gamma sign"). Read as stored,
 // the ambient part of all lit ground was 1.8 to 2.5 times the game's.
-// Not read: the fog, the normal maps tf2 and tf14, the lanterns of the two- and
-// four-light shaders.
+// Not read: the fog, the normal maps tf2 and tf14. The lanterns of the two- and four-light shaders: the
+// layer's, under light_mode's lantern bit (LocalLights, beside the sun with its facing factor).
 // kClayTerrainLayerDepthPs and kClayTerrainFarDepthPs are the two texts compiled with CLAY_DEPTH_ONLY,
 // the depth pre-pass's shaders for terrain records: the same alpha (the layer's weight times its fade, the
 // hole's discard) and the same alpha test and alpha-to-mask, then a return without light or colour.
@@ -1147,7 +1217,8 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
     // The sun's shadow at the pixel, on the sun term with the facing factor.
     float mask = shadow_mask.SampleLevel(s_linear_clamp, (pos.xy - 0.5) * float2(f_mask_du, f_mask_dv), 0).r;
     lin = LightTerrainLayer(lin, sample_base(base_at, base_d).rgb, f_tint, f_tint_pow, f_add, f_floor,
-                            AmbientT(axis, normal), dot(N, f_sun_dir), f_sun_col, t_c11x, SunGateSingle(mask, facing));
+                            AmbientT(axis, normal), dot(N, f_sun_dir), f_sun_col, t_c11x, SunGateSingle(mask, facing),
+                            LocalLights(world, N, mask, facing, light_mode));
     // The fog (the ground form), on the layer's own colour before its blend, as the game fogs each layer.
     lin = FogForm(lin, FogCoords(pos), 0.0, 0.0);
   }

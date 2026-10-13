@@ -4449,6 +4449,82 @@ static void LanternBufferTests() {
   }
 }
 
+// The local lights' functions (local lights, plan Task 7; clay_logic.h, LocalLight, LocalLights and the
+// families' `lights`). Numbered 874 on.
+static void LocalLightTests() {
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  const float inf = std::numeric_limits<float>::infinity();
+  // Within single precision of the reference's double (relative, with a floor for values at 0).
+  auto within = [](float got, double want) { return std::fabs(double(got) - want) <= 1e-6 * std::max(1.0, std::fabs(want)); };
+  auto within3 = [&](const Float3& got, double x, double y, double z) { return within(got.x, x) && within(got.y, y) && within(got.z, z); };
+  auto finite3 = [](const Float3& v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); };
+  // 874-876: tests/test_light_check.py, PinnedForTheRenderer.test_lantern_pins, the same inputs: one lantern
+  // without cone (axis 0, cone_cos -1: the cone is 1) and with blend 1 (the gate is the range), and a second in
+  // range whose shadow takes the mask and the facing.
+  capture::LocalLight l[2]{};
+  l[0].pos[0] = 95.0f; l[0].pos[1] = 160.0f; l[0].pos[2] = 44.0f; l[0].w = 1.0f;
+  l[0].col[0] = 1.5f; l[0].col[1] = 0.75f; l[0].col[2] = 0.1f; l[0].blend = 1.0f;
+  l[0].range = 0.25f; l[0].cone_cos = -1.0f; l[0].cone_scale = 1.0f; l[0].shadow = 0.0f;
+  l[1] = l[0];
+  l[1].pos[0] = 92.0f; l[1].pos[1] = 160.0f; l[1].pos[2] = 43.5f; l[1].shadow = 0.5f;
+  const Float3 P{93.0f, 161.0f, 42.0f};
+  const Float3 N = LightNormalize({0.3f, 0.1f, 1.0f});
+  const Float3 one = LocalLight(P, N, l[0], 1.0f, 1.0f);
+  CHECK(874, within3(one, 0.2979570591392475, 0.14897852956962376, 0.019863803942616505));
+  const Float3 two = LocalLights(P, N, l, 2, 0.5f, 0.75f);
+  CHECK(875, within3(two, 0.5522063913854601, 0.27610319569273006, 0.03681375942569735));
+  // (none, and no buffer: nothing)
+  const Float3 none = LocalLights(P, N, l, 0, 0.5f, 0.75f), no_buffer = LocalLights(P, N, nullptr, 2, 1.0f, 1.0f);
+  CHECK(875, none.x == 0.0f && none.y == 0.0f && none.z == 0.0f && no_buffer.x == 0.0f && no_buffer.y == 0.0f && no_buffer.z == 0.0f);
+  const Float3 tint{1.125f, 1.375f, 1.875f}, add{0.0068f, 0.071f, 0.092f}, floor{0.0588f, 0.0902f, 0.0f};
+  const Float3 sun_col{0.99f, 0.83f, 0.40f}, c49{1.0f, 1.0f, 1.0f};
+  const Float3 obj = LightObject({0.36f, 0.25f, 0.16f}, {0.5f, 0.5f, 0.5f}, tint, 1.3f, add, floor, 0.5f, 0.25f, sun_col, 1.0f, 1.0f, c49, two);
+  CHECK(876, within3(obj, 0.3387161954268603, 0.1829966069033097, 0.06706966637147041));
+  // (the default is no lights: the function of before; each family adds A * lights beside its sun term)
+  const Float3 bare = LightObject({0.36f, 0.25f, 0.16f}, {0.5f, 0.5f, 0.5f}, tint, 1.3f, add, floor, 0.5f, 0.25f, sun_col, 1.0f, 1.0f, c49);
+  CHECK(876, within3(bare, obj.x - 0.36 * two.x, obj.y - 0.25 * two.y, obj.z - 0.16 * two.z));
+  const Float3 A{0.5f, 0.5f, 0.5f}, base{0.25f, 0.5f, 1.0f}, lights{0.25f, 0.5f, 0.75f}, zero{0.0f, 0.0f, 0.0f};
+  Float3 a = LightTerrainLayer(A, base, tint, 1.0f, zero, zero, 1.0f, 0.5f, sun_col, 0.75f, 0.5f, lights);
+  Float3 b = LightTerrainLayer(A, base, tint, 1.0f, zero, zero, 1.0f, 0.5f, sun_col, 0.75f, 0.5f);
+  CHECK(876, within3(a, b.x + 0.125, b.y + 0.25, b.z + 0.375));
+  a = LightPlant(A, base, 0.5f, sun_col, 0.5f, lights);
+  b = LightPlant(A, base, 0.5f, sun_col, 0.5f);
+  CHECK(876, within3(a, b.x + 0.125, b.y + 0.25, b.z + 0.375));
+  a = LightPlantLit(A, base, add, floor, 0.5f, 0.5f, sun_col, 0.5f, lights);
+  b = LightPlantLit(A, base, add, floor, 0.5f, 0.5f, sun_col, 0.5f);
+  CHECK(876, within3(a, b.x + 0.125, b.y + 0.25, b.z + 0.375));
+  // 876: numbers for any input (NaN and infinite positions, colours, terms, normals, mask and facing).
+  {
+    capture::LocalLight bad[3]{};
+    bad[0].pos[0] = nan; bad[0].pos[1] = inf; bad[0].w = 1.0f; bad[0].col[0] = inf; bad[0].col[1] = nan; bad[0].col[2] = 1.0f;
+    bad[0].range = nan; bad[0].cone_scale = inf; bad[0].shadow = nan; bad[0].blend = 1.0f;
+    bad[1] = l[0]; bad[1].axis[0] = nan; bad[1].cone_cos = -inf; bad[1].blend = inf; bad[1].w = inf;
+    bad[2] = l[0]; bad[2].pos[0] = 3.0e38f; bad[2].pos[1] = -3.0e38f; bad[2].col[0] = 3.0e38f; bad[2].range = 0.0f; bad[2].blend = 0.0f;
+    const Float3 badv{nan, inf, -inf};
+    CHECK(876, finite3(LocalLights(badv, badv, bad, 3, nan, inf)) && finite3(LocalLights(P, N, bad, 3, inf, -inf)) &&
+                   finite3(LocalLights({inf, 0.0f, 0.0f}, {nan, 0.0f, 0.0f}, bad, 3, 0.5f, 0.5f)) &&
+                   finite3(LocalLights({1.0e30f, 1.0e30f, 1.0e30f}, N, bad, 3, 1.0f, 1.0f)) &&
+                   finite3(LightObject(A, base, tint, 1.0f, zero, zero, 1.0f, 0.5f, sun_col, 1.0f, 1.0f, c49, badv)) &&
+                   finite3(LightTerrainLayer(A, base, tint, 1.0f, zero, zero, 1.0f, 0.5f, sun_col, 1.0f, 1.0f, badv)) &&
+                   finite3(LightPlant(A, base, 0.5f, sun_col, 1.0f, badv)) &&
+                   finite3(LightPlantLit(A, base, add, floor, 0.5f, 0.5f, sun_col, 1.0f, badv)));
+  }
+  // 877: the leaf's colour sums: the sun's sums with a lantern's added are the sun's leaf plus the
+  // lantern's light on the same texel (no second ambient), the back light still on leaf texels only.
+  {
+    const Float3 leaf{0.25f, 0.5f, 0.25f}, twig{0.5f, 0.25f, 0.25f}, amb{0.5f, 0.5f, 0.5f}, tone{1.0f, 0.5f, 2.0f};
+    const Float3 sun_front{1.0f, 1.0f, 1.0f}, sun_back{0.5f, 0.5f, 0.5f}, lamp_front{0.5f, 0.25f, 0.0f}, lamp_back{0.25f, 0.5f, 1.0f};
+    for (const Float3& t : {leaf, twig}) {
+      const Float3 both = LightLeaf(t, amb, {1.5f, 1.25f, 1.0f}, {0.75f, 1.0f, 1.5f}, 0.5f, 0.75f, 0.875f, tone);
+      const Float3 sun = LightLeaf(t, amb, sun_front, sun_back, 0.5f, 0.75f, 0.875f, tone);
+      const Float3 lamp = LightLeaf(t, zero, lamp_front, lamp_back, 0.5f, 0.75f, 0.875f, tone);
+      CHECK(877, both.x == sun.x + lamp.x && both.y == sun.y + lamp.y && both.z == sun.z + lamp.z);
+    }
+    CHECK(877, LightLeaf(twig, zero, zero, lamp_back, 0.5f, 0.75f, 0.875f, tone).z == 0.0f &&
+                   LightLeaf(leaf, zero, zero, lamp_back, 0.5f, 0.75f, 0.875f, tone).z == 0.25f * 0.875f * 1.0f * 2.0f);
+  }
+}
+
 int main() {
   // 1-4: clay color cvar parsing.
   {
@@ -8422,7 +8498,9 @@ int main() {
       out.amb = InstanceAmbient(ProbeColour(c.probe, a0, weights), tint, c.colour_power * 1.3f, add);
       // The pixel side.
       const LeafMasks m = LeafMask(1.0f, kLeafMaskGain, kLeafMaskBias);
-      const Float3 lit = LightLeaf(A, out.amb, s.front, s.back, sun_col, c.c27w, m.m1, m.m2, {c.c49[0], c.c49[1], c.c49[2]});
+      const Float3 lit = LightLeaf(A, out.amb, {sun_col.x * s.front, sun_col.y * s.front, sun_col.z * s.front},
+                                   {sun_col.x * s.back, sun_col.y * s.back, sun_col.z * s.back}, c.c27w, m.m1, m.m2,
+                                   {c.c49[0], c.c49[1], c.c49[2]});
       out.colour = {lit.x * c.c26[0], lit.y * c.c26[1], lit.z * c.c26[2]};
       return out;
     };
@@ -8493,11 +8571,11 @@ int main() {
       CHECK(525, m.m1 == 0.4f && close_to(m.m2, 0.64));
       m = LeafMask(7.0f, 0.5f, 0.0f);  // (the mask is clamped)
       CHECK(525, m.m1 == 0.5f && m.m2 == 0.25f);
-      // (A * (amb * c27w + m1 * sun * front) + green * A * m2 * sun * back) * c49:
+      // (A * (amb * c27w + m1 * front3) + green * A * m2 * back3) * c49, front3 = sun * front, back3 = sun * back:
       // a * (0.5 * 0.5 + 0.75 * 2 * 0.5) = a; + a * 0.875 * 2 * 0.25 = 0.4375 a where green >= red.
-      Float3 c = LightLeaf({0.25f, 0.5f, 0.25f}, {0.5f, 0.5f, 0.5f}, 0.5f, 0.25f, {2.0f, 2.0f, 2.0f}, 0.5f, 0.75f, 0.875f, {1.0f, 0.5f, 2.0f});
+      Float3 c = LightLeaf({0.25f, 0.5f, 0.25f}, {0.5f, 0.5f, 0.5f}, {1.0f, 1.0f, 1.0f}, {0.5f, 0.5f, 0.5f}, 0.5f, 0.75f, 0.875f, {1.0f, 0.5f, 2.0f});
       CHECK(525, c.x == 0.359375f && c.y == 0.359375f && c.z == 0.71875f);
-      c = LightLeaf({0.5f, 0.25f, 0.25f}, {0.5f, 0.5f, 0.5f}, 0.5f, 0.25f, {2.0f, 2.0f, 2.0f}, 0.5f, 0.75f, 0.875f, {1.0f, 0.5f, 2.0f});
+      c = LightLeaf({0.5f, 0.25f, 0.25f}, {0.5f, 0.5f, 0.5f}, {1.0f, 1.0f, 1.0f}, {0.5f, 0.5f, 0.5f}, 0.5f, 0.75f, 0.875f, {1.0f, 0.5f, 2.0f});
       CHECK(525, c.x == 0.5f && c.y == 0.125f && c.z == 0.5f);
       // The world position and the view: (M p) / c7.w + T; the unit vector to the eye, zero in the eye.
       ClayObjectConstants k;
@@ -8531,9 +8609,9 @@ int main() {
       for (const LeafMasks& m : {LeafMask(nan, inf, nan), LeafMask(1.0f, 1.0e30f, 1.0e30f), LeafMask(0.5f, -inf, inf), LeafMask(1.0f, 3.0e38f, 3.0e38f)}) {
         CHECK(526, std::isfinite(m.m1) && std::isfinite(m.m2));
       }
-      CHECK(526, finite3(LightLeaf(bad, bad, nan, inf, bad, inf, nan, inf, bad)) &&
-                     finite3(LightLeaf({1.0e30f, 1.0e30f, 1.0e30f}, {1.0e30f, 1.0e30f, 1.0e30f}, 1.0e30f, 1.0e30f, {1.0e30f, 1.0e30f, 1.0e30f},
-                                       1.0e30f, 1.0e30f, 1.0e30f, {1.0e30f, 1.0e30f, 1.0e30f})));
+      CHECK(526, finite3(LightLeaf(bad, bad, bad, {inf, nan, -inf}, inf, nan, inf, bad)) &&
+                     finite3(LightLeaf({1.0e30f, 1.0e30f, 1.0e30f}, {1.0e30f, 1.0e30f, 1.0e30f}, {1.0e30f, 1.0e30f, 1.0e30f},
+                                       {1.0e30f, 1.0e30f, 1.0e30f}, 1.0e30f, 1.0e30f, 1.0e30f, {1.0e30f, 1.0e30f, 1.0e30f})));
       CHECK(526, finite3(LeafView(bad, bad)) && finite3(LeafView({3.0e38f, -3.0e38f, 0.0f}, {-3.0e38f, 3.0e38f, 0.0f})));
       ClayObjectConstants k{};
       k.rot[0][0] = nan; k.rot[1][3] = inf; k.leaf[1] = nan;
@@ -13481,6 +13559,7 @@ int main() {
   WaterTests();
   ReflectionTargetTests();
   std::thread(LanternBufferTests).join();
+  std::thread(LocalLightTests).join();
   if (g_fail) return g_fail;
   std::cout << "PASS: clay color, keys, vertex counts, index ranges, constants, status text, "
                "uv keys, texture text, instanced keys, pipeline keys and slots, draw state, alpha constants, "

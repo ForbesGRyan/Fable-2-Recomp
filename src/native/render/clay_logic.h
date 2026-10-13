@@ -2654,15 +2654,17 @@ inline Float3 Sun(const Float3& sun_col, float n_dot_sun, float sun_gate) {
 }
 }  // namespace light_detail
 
-// Terrain layers: A * c11x * (pow(baked, tint_pow) * tint * L + add) + A * sun_col * n_dot_sun * sun_gate.
+// Terrain layers: A * c11x * (pow(baked, tint_pow) * tint * L + add) + A * sun_col * n_dot_sun * sun_gate,
+// plus A * lights (the sum of the local lights, LocalLights; light_formulas.terrain_layer's `lights`).
 inline Float3 LightTerrainLayer(const Float3& A, const Float3& baked, const Float3& tint, float tint_pow,
                                 const Float3& add, const Float3& floor, float t, float n_dot_sun,
-                                const Float3& sun_col, float c11x, float sun_gate) {
+                                const Float3& sun_col, float c11x, float sun_gate, const Float3& lights = {0.0f, 0.0f, 0.0f}) {
   const Float3 amb = light_detail::Ambient(baked, tint, tint_pow, add, floor, t);
   const Float3 sun = light_detail::Sun(sun_col, n_dot_sun, sun_gate);
   const float k = LightFinite(c11x);
-  return {LightFinite(LightFinite(A.x) * (k * amb.x + sun.x)), LightFinite(LightFinite(A.y) * (k * amb.y + sun.y)),
-          LightFinite(LightFinite(A.z) * (k * amb.z + sun.z))};
+  return {LightFinite(LightFinite(A.x) * (k * amb.x + sun.x + LightFinite(lights.x))),
+          LightFinite(LightFinite(A.y) * (k * amb.y + sun.y + LightFinite(lights.y))),
+          LightFinite(LightFinite(A.z) * (k * amb.z + sun.z + LightFinite(lights.z)))};
 }
 
 // Far terrain: F * (pow(baked, tint_pow) * tint * L + add) + F * c11x * sun_col * n_dot_sun.
@@ -2676,16 +2678,47 @@ inline Float3 LightTerrainFar(const Float3& F, const Float3& baked, const Float3
           LightFinite(LightFinite(F.z) * (amb.z + k * sun.z))};
 }
 
-// Lit objects: (A * c27w * (pow(vcolour, tint_pow) * tint * L + add) + A * sun_col * n_dot_sun * sun_gate) * c49.
+// Lit objects: (A * c27w * (pow(vcolour, tint_pow) * tint * L + add) + A * sun_col * n_dot_sun * sun_gate
+// + A * lights) * c49, lights the sum of the local lights (LocalLights; light_formulas.lit_object's `lights`).
 inline Float3 LightObject(const Float3& A, const Float3& vcolour, const Float3& tint, float tint_pow,
                           const Float3& add, const Float3& floor, float t, float n_dot_sun, const Float3& sun_col,
-                          float c27w, float sun_gate, const Float3& c49) {
+                          float c27w, float sun_gate, const Float3& c49, const Float3& lights = {0.0f, 0.0f, 0.0f}) {
   const Float3 amb = light_detail::Ambient(vcolour, tint, tint_pow, add, floor, t);
   const Float3 sun = light_detail::Sun(sun_col, n_dot_sun, sun_gate);
   const float k = LightFinite(c27w);
-  return {LightFinite(LightFinite(A.x) * (k * amb.x + sun.x) * LightFinite(c49.x)),
-          LightFinite(LightFinite(A.y) * (k * amb.y + sun.y) * LightFinite(c49.y)),
-          LightFinite(LightFinite(A.z) * (k * amb.z + sun.z) * LightFinite(c49.z))};
+  return {LightFinite(LightFinite(A.x) * (k * amb.x + sun.x + LightFinite(lights.x)) * LightFinite(c49.x)),
+          LightFinite(LightFinite(A.y) * (k * amb.y + sun.y + LightFinite(lights.y)) * LightFinite(c49.y)),
+          LightFinite(LightFinite(A.z) * (k * amb.z + sun.z + LightFinite(lights.z)) * LightFinite(c49.z))};
+}
+
+// One local light (light_formulas.local_light; the shaders' LocalLight), slot j of the two-, four- and
+// seven-light shaders read as the sun's slot is read:
+//   V = pos - P * w,  n_dot = sat(N . normalize(V)),  shadow = (1 - sat(facing) * sat(mask)) * shadow_j,
+//   range = sat(1 - |V| * range_j),  cone = sat((normalize(V) . axis - cone_cos) * cone_scale),
+//   gate = (1 - shadow) * (1 + blend * (cone * range - 1)),  term = col * n_dot * gate.
+// P the world position, N the unit normal. A number for any input.
+inline Float3 LocalLight(const Float3& P, const Float3& N, const capture::LocalLight& l, float mask, float facing) {
+  const Float3 v{LightFinite(l.pos[0] - P.x * l.w), LightFinite(l.pos[1] - P.y * l.w), LightFinite(l.pos[2] - P.z * l.w)};
+  const float d2 = LightFinite(v.x * v.x + v.y * v.y + v.z * v.z);
+  const float d = (d2 > 0.0f && d2 < 3.0e38f) ? std::sqrt(d2) : 0.0f;
+  const Float3 u = LightNormalize(v);
+  const float n_dot = LightSat(u.x * N.x + u.y * N.y + u.z * N.z);
+  const float shadow = (1.0f - LightSat(facing) * LightSat(mask)) * LightFinite(l.shadow);
+  const float range = LightSat(1.0f - d * LightFinite(l.range));
+  const float cone = LightSat((u.x * l.axis[0] + u.y * l.axis[1] + u.z * l.axis[2] - LightFinite(l.cone_cos)) * LightFinite(l.cone_scale));
+  const float gate = LightFinite((1.0f - shadow) * (1.0f + LightFinite(l.blend) * (cone * range - 1.0f)));
+  return {LightFinite(l.col[0] * n_dot * gate), LightFinite(l.col[1] * n_dot * gate), LightFinite(l.col[2] * n_dot * gate)};
+}
+
+// The sum of LocalLight over a draw's `count` lanterns (light_formulas.local_lights; the shaders'
+// LocalLights over the range of the draw word's lantern bits, LightModeLanterns). (0, 0, 0) for none.
+inline Float3 LocalLights(const Float3& P, const Float3& N, const capture::LocalLight* lights, uint32_t count, float mask, float facing) {
+  Float3 sum{0.0f, 0.0f, 0.0f};
+  for (uint32_t j = 0; j < count && lights; ++j) {
+    const Float3 t = LocalLight(P, N, lights[j], mask, facing);
+    sum = {LightFinite(sum.x + t.x), LightFinite(sum.y + t.y), LightFinite(sum.z + t.z)};
+  }
+  return sum;
 }
 
 // --- The instanced plants (plan Task 8b; lighting-formulas.md, "Instanced plants") ---
@@ -2737,25 +2770,29 @@ inline Float3 PlantNormal(const Float3& normal, const capture::Float4& bend) {
   return LightNormalize({n.x + (bend.x - n.x) * k, n.y + (bend.y - n.y) * k, n.z + (bend.z - n.z) * k});
 }
 
-// Plants without an ambient factor (light_formulas.plant): A * vs_ambient + A * sun_col * n_dot_sun * sun_gate.
-inline Float3 LightPlant(const Float3& A, const Float3& vs_ambient, float n_dot_sun, const Float3& sun_col, float sun_gate) {
+// Plants without an ambient factor (light_formulas.plant): A * vs_ambient + A * sun_col * n_dot_sun * sun_gate,
+// plus A * lights (the sum of the local lights, LocalLights).
+inline Float3 LightPlant(const Float3& A, const Float3& vs_ambient, float n_dot_sun, const Float3& sun_col, float sun_gate,
+                         const Float3& lights = {0.0f, 0.0f, 0.0f}) {
   const Float3 sun = light_detail::Sun(sun_col, n_dot_sun, sun_gate);
-  return {LightFinite(LightFinite(A.x) * (LightFinite(vs_ambient.x) + sun.x)), LightFinite(LightFinite(A.y) * (LightFinite(vs_ambient.y) + sun.y)),
-          LightFinite(LightFinite(A.z) * (LightFinite(vs_ambient.z) + sun.z))};
+  return {LightFinite(LightFinite(A.x) * (LightFinite(vs_ambient.x) + sun.x + LightFinite(lights.x))),
+          LightFinite(LightFinite(A.y) * (LightFinite(vs_ambient.y) + sun.y + LightFinite(lights.y))),
+          LightFinite(LightFinite(A.z) * (LightFinite(vs_ambient.z) + sun.z + LightFinite(lights.z)))};
 }
 
 // Plants with the ambient factor: the object form with the instance colour, c27.w = 1 and c49 = 1
 // (light_formulas.lit_object with those; these shaders read neither), the power and the tint applied
 // by the vertex shader: A * (vs_base * L + add) + A * sun_col * n_dot_sun * sun_gate, vs_base =
-// InstanceAmbient(colour, tint, tint_pow, 0), L from t.
+// InstanceAmbient(colour, tint, tint_pow, 0), L from t; plus A * lights (the sum of the local lights).
 inline Float3 LightPlantLit(const Float3& A, const Float3& vs_base, const Float3& add, const Float3& floor, float t, float n_dot_sun,
-                            const Float3& sun_col, float sun_gate) {
+                            const Float3& sun_col, float sun_gate, const Float3& lights = {0.0f, 0.0f, 0.0f}) {
   const Float3 lit = AmbientFactor(floor, t);
   const Float3 sun = light_detail::Sun(sun_col, n_dot_sun, sun_gate);
-  auto one = [](float a, float base, float l, float plus, float s) {
-    return LightFinite(LightFinite(a) * (LightFinite(base) * l + LightFinite(plus) + s));
+  auto one = [](float a, float base, float l, float plus, float s, float extra) {
+    return LightFinite(LightFinite(a) * (LightFinite(base) * l + LightFinite(plus) + s + LightFinite(extra)));
   };
-  return {one(A.x, vs_base.x, lit.x, add.x, sun.x), one(A.y, vs_base.y, lit.y, add.y, sun.y), one(A.z, vs_base.z, lit.z, add.z, sun.z)};
+  return {one(A.x, vs_base.x, lit.x, add.x, sun.x, lights.x), one(A.y, vs_base.y, lit.y, add.y, sun.y, lights.y),
+          one(A.z, vs_base.z, lit.z, add.z, sun.z, lights.z)};
 }
 
 // --- The tree leaves (plan Task 8c; lighting-formulas.md, "Tree leaves") ---
@@ -2765,10 +2802,10 @@ inline Float3 LightPlantLit(const Float3& A, const Float3& vs_base, const Float3
 // on the side of the card that faces the viewer, times the light's colour (o2 front, o3 back). The
 // cards are drawn without culling (register 0x2205 = 0x00218000 in every leaf row captured), and
 // the shader turns the normal to the viewer instead (0xA584... instr 108 to 110). The pixel shader
-// 0x7CD5... adds them up on the squared albedo. The mirrors below are split the same way, but for
-// one thing: the two scalars are interpolated WITHOUT the sun's colour, which the pixel side
-// multiplies in (LightLeaf): the colour is one per frame, so the product commutes with the
-// interpolation.
+// 0x7CD5... adds them up on the squared albedo. The mirrors below are split the same way: the
+// vertex side's two colour sums (the light's colour times each scalar, summed over the sun and,
+// since the local lights, the draw's lanterns: light_formulas.tree_leaf_sums) are interpolated, and
+// the pixel side takes them as they are (LightLeaf).
 //
 // The sun. The light registers are the vertex shader's own (c76.. positions or directions, c83..
 // colours, c90 the blend of cone and range). At every leaf draw compared (176 + 328 main-scene rows
@@ -2838,19 +2875,21 @@ inline LeafMasks LeafMask(float mask, float gain, float bias) {
   return {m1, LightFinite(m1 * LightFinite(gain) + LightFinite(bias))};
 }
 
-// Tree leaves (light_formulas.tree_leaf): (A * (vs_ambient * c27w + m1 * sun_col * front) + green *
-// A * m2 * sun_col * back) * c49, green = 1 where A.g >= A.r (a leaf texel; the back light does not
-// pass through a twig's). vs_ambient, front and back are the vertex side's, interpolated.
-inline Float3 LightLeaf(const Float3& A, const Float3& vs_ambient, float front, float back, const Float3& sun_col, float c27w,
+// Tree leaves (light_formulas.tree_leaf_sums): (A * (vs_ambient * c27w + m1 * front3) + green * A * m2 *
+// back3) * c49, green = 1 where A.g >= A.r (a leaf texel; the back light does not pass through a twig's).
+// vs_ambient and the two colour sums are the vertex side's, interpolated: front3 the sum over the lights
+// of colour * front, back3 the same of back (the sun alone: sun_col * front and sun_col * back, which is
+// light_formulas.tree_leaf).
+inline Float3 LightLeaf(const Float3& A, const Float3& vs_ambient, const Float3& front3, const Float3& back3, float c27w,
                         float m1, float m2, const Float3& c49) {
   const float green = LightFinite(A.y) >= LightFinite(A.x) ? 1.0f : 0.0f;
-  auto one = [&](float a, float amb, float sun, float tint) {
+  auto one = [&](float a, float amb, float front, float back, float tint) {
     a = LightFinite(a);
-    sun = LightFinite(sun);
-    const float lit = a * (LightFinite(amb) * LightFinite(c27w) + LightFinite(m1) * sun * LightFinite(front));
-    return LightFinite((lit + green * a * LightFinite(m2) * sun * LightFinite(back)) * LightFinite(tint));
+    const float lit = a * (LightFinite(amb) * LightFinite(c27w) + LightFinite(m1) * LightFinite(front));
+    return LightFinite((lit + green * a * LightFinite(m2) * LightFinite(back)) * LightFinite(tint));
   };
-  return {one(A.x, vs_ambient.x, sun_col.x, c49.x), one(A.y, vs_ambient.y, sun_col.y, c49.y), one(A.z, vs_ambient.z, sun_col.z, c49.z)};
+  return {one(A.x, vs_ambient.x, front3.x, back3.x, c49.x), one(A.y, vs_ambient.y, front3.y, back3.y, c49.y),
+          one(A.z, vs_ambient.z, front3.z, back3.z, c49.z)};
 }
 
 // What a lit draw writes into the float target for the value `v` (the light function's value times

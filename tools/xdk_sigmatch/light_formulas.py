@@ -179,6 +179,33 @@ def sun_gate_multi(shadow_strength, mask=1.0, facing=1.0, spot_blend=0.0, distan
     return _finite((1.0 - shadow) * (1.0 + _finite(spot_blend) * (cone * rng - 1.0)))
 
 
+def local_light(P, N, pos, w, col, blend, range_scale, axis, cone_cos, cone_scale, shadow, mask=1.0, facing=1.0):
+    """One light of the two-, four- and seven-light shaders, slot j, as the sun's slot is read (sun_gate_multi):
+        V = c(80+j).xyz - P * c(80+j).w,  n_dot = sat(N . normalize(V)),
+        shadow_j = (1 - facing * mask) * c112[j],  range = sat(1 - |V| * c96[j]),
+        cone = sat((normalize(V) . c(98+j).xyz - c105[j]) * c107[j]),
+        gate = (1 - shadow_j) * (1 + c94[j] * (cone * range - 1)),
+        term = c(87+j).xyz * n_dot * gate.
+    Slots 4 to 6 read c95, c97, c106, c108, c113 in place of c94, c96, c105, c107, c112. P the world
+    position, N the unit normal. Finite for any input: every term is passed through _finite."""
+    v = [_finite(pos[i]) - _finite(P[i]) * _finite(w) for i in range(3)]
+    d = math.sqrt(dot(v, v)) if all(math.isfinite(x) for x in v) else 0.0
+    l = normalize(v)
+    n_dot = sat(dot(N, l))
+    gate = sun_gate_multi(shadow, mask=mask, facing=facing, spot_blend=blend, distance=d, range_scale=range_scale,
+                          cone_dot=dot(l, axis), cone_cos=cone_cos, cone_scale=cone_scale)
+    return [_finite(_finite(c) * n_dot * gate) for c in col]
+
+
+def local_lights(P, N, lanterns, mask=1.0, facing=1.0):
+    """The sum of local_light over `lanterns` (dicts with local_light's keyword arguments but P, N, mask, facing)."""
+    out = [0.0, 0.0, 0.0]
+    for L in lanterns:
+        term = local_light(P, N, mask=mask, facing=facing, **L)
+        out = [_finite(out[i] + term[i]) for i in range(3)]
+    return out
+
+
 def _ambient(base, tint, tint_pow, add, floor, t):
     """pow(base, tint_pow) * tint * L + add, per channel."""
     lit = ambient_factor(floor, t)
@@ -209,16 +236,18 @@ def pwl_gamma_to_linear(g):
     return (linear + math.trunc(linear * scale)) / 1023.0
 
 
-def terrain_layer(A, baked, tint, tint_pow, add, floor, t, n_dot_sun, sun_col, c11x=1.0, *, sun_gate):
+def terrain_layer(A, baked, tint, tint_pow, add, floor, t, n_dot_sun, sun_col, c11x=1.0, *, sun_gate, lights=None):
     """Terrain layer shaders: A * c11x * (pow(baked, tint_pow) * tint * L + add) + A * sun_col * n_dot_sun
     * sun_gate. n_dot_sun: one-light shaders sat(N . c80.xyz) with c80 as it is; multi-light shaders
     sat(N . normalize(c80.xyz - P * c80.w)). N is the unit normal the pixel shader lights with (with a
     flat normal map: the vertex shader's tf17 normal, normalised). sun_gate has no default: every layer
     shader multiplies the sun by the facing factor (sun_gate_single / sun_gate_multi with facing_gate),
-    and 1 would be arithmetic none of them computes. c11x defaults to the 1 of every captured layer row."""
+    and 1 would be arithmetic none of them computes. c11x defaults to the 1 of every captured layer row.
+    lights: the sum of the local lights (local_lights), added to the sun term."""
     amb = _ambient(baked, tint, tint_pow, add, floor, t)
     sun = _sun(sun_col, n_dot_sun, sun_gate)
-    return [_finite(_finite(A[i]) * (_finite(c11x) * amb[i] + sun[i])) for i in range(3)]
+    extra = [_finite(x) for x in lights] if lights is not None else [0.0, 0.0, 0.0]
+    return [_finite(_finite(A[i]) * (_finite(c11x) * amb[i] + sun[i] + extra[i])) for i in range(3)]
 
 
 def terrain_far(F, baked, tint, tint_pow, add, floor, t, n_dot_sun, sun_col, c11x):
@@ -255,12 +284,14 @@ def plant_normal(normal, up, height, strength):
     return normalize([n + (_finite(strength) * b - n) * k for n, b in zip(normal, bent)])
 
 
-def plant(A, vs_ambient, n_dot_sun, sun_col, sun_gate=1.0):
+def plant(A, vs_ambient, n_dot_sun, sun_col, sun_gate=1.0, lights=None):
     """Instanced plants without an ambient factor (A7E4..., 2605..., E99F...): A * vs_ambient + A * sun_col
     * n_dot_sun * sun_gate. A = tf0.rgb^2 / tf0.a^2 (always, no bool); vs_ambient the vertex shader's
-    interpolator (instance_ambient); n_dot_sun = sat(plant_normal . c80.xyz)."""
+    interpolator (instance_ambient); n_dot_sun = sat(plant_normal . c80.xyz).
+    lights: the sum of the local lights (local_lights), added to the sun term."""
     sun = _sun(sun_col, n_dot_sun, sun_gate)
-    return [_finite(_finite(A[i]) * (_finite(vs_ambient[i]) + sun[i])) for i in range(3)]
+    extra = [_finite(x) for x in lights] if lights is not None else [0.0, 0.0, 0.0]
+    return [_finite(_finite(A[i]) * (_finite(vs_ambient[i]) + sun[i] + extra[i])) for i in range(3)]
 
 
 def leaf_light(normal, view, light_dir, wrap, spot=1.0):
@@ -291,6 +322,19 @@ def leaf_mask(mask, gain, bias):
     return m1, _finite(m1 * _finite(gain) + _finite(bias))
 
 
+def tree_leaf_sums(A, vs_ambient, front3, back3, c27w=1.0, *, m1, m2, c49):
+    """tree_leaf with the interpolators as the leaf vertex shaders export them: o2 = front3 = sum over the
+    lights of colour * front, o3 = back3 = the same of back (one light: sun_col * front, sun_col * back).
+        (A * (vs_ambient * c27w + m1 * front3) + green * A * m2 * back3) * c49"""
+    green = 1.0 if _finite(A[1]) >= _finite(A[0]) else 0.0
+    out = []
+    for i in range(3):
+        a = _finite(A[i])
+        lit = a * (_finite(vs_ambient[i]) * _finite(c27w) + _finite(m1) * _finite(front3[i]))
+        out.append(_finite((lit + green * a * _finite(m2) * _finite(back3[i])) * _finite(c49[i])))
+    return out
+
+
 def tree_leaf(A, vs_ambient, front, back, sun_col, c27w=1.0, *, m1, m2, c49):
     """Tree leaves (pixel shader 7CD5... with vertex shader A584...): everything but the texture and the
     mask is computed per vertex.
@@ -301,24 +345,21 @@ def tree_leaf(A, vs_ambient, front, back, sun_col, c27w=1.0, *, m1, m2, c49):
     leaf_mask(...). The interpolators are o1 = vs_ambient, o2 = sun_col * front, o3 = sun_col * back.
     m1, m2 and c49 have no default: the caller makes m1 and m2 (leaf_mask with the literals 0.6 and
     0.4) and c49 is in no capture row of the time. c27w defaults to the 1 of every captured leaf row."""
-    green = 1.0 if _finite(A[1]) >= _finite(A[0]) else 0.0
-    out = []
-    for i in range(3):
-        a, s = _finite(A[i]), _finite(sun_col[i])
-        lit = a * (_finite(vs_ambient[i]) * _finite(c27w) + _finite(m1) * s * _finite(front))
-        out.append(_finite((lit + green * a * _finite(m2) * s * _finite(back)) * _finite(c49[i])))
-    return out
+    return tree_leaf_sums(A, vs_ambient, [_finite(s) * _finite(front) for s in sun_col],
+                          [_finite(s) * _finite(back) for s in sun_col], c27w, m1=m1, m2=m2, c49=c49)
 
 
-def lit_object(A, vcolour, tint, tint_pow, add, floor, t, n_dot_sun, sun_col, c27w=1.0, sun_gate=1.0, *, c49):
+def lit_object(A, vcolour, tint, tint_pow, add, floor, t, n_dot_sun, sun_col, c27w=1.0, sun_gate=1.0, *, c49, lights=None):
     """Lit objects: (A * c27w * (pow(vcolour, tint_pow) * tint * L + add) + A * sun_col * n_dot_sun *
     sun_gate) * c49. The terrain's ambient with the vertex shader's colour o6 in the place of the baked
     map; c27w scales the ambient part only. Without the specular, emissive (b133) and cube (b134) terms.
     c49 has no default: it is in no capture row (the lit plants, whose shaders have no c49, pass ones).
-    c27w defaults to the 1 of every captured object and trunk row, sun_gate to a mask of 1."""
+    c27w defaults to the 1 of every captured object and trunk row, sun_gate to a mask of 1.
+    lights: the sum of the local lights (local_lights), added to the sun term."""
     amb = _ambient(vcolour, tint, tint_pow, add, floor, t)
     sun = _sun(sun_col, n_dot_sun, sun_gate)
-    return [_finite(_finite(A[i]) * (_finite(c27w) * amb[i] + sun[i]) * _finite(c49[i])) for i in range(3)]
+    extra = [_finite(x) for x in lights] if lights is not None else [0.0, 0.0, 0.0]
+    return [_finite(_finite(A[i]) * (_finite(c27w) * amb[i] + sun[i] + extra[i]) * _finite(c49[i])) for i in range(3)]
 
 
 # --- the screen mask (shadows sub-project) --------------------------------------------------------

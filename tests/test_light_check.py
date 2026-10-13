@@ -581,6 +581,62 @@ PLANT_PINS = {
 }
 
 
+class LocalLights(unittest.TestCase):
+    """The per-light form of the two-, four- and seven-light shaders (lighting-formulas.md, 'The sun',
+    the multi form), as one function of one light, and the families' sum."""
+    L = dict(pos=[3.0, 4.0, 0.0], w=1.0, col=[1.5, 0.75, 0.1], blend=1.0, range_scale=0.1,
+             axis=[0.0, 0.0, 1.0], cone_cos=-1.0, cone_scale=1.0, shadow=0.0)
+
+    def test_a_lantern_without_cone_is_colour_times_n_dot_times_range(self):
+        P, N = [0.0, 0.0, 0.0], [0.6, 0.8, 0.0]
+        got = lf.local_light(P, N, **self.L)
+        # V = (3, 4, 0), |V| = 5, l = (0.6, 0.8, 0): n_dot 1, range 0.5, cone sat(0 + 1) = 1, gate 0.5
+        self.assertEqual(got, [0.75, 0.375, 0.05])
+
+    def test_a_direction_light_with_w_zero_ignores_the_position(self):
+        L = dict(self.L, pos=[0.0, 0.0, 1.0], w=0.0, blend=0.0)
+        got = lf.local_light([100.0, 100.0, 100.0], [0.0, 0.0, 1.0], **L)
+        self.assertEqual(got, [1.5, 0.75, 0.1])
+
+    def test_the_shadow_strength_takes_the_mask(self):
+        L = dict(self.L, shadow=1.0, blend=0.0)
+        got = lf.local_light([0.0, 0.0, 0.0], [0.6, 0.8, 0.0], mask=0.25, facing=1.0, **L)
+        self.assertEqual(got, [1.5 * 0.25, 0.75 * 0.25, 0.1 * 0.25])
+
+    def test_the_sum_and_the_families_add_it_to_the_sun_term(self):
+        P, N = [0.0, 0.0, 0.0], [0.6, 0.8, 0.0]
+        one = lf.local_light(P, N, **self.L)
+        two = lf.local_lights(P, N, [self.L, self.L])
+        self.close(two, [2 * x for x in one])
+        A, baked = [0.5, 0.5, 0.5], [0.2, 0.3, 0.4]
+        base = lf.terrain_layer(A, baked, [1.0] * 3, 1.0, [0.0] * 3, [0.0] * 3, 1.0, 0.0, [1.0] * 3, sun_gate=1.0)
+        lit = lf.terrain_layer(A, baked, [1.0] * 3, 1.0, [0.0] * 3, [0.0] * 3, 1.0, 0.0, [1.0] * 3, sun_gate=1.0, lights=two)
+        self.close(lit, [b + A[i] * two[i] for i, b in enumerate(base)])
+        base = lf.lit_object(A, baked, [1.0] * 3, 1.0, [0.0] * 3, [0.0] * 3, 1.0, 0.0, [1.0] * 3, c49=[2.0] * 3)
+        lit = lf.lit_object(A, baked, [1.0] * 3, 1.0, [0.0] * 3, [0.0] * 3, 1.0, 0.0, [1.0] * 3, c49=[2.0] * 3, lights=two)
+        self.close(lit, [b + A[i] * two[i] * 2.0 for i, b in enumerate(base)])
+        base = lf.plant(A, baked, 0.0, [1.0] * 3)
+        lit = lf.plant(A, baked, 0.0, [1.0] * 3, lights=two)
+        self.close(lit, [b + A[i] * two[i] for i, b in enumerate(base)])
+
+    def test_tree_leaf_is_its_colour_sum_form(self):
+        A, amb, sun = [0.25, 0.5, 0.25], [0.5, 0.5, 0.5], [2.0, 2.0, 2.0]
+        want = lf.tree_leaf(A, amb, 0.5, 0.25, sun, 0.5, m1=0.75, m2=0.875, c49=[1.0, 0.5, 2.0])
+        got = lf.tree_leaf_sums(A, amb, [s * 0.5 for s in sun], [s * 0.25 for s in sun], 0.5, m1=0.75, m2=0.875, c49=[1.0, 0.5, 2.0])
+        self.close(got, want)
+
+    def test_finite_for_any_input(self):
+        nan, inf = float("nan"), float("inf")
+        L = dict(self.L, pos=[nan, inf, 0.0], col=[inf, nan, 1.0], range_scale=nan, cone_scale=inf, shadow=nan)
+        for x in lf.local_light([inf, 0.0, 0.0], [nan, 0.0, 0.0], **L):
+            self.assertTrue(math.isfinite(x))
+
+    def close(self, got, want):
+        self.assertEqual(len(got), len(want))
+        for g, w in zip(got, want):
+            self.assertAlmostEqual(g, w, places=12)
+
+
 class SyntheticDump(unittest.TestCase):
     """Always runs: the checker on a hand-written shader of the terrain layers' form."""
 

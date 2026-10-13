@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <charconv>
 #include <cctype>
 #include <cmath>
 #include <cstddef>
@@ -624,6 +625,7 @@ struct ClayStats {
   // reason (index: ClayImpostorSkip as a number); impostor_capture: the calls that gave no record, by the
   // capture's reason (index: capture::ImpostorReason; FrameScene::impostor_refused).
   capture::ImpostorMode impostor_mode = capture::ImpostorMode::kOff;
+  uint32_t filter_mode = 0;  // the pass's texture filtering this frame: 0 linear, 1..5 = 1x..16x anisotropic (FilterMode)
   uint32_t impostors_seen = 0, impostors_drawn = 0, impostor_quads = 0;
   uint32_t impostor_skip[16] = {};
   // (`on` alone) impostor_pictures: the game's pictures the frame's records could use (read whole, a tree's by
@@ -7532,6 +7534,21 @@ constexpr uint32_t FilterMode(int32_t override_value) {
 }
 constexpr uint32_t FilterAnisotropy(uint32_t mode) {
   return mode > 0 && mode < kFilterModes ? 1u << (mode - 1) : 1u;
+}
+inline std::string FilterText(uint32_t mode) {
+  return mode ? std::to_string(FilterAnisotropy(mode)) + "x anisotropic" : std::string("linear");
+}
+// The cvar's text as the SDK's setting: the whole string an integer (std::from_chars), else 0 (no override).
+// The installed SDK exports the registry accessor, not typed Query specializations (the water step's note).
+inline int32_t ParseFilterSetting(std::string_view text) {
+  int32_t setting = 0;
+  const auto parsed = std::from_chars(text.data(), text.data() + text.size(), setting);
+  return parsed.ec == std::errc{} && parsed.ptr == text.data() + text.size() ? setting : 0;
+}
+// A ready pass whose objects were built under another mode rebuilds them (Ensure): the layouts are cached per
+// mode (the RHI destroys none), the pipelines of one mode only are kept.
+constexpr bool FilterRebuildNeeded(bool ready, uint32_t built_mode, uint32_t wanted_mode) {
+  return ready && built_mode != wanted_mode;
 }
 
 // The dead draw (spec ruling 12): F6D9 kills every pixel, whatever the mask holds, when the saturate's argument is

@@ -376,6 +376,8 @@ class ClayPass {
   };
 
   void DestroyObjects();
+  // The SDK's anisotropic_override as the pass's filter mode (FilterMode of ParseFilterSetting).
+  uint32_t ReadFilterMode() const;
   // What the shadows alone need: the two maps, their pixel shader and pipelines, the view of the
   // scene's depth, the mask target, the mask step's layout, shader and pipeline, and the pre-pass's
   // depth-only pixel shaders. EnsureShadowObjects makes them on the first frame that wants them;
@@ -655,7 +657,12 @@ class ClayPass {
   nrhi::Device* device_ = nullptr;
   bool ready_ = false;
   uint64_t targets_generation_ = 0;
-  nrhi::BindingLayout* layout_ = nullptr;  // the RHI has no layout destruction
+  // The main layout, one per filter mode (sub-project 15; the RHI has no layout destruction: the six are cached
+  // for the pass's life, `layout_` is the current mode's). `filter_mode_` is the mode the objects were built
+  // with; Ensure rebuilds them when the cvar's mode differs (FilterRebuildNeeded).
+  nrhi::BindingLayout* layouts_[kFilterModes] = {};
+  nrhi::BindingLayout* layout_ = nullptr;
+  uint32_t filter_mode_ = 0;
   nrhi::Shader* vs_ = nullptr;
   // The wind vertex program (shaders::kClayWindVs; EnsureWindShader), null until a frame has a wind
   // record: the vertex shader of every pipeline whose key has `wind`, and of shadow_wind_pipelines_.

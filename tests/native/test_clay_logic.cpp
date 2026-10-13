@@ -2682,6 +2682,31 @@ static void WaterTests() {
     CHECK(867, FilterMode(int32_t(mode)) == mode && FilterAnisotropy(mode) == anisotropy[mode]);
   }
   CHECK(867, FilterAnisotropy(6) == 1 && FilterAnisotropy(~0u) == 1);
+  // 868: sub-project 15. The cvar's text as a mode: a whole-string integer, else 0; the rebuild rule: only a
+  // ready pass whose objects were built with another mode rebuilds (3 → 3 → 0 → 0 → 5: two rebuilds).
+  CHECK(868, ParseFilterSetting("3") == 3 && ParseFilterSetting("-1") == -1 && ParseFilterSetting("5") == 5 &&
+                 ParseFilterSetting("6") == 6 && ParseFilterSetting("") == 0 && ParseFilterSetting("x") == 0 &&
+                 ParseFilterSetting("3 ") == 0 && ParseFilterSetting(" 3") == 0);
+  CHECK(868, FilterMode(ParseFilterSetting("6")) == 0 && FilterMode(ParseFilterSetting("3")) == 3);
+  CHECK(868, FilterText(0) == "linear" && FilterText(3) == "4x anisotropic");
+  {
+    const int32_t sequence[] = {3, 3, 0, 0, 5};
+    uint32_t built = FilterMode(sequence[0]);
+    int rebuilds = 0;
+    bool ready = true;
+    for (int32_t s : sequence) {
+      const uint32_t wanted = FilterMode(s);
+      if (FilterRebuildNeeded(ready, built, wanted)) {
+        ++rebuilds;
+        built = wanted;
+      }
+    }
+    CHECK(868, rebuilds == 2 && built == 5 && !FilterRebuildNeeded(false, 0, 3) && !FilterRebuildNeeded(true, 3, 3));
+  }
+  {
+    ClayStats fs;
+    CHECK(868, fs.filter_mode == 0);
+  }
   using namespace water_pins;
   const float kNan = std::numeric_limits<float>::quiet_NaN();
   CHECK(838, std::string(ClayWaterName(ClayWater::kDrawn)) == "drawn" && std::string(ClayWaterName(ClayWater::kOpaqueLive)) == "opaque-live" &&

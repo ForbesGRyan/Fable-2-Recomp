@@ -406,8 +406,19 @@ bool ClayPass::CreateWhite(nrhi::Device* dev) {
   return true;
 }
 
+uint32_t ClayPass::ReadFilterMode() const {
+  return FilterMode(ParseFilterSetting(rex::cvar::GetFlagByName("anisotropic_override")));
+}
+
 bool ClayPass::Ensure(nrhi::Device* dev) {
-  if (ready_ && dev == device_) return true;
+  const uint32_t wanted_mode = ReadFilterMode();
+  if (ready_ && dev == device_ && !FilterRebuildNeeded(ready_, filter_mode_, wanted_mode)) return true;
+  if (ready_ && dev == device_) {
+    // The override changed: the objects are made again under the new mode's layout (the layouts stay).
+    REXLOG_INFO("[native] clay: texture filtering changes to {} (anisotropic_override): the pass's objects are rebuilt",
+                FilterText(wanted_mode));
+    DestroyObjects();
+  }
   if (dev != device_) {
     // A different device: the old objects are not ours to destroy through it.
     geometry_.Release(nullptr);
@@ -466,6 +477,7 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
     white_ = nullptr;
     white_view_ = nullptr;
     white_staging_ = nullptr;
+    for (nrhi::BindingLayout*& layout : layouts_) layout = nullptr;
     layout_ = nullptr;
     map_layout_ = nullptr;
     mask_layout_ = nullptr;
@@ -493,7 +505,8 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
   }
   ready_ = false;
 
-  if (!layout_) {
+  nrhi::BindingLayout*& layout = layouts_[wanted_mode];
+  if (!layout) {
     // The layout is kClayBindings (clay_logic.h), parameter for parameter: the
     // tests hold every register the compiled shaders declare against that table.
     nrhi::BindingLayoutDesc desc;
@@ -510,21 +523,18 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
                                                                         : nrhi::Visibility::kAll;
     }
     desc.param_count = kParamCount;
-    // s<i>: bit 0 linear, bit 1 clamp (SamplerIndex).
+    // s<i>: bit 0 linear, bit 1 clamp (SamplerIndex), filtered by the mode (ConfigureClaySamplers).
     static_assert(kClayStaticSamplers == 4);
-    for (uint32_t i = 0; i < 4; ++i) {
-      desc.static_samplers[i].shader_register = i;
-      desc.static_samplers[i].filter = (i & 1) ? nrhi::Filter::kLinear : nrhi::Filter::kPoint;
-      desc.static_samplers[i].address = (i & 2) ? nrhi::AddressMode::kClamp : nrhi::AddressMode::kWrap;
-    }
-    desc.static_sampler_count = 4;
+    ConfigureClaySamplers(desc, wanted_mode);
     desc.allow_input_layout = false;
-    layout_ = dev->CreateBindingLayout(desc);
-    if (!layout_) {
+    layout = dev->CreateBindingLayout(desc);
+    if (!layout) {
       REXLOG_ERROR("[native] clay: binding layout creation failed");
       return false;
     }
   }
+  layout_ = layout;
+  filter_mode_ = wanted_mode;
 
   nrhi::ShaderDesc vs;
   vs.stage = nrhi::ShaderStage::kVertex;
@@ -655,7 +665,8 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
   }
   ready_ = true;
   ++targets_generation_;
-  REXLOG_INFO("[native] clay: {} (generation {})", FormatTargetText(kWidth, kHeight), targets_generation_);
+  REXLOG_INFO("[native] clay: {} (generation {}; texture filtering {}, anisotropic_override mode {})",
+              FormatTargetText(kWidth, kHeight), targets_generation_, FilterText(filter_mode_), filter_mode_);
   // (the shadows' maps and mask are made, and logged, on the first frame that draws them: EnsureShadowObjects)
   return true;
 }
@@ -3760,6 +3771,7 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
                       bool textured, ClayLight light, bool shadows, bool fog, bool wind, bool coverage, capture::ImpostorMode impostors, bool water,
                       const ClayPostRequest& post, ClayStats& st, TextureStats& tst) {
   if (!ready_ || dev != device_) return;
+  st.filter_mode = filter_mode_;
   // The frame's impostors: the switch as it is now, in a scene captured with it (ClayImpostorMode). Off: nothing
   // below makes an object, reserves a slot, binds or draws anything of the step, and the frame's slot plan is
   // the one of before. `flat`: the step's objects are asked here, on the first frame that has a record, before
@@ -5008,10 +5020,7 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     if (DecideClayWater(water_in) == ClayWater::kDrawn) water_in.objects_targets = EnsureWaterTargets(dev);
     if (DecideClayWater(water_in) == ClayWater::kDrawn) {
       // The installed SDK exports the registry accessor, not typed Query specializations.
-      const std::string text = rex::cvar::GetFlagByName("anisotropic_override");
-      int32_t setting = 0;
-      const auto parsed = std::from_chars(text.data(), text.data() + text.size(), setting);
-      if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size()) setting = 0;
+      const int32_t setting = ParseFilterSetting(rex::cvar::GetFlagByName("anisotropic_override"));
       for (WaterSurface& s : water_surfaces_) {
         TextureFetch normal;
         if (WaterTextureFetch(s.record->fetch[capture::kWatNormal], WaterDecode::kDxn, &normal) != FetchError::kNone) {

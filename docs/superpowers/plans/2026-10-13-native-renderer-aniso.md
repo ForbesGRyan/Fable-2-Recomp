@@ -17,7 +17,7 @@
 - Native tests: `& .\tests\run_native_tests.cmd C:\Users\Ryan\code\Fable-2-Recomp\thirdparty\rexglue-sdk` from the worktree with `C:\Program Files\LLVM\bin` first on PATH. Python: `python -m unittest discover -s tests -p "test_*.py"` from the worktree (copy `C:\Users\Ryan\code\Fable-2-Recomp\out\shader_dump` to the worktree's `out\shader_dump` first, or dump-backed cases are skipped).
 - Game runs: allowed ("run when needed"); announce each to the lanterns session (SendMessage to `fable-2-recomp-62`) before starting; never while another `fable_2.exe` is open; `-UserPresent` runs are labelled `RUN UNCHECKED`; raw evidence under `out\native-evidence\aniso\`.
 - Commit after every task; messages end with `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`; no push.
-- Shader bind points stay below `kClayStaticSamplers == 4`; constants' field offsets (`kDrawFields`, `kClayTerrainFields`) do not move; `SamplerIndex` bits 0 and 1 keep their meaning; mode 0 must produce today's bytes-for-bytes picture.
+- Shader bind points stay below `kClayStaticSamplers == 4`; constants' field offsets (`kDrawFields`, `kClayTerrainFields`) do not move; `SamplerIndex` bits 0 and 1 keep their meaning; mode 0 must produce today's picture for every texture seen (single-level textures sample level 0 either way; a base-map texture WITH mips changes by design, spec section 3; none seen).
 - Every ruling made during execution goes into `.superpowers/sdd/2026-10-13-native-renderer-aniso/progress.md` as `Ruling N: … - why: … - cost if wrong: …`.
 
 ## Review Focus

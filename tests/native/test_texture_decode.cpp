@@ -14,14 +14,14 @@ using namespace fable2::native::render;
 
 struct FcArgs {
   uint32_t format = 18, w = 256, h = 128, pitch = 256, endian = 1, base = 0x1A000000, mip = 0x1A010000;
-  uint32_t mip_max = 8, swizzle = 0x688, filter = 1, clamp_x = 0, clamp_y = 2, dim = 1, type = 2;
+  uint32_t mip_max = 8, swizzle = 0x688, filter = 1, min_filter = 0, mip_filter = 0, clamp_x = 0, clamp_y = 2, dim = 1, type = 2;
   bool tiled = true, packed = true;
 };
 static void MakeFc(const FcArgs& a, uint32_t fc[6]) {
   fc[0] = a.type | (a.clamp_x << 10) | (a.clamp_y << 13) | ((a.pitch >> 5) << 22) | (uint32_t(a.tiled) << 31);
   fc[1] = a.format | (a.endian << 6) | a.base;
   fc[2] = (a.w - 1) | ((a.h - 1) << 13);
-  fc[3] = (a.swizzle << 1) | (a.filter << 19);
+  fc[3] = (a.swizzle << 1) | (a.filter << 19) | (a.min_filter << 21) | (a.mip_filter << 23);
   fc[4] = (a.mip_max << 6);
   fc[5] = (a.dim << 9) | (uint32_t(a.packed) << 11) | a.mip;
 }
@@ -139,6 +139,20 @@ int main() {
   if (SamplerIndex(t) != 0) return 30;  // point, wrap
   a.filter = 1; a.clamp_x = 2; a.clamp_y = 2; MakeFc(a, fc); DecodeTextureFetch(fc, &t);
   if (SamplerIndex(t) != 3) return 31;  // linear, clamp
+  // Sub-project 15: the min and mip filters are decoded; SamplerBits adds bit 2 "level 0 only" for a texture
+  // the SDK would not filter anisotropically (one level, or a base-map mip filter).
+  a = {}; a.filter = 1; a.clamp_x = 0; a.min_filter = 1; a.mip_filter = 1; MakeFc(a, fc);
+  DecodeTextureFetch(fc, &t);
+  if (!t.min_linear || t.mip_filter != 1) return 33;
+  if (SamplerBits(t, 9) != 1) return 34;                                  // mipped linear: no bit 2
+  if (SamplerBits(t, 1) != (1u | kSamplerLevel0)) return 35;              // one level: bit 2
+  a.mip_filter = 2; MakeFc(a, fc);                                         // mip base map
+  DecodeTextureFetch(fc, &t);
+  if (t.mip_filter != 2 || SamplerBits(t, 9) != (1u | kSamplerLevel0)) return 36;
+  a.min_filter = 0; a.mip_filter = 0; MakeFc(a, fc);                       // min point, mip point
+  DecodeTextureFetch(fc, &t);
+  if (t.min_linear || t.mip_filter != 0 || SamplerBits(t, 9) != 1) return 37;   // (approximated, as today)
+  if (kSamplerLevel0 != 4u || (SamplerBits(t, 0) & 3u) != SamplerIndex(t)) return 38;
   if (!IsMirror(1) || IsMirror(2) || IsMirror(0)) return 32;
   // Identity ignores sampler-only fields (clamps, filters) but not the address or format.
   uint32_t f1[6], f2[6];

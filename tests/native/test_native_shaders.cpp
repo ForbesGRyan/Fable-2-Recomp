@@ -916,9 +916,16 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
   float3 base;
   if (textured != 0) {
     float4 t;
-    if (sampler_index == 0) t = albedo.Sample(s_point_wrap, uv);
-    else if (sampler_index == 1) t = albedo.Sample(s_linear_wrap, uv);
-    else if (sampler_index == 2) t = albedo.Sample(s_point_clamp, uv);
+    // (the word's bit 2: level 0 only, an isotropic SampleLevel; texture_decode.h, SamplerBits)
+    uint sampler_select = sampler_index & 3;
+    if (sampler_index & 4) {
+      if (sampler_select == 0) t = albedo.SampleLevel(s_point_wrap, uv, 0);
+      else if (sampler_select == 1) t = albedo.SampleLevel(s_linear_wrap, uv, 0);
+      else if (sampler_select == 2) t = albedo.SampleLevel(s_point_clamp, uv, 0);
+      else t = albedo.SampleLevel(s_linear_clamp, uv, 0);
+    } else if (sampler_select == 0) t = albedo.Sample(s_point_wrap, uv);
+    else if (sampler_select == 1) t = albedo.Sample(s_linear_wrap, uv);
+    else if (sampler_select == 2) t = albedo.Sample(s_point_clamp, uv);
     else t = albedo.Sample(s_linear_clamp, uv);
     if (alpha_mode & 0x200) t.rgb = saturate(t.rgb / max(t.a, 1.0 / 255.0));
     float a = alpha_scale;
@@ -1011,9 +1018,16 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
 #endif
 #endif)pin";
 static const char kPinTerrainCommon[] = R"pin(float4 sample_colour(float2 at) {
-  if (t_colour_sampler == 0) return t_colour.Sample(s_point_wrap, at);
-  if (t_colour_sampler == 1) return t_colour.Sample(s_linear_wrap, at);
-  if (t_colour_sampler == 2) return t_colour.Sample(s_point_clamp, at);
+  uint sel = t_colour_sampler & 3;
+  if (t_colour_sampler & 4) {
+    if (sel == 0) return t_colour.SampleLevel(s_point_wrap, at, 0);
+    if (sel == 1) return t_colour.SampleLevel(s_linear_wrap, at, 0);
+    if (sel == 2) return t_colour.SampleLevel(s_point_clamp, at, 0);
+    return t_colour.SampleLevel(s_linear_clamp, at, 0);
+  }
+  if (sel == 0) return t_colour.Sample(s_point_wrap, at);
+  if (sel == 1) return t_colour.Sample(s_linear_wrap, at);
+  if (sel == 2) return t_colour.Sample(s_point_clamp, at);
   return t_colour.Sample(s_linear_clamp, at);
 }
 // What the console's fetch gives for a component whose sign field is 3 (gamma): the stored value through
@@ -1032,9 +1046,15 @@ float3 base_linear(float3 g) {
 // filter, as the game's fetch gives them.
 float4 sample_base(float2 at, float4 d) {
   float4 t;
-  if (t_base_sampler == 0) t = t_base.SampleGrad(s_point_wrap, at, d.xy, d.zw);
-  else if (t_base_sampler == 1) t = t_base.SampleGrad(s_linear_wrap, at, d.xy, d.zw);
-  else if (t_base_sampler == 2) t = t_base.SampleGrad(s_point_clamp, at, d.xy, d.zw);
+  uint sel = t_base_sampler & 3;
+  if (t_base_sampler & 4) {
+    if (sel == 0) t = t_base.SampleLevel(s_point_wrap, at, 0);
+    else if (sel == 1) t = t_base.SampleLevel(s_linear_wrap, at, 0);
+    else if (sel == 2) t = t_base.SampleLevel(s_point_clamp, at, 0);
+    else t = t_base.SampleLevel(s_linear_clamp, at, 0);
+  } else if (sel == 0) t = t_base.SampleGrad(s_point_wrap, at, d.xy, d.zw);
+  else if (sel == 1) t = t_base.SampleGrad(s_linear_wrap, at, d.xy, d.zw);
+  else if (sel == 2) t = t_base.SampleGrad(s_point_clamp, at, d.xy, d.zw);
   else t = t_base.SampleGrad(s_linear_clamp, at, d.xy, d.zw);
   float3 l = base_linear(t.rgb);
   return float4((t_base_gamma & 1) ? l.r : t.r, (t_base_gamma & 2) ? l.g : t.g, (t_base_gamma & 4) ? l.b : t.b, t.a);
@@ -1073,9 +1093,16 @@ float4 terrain_out(float3 colour, float a, float4 pos, float3 ndc) {
 }
 )pin";
 static const char kPinLayerMain[] = R"pin(float4 sample_side(float2 at, float4 d) {
-  if (t_side_sampler == 0) return t_side.SampleGrad(s_point_wrap, at, d.xy, d.zw);
-  if (t_side_sampler == 1) return t_side.SampleGrad(s_linear_wrap, at, d.xy, d.zw);
-  if (t_side_sampler == 2) return t_side.SampleGrad(s_point_clamp, at, d.xy, d.zw);
+  uint sel = t_side_sampler & 3;
+  if (t_side_sampler & 4) {
+    if (sel == 0) return t_side.SampleLevel(s_point_wrap, at, 0);
+    if (sel == 1) return t_side.SampleLevel(s_linear_wrap, at, 0);
+    if (sel == 2) return t_side.SampleLevel(s_point_clamp, at, 0);
+    return t_side.SampleLevel(s_linear_clamp, at, 0);
+  }
+  if (sel == 0) return t_side.SampleGrad(s_point_wrap, at, d.xy, d.zw);
+  if (sel == 1) return t_side.SampleGrad(s_linear_wrap, at, d.xy, d.zw);
+  if (sel == 2) return t_side.SampleGrad(s_point_clamp, at, d.xy, d.zw);
   return t_side.SampleGrad(s_linear_clamp, at, d.xy, d.zw);
 }
 float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOORD1,
@@ -1419,6 +1446,88 @@ static std::string PreviousOff(std::string text) {
   return text;
 }
 
+// Sub-project 15: the sampler sites' text before the level-0 bit, for the historical hash arrays (the wind's,
+// the impostors', the water's): the new select blocks replaced by the old four-line chains, nothing else touched.
+static std::string SamplerSelectBefore(std::string text) {
+  struct Pair { const char* now; const char* before; };
+  const Pair pairs[] = {
+      {"    uint sampler_select = sampler_index & 3;\n"
+       "    if (sampler_index & 4) {\n"
+       "      if (sampler_select == 0) t = albedo.SampleLevel(s_point_wrap, uv, 0);\n"
+       "      else if (sampler_select == 1) t = albedo.SampleLevel(s_linear_wrap, uv, 0);\n"
+       "      else if (sampler_select == 2) t = albedo.SampleLevel(s_point_clamp, uv, 0);\n"
+       "      else t = albedo.SampleLevel(s_linear_clamp, uv, 0);\n"
+       "    } else if (sampler_select == 0) t = albedo.Sample(s_point_wrap, uv);\n"
+       "    else if (sampler_select == 1) t = albedo.Sample(s_linear_wrap, uv);\n"
+       "    else if (sampler_select == 2) t = albedo.Sample(s_point_clamp, uv);\n"
+       "    else t = albedo.Sample(s_linear_clamp, uv);\n",
+       "    if (sampler_index == 0) t = albedo.Sample(s_point_wrap, uv);\n"
+       "    else if (sampler_index == 1) t = albedo.Sample(s_linear_wrap, uv);\n"
+       "    else if (sampler_index == 2) t = albedo.Sample(s_point_clamp, uv);\n"
+       "    else t = albedo.Sample(s_linear_clamp, uv);\n"},
+      {"float4 sample_colour(float2 at) {\n"
+       "  uint sel = t_colour_sampler & 3;\n"
+       "  if (t_colour_sampler & 4) {\n"
+       "    if (sel == 0) return t_colour.SampleLevel(s_point_wrap, at, 0);\n"
+       "    if (sel == 1) return t_colour.SampleLevel(s_linear_wrap, at, 0);\n"
+       "    if (sel == 2) return t_colour.SampleLevel(s_point_clamp, at, 0);\n"
+       "    return t_colour.SampleLevel(s_linear_clamp, at, 0);\n"
+       "  }\n"
+       "  if (sel == 0) return t_colour.Sample(s_point_wrap, at);\n"
+       "  if (sel == 1) return t_colour.Sample(s_linear_wrap, at);\n"
+       "  if (sel == 2) return t_colour.Sample(s_point_clamp, at);\n"
+       "  return t_colour.Sample(s_linear_clamp, at);\n"
+       "}\n",
+       "float4 sample_colour(float2 at) {\n"
+       "  if (t_colour_sampler == 0) return t_colour.Sample(s_point_wrap, at);\n"
+       "  if (t_colour_sampler == 1) return t_colour.Sample(s_linear_wrap, at);\n"
+       "  if (t_colour_sampler == 2) return t_colour.Sample(s_point_clamp, at);\n"
+       "  return t_colour.Sample(s_linear_clamp, at);\n"
+       "}\n"},
+      {"float4 sample_base(float2 at, float4 d) {\n"
+       "  float4 t;\n"
+       "  uint sel = t_base_sampler & 3;\n"
+       "  if (t_base_sampler & 4) {\n"
+       "    if (sel == 0) t = t_base.SampleLevel(s_point_wrap, at, 0);\n"
+       "    else if (sel == 1) t = t_base.SampleLevel(s_linear_wrap, at, 0);\n"
+       "    else if (sel == 2) t = t_base.SampleLevel(s_point_clamp, at, 0);\n"
+       "    else t = t_base.SampleLevel(s_linear_clamp, at, 0);\n"
+       "  } else if (sel == 0) t = t_base.SampleGrad(s_point_wrap, at, d.xy, d.zw);\n"
+       "  else if (sel == 1) t = t_base.SampleGrad(s_linear_wrap, at, d.xy, d.zw);\n"
+       "  else if (sel == 2) t = t_base.SampleGrad(s_point_clamp, at, d.xy, d.zw);\n"
+       "  else t = t_base.SampleGrad(s_linear_clamp, at, d.xy, d.zw);\n",
+       "float4 sample_base(float2 at, float4 d) {\n"
+       "  float4 t;\n"
+       "  if (t_base_sampler == 0) t = t_base.SampleGrad(s_point_wrap, at, d.xy, d.zw);\n"
+       "  else if (t_base_sampler == 1) t = t_base.SampleGrad(s_linear_wrap, at, d.xy, d.zw);\n"
+       "  else if (t_base_sampler == 2) t = t_base.SampleGrad(s_point_clamp, at, d.xy, d.zw);\n"
+       "  else t = t_base.SampleGrad(s_linear_clamp, at, d.xy, d.zw);\n"},
+      {"float4 sample_side(float2 at, float4 d) {\n"
+       "  uint sel = t_side_sampler & 3;\n"
+       "  if (t_side_sampler & 4) {\n"
+       "    if (sel == 0) return t_side.SampleLevel(s_point_wrap, at, 0);\n"
+       "    if (sel == 1) return t_side.SampleLevel(s_linear_wrap, at, 0);\n"
+       "    if (sel == 2) return t_side.SampleLevel(s_point_clamp, at, 0);\n"
+       "    return t_side.SampleLevel(s_linear_clamp, at, 0);\n"
+       "  }\n"
+       "  if (sel == 0) return t_side.SampleGrad(s_point_wrap, at, d.xy, d.zw);\n"
+       "  if (sel == 1) return t_side.SampleGrad(s_linear_wrap, at, d.xy, d.zw);\n"
+       "  if (sel == 2) return t_side.SampleGrad(s_point_clamp, at, d.xy, d.zw);\n"
+       "  return t_side.SampleGrad(s_linear_clamp, at, d.xy, d.zw);\n"
+       "}\n",
+       "float4 sample_side(float2 at, float4 d) {\n"
+       "  if (t_side_sampler == 0) return t_side.SampleGrad(s_point_wrap, at, d.xy, d.zw);\n"
+       "  if (t_side_sampler == 1) return t_side.SampleGrad(s_linear_wrap, at, d.xy, d.zw);\n"
+       "  if (t_side_sampler == 2) return t_side.SampleGrad(s_point_clamp, at, d.xy, d.zw);\n"
+       "  return t_side.SampleGrad(s_linear_clamp, at, d.xy, d.zw);\n"
+       "}\n"},
+  };
+  for (const Pair& p : pairs) {
+    for (size_t at = text.find(p.now); at != std::string::npos; at = text.find(p.now, at + 1)) text.replace(at, std::strlen(p.now), p.before);
+  }
+  return text;
+}
+
 int main() {
   using namespace fable2::native::shaders;
   if (!Compile("fullscreen_vs", kFullscreenVs, "vs_5_0")) return 1;
@@ -1636,7 +1745,7 @@ int main() {
     // The fetches inside the branch take the derivatives formed outside it, with the side texture's own sampler.
     if (!strstr(l, "t_side.SampleGrad(s_point_wrap, at, d.xy, d.zw)") || !strstr(l, "t_side.SampleGrad(s_linear_wrap, at, d.xy, d.zw)") ||
         !strstr(l, "t_side.SampleGrad(s_point_clamp, at, d.xy, d.zw)") || !strstr(l, "t_side.SampleGrad(s_linear_clamp, at, d.xy, d.zw)") ||
-        !strstr(l, "if (t_side_sampler == 0)")) return 44;
+        !strstr(l, "if (t_side_sampler & 4)")) return 44;
     if (!DisassemblyHas("clay_terrain_layer_ps", l, "ps_5_0", "sample_d") || CallsSqrt(l)) return 45;
     // The far shader has no block: no side texture (its one derivative fetch is the light's base map, at t8).
     if (strstr(kClayTerrainFarPs, "t_side :") || strstr(kClayTerrainFarPs, "sample_side") || CallsSqrt(kClayTerrainFarPs) ||
@@ -1651,6 +1760,27 @@ int main() {
       sampler = sampler || (!strcmp(f.name, "t_side_sampler") && f.bytes == 4);
     }
     if (!side_uv || !slope || !threshold || !eps || !sampler) return 47;
+  }
+  // 56: sub-project 15: the sampler words' bit 2 (level 0 only). Each of the five sites selects the register by
+  // the word's low two bits and, with bit 2, samples with SampleLevel 0 (bilinear at level 0, isotropic whatever
+  // s1 and s3 are: D3D11.3 functional spec 7.18.11); without it as before. The compiled programs read sample_l
+  // beside sample / sample_d at those sites.
+  {
+    using namespace fable2::native::shaders;
+    const char* sites[] = {
+        "    uint sampler_select = sampler_index & 3;\n    if (sampler_index & 4) {\n      if (sampler_select == 0) t = albedo.SampleLevel(s_point_wrap, uv, 0);\n",
+        "float4 sample_colour(float2 at) {\n  uint sel = t_colour_sampler & 3;\n  if (t_colour_sampler & 4) {\n",
+        "float4 sample_base(float2 at, float4 d) {\n  float4 t;\n  uint sel = t_base_sampler & 3;\n  if (t_base_sampler & 4) {\n",
+        "float4 sample_side(float2 at, float4 d) {\n  uint sel = t_side_sampler & 3;\n  if (t_side_sampler & 4) {\n",
+    };
+    if (!strstr(kClayTexturedPs, sites[0]) || !strstr(kClayShadowPs, sites[0]) || !strstr(kClayTerrainLayerPs, sites[1]) ||
+        !strstr(kClayTerrainFarPs, sites[1]) || !strstr(kClayTerrainLayerPs, sites[2]) || !strstr(kClayTerrainLayerPs, sites[3])) return 56;
+    for (const char* src : {kClayTexturedPs, kClayShadowPs, kClayTerrainLayerPs, kClayTerrainFarPs}) {
+      const std::string l = Disassembly("level0", src, "ps_5_0");
+      if (l.find("sample_l") == std::string::npos) return 56;
+    }
+    if (!DisassemblyHas("clay_terrain_layer_ps", kClayTerrainLayerPs, "ps_5_0", "sample_d")) return 56;
+    std::cout << "level-0 bit: five sites select by the low bits and SampleLevel 0 with bit 2\n";
   }
   // The draw constants (cbuffer Draw, register b0) lie where ClayConstants has them, in the compiled
   // vertex shader and in each of the four compiled pixel shaders: the text checks above say that the
@@ -2034,7 +2164,7 @@ int main() {
     // The base map is the fourth terrain texture (t8), read with its own sampler and the derivatives
     // formed outside the branch, in both terrain shaders.
     for (const char* src : {kClayTerrainLayerPs, kClayTerrainFarPs}) {
-      if (!strstr(src, "Texture2D t_base : register(t8);") || !strstr(src, "if (t_base_sampler == 0)") ||
+      if (!strstr(src, "Texture2D t_base : register(t8);") || !strstr(src, "if (t_base_sampler & 4)") ||
           !strstr(src, "t_base.SampleGrad(s_point_wrap, at, d.xy, d.zw)") ||
           !strstr(src, "t_base.SampleGrad(s_linear_wrap, at, d.xy, d.zw)") ||
           !strstr(src, "t_base.SampleGrad(s_point_clamp, at, d.xy, d.zw)") ||
@@ -2665,7 +2795,8 @@ int main() {
               (listing.find("cb2[13]") != std::string::npos) != lit || (listing.find("cb1[17]") != std::string::npos) != (lit && !plant) ||
               ReadsComponent(listing, "cb2[2]", 'w') != lit ||
               ReadsComponent(listing, "cb2[4]", 'w') != lit || ReadsComponent(listing, "cb2[5]", 'w') != lit || ReadsResource(listing, 4) != lit ||
-              (listing.find("sample_l") != std::string::npos) != lit ||
+              // (the level-0 fetch of the mask, at t4; since sub-project 15 the albedo has a level-0 fetch of its own, at t3)
+              (TextureReadDepth(listing, "sample_l", 4) >= 0) != lit ||
               (lit && ((plant && !plant_lit) || leaf) && (ReadsComponent(listing, "cb2[3]", 'x') || listing.find("cb2[4].x") != std::string::npos)) ||
               HasLineWith(listing, "dcl_input_ps", "v7.xyzw") != plant || HasLineWith(listing, "dcl_input_ps", "v7.xy") != (plant || leaf) ||
               (leaf && (listing.find("cb2[0]") != std::string::npos || !HasOp(listing, "ge")))) {
@@ -2816,8 +2947,8 @@ int main() {
           {"light_sun", 3, "  return sun_col * (saturate(n_dot_sun) * sun_gate);",
            "  n_dot_sun = 1.0;\n  return sun_col * (saturate(n_dot_sun) * sun_gate);", 6},
           {"AmbientAxis", 0, "  float k = 0.5 + 0.5 * dot(normal, axis);", "  axis = -axis;\n  float k = 0.5 + 0.5 * dot(normal, axis);", 6},
-          {"sample_base", 2, "  if (t_base_sampler == 0) t = t_base.SampleGrad(s_point_wrap, at, d.xy, d.zw);",
-           "  at = at * 0.5;\n  if (t_base_sampler == 0) t = t_base.SampleGrad(s_point_wrap, at, d.xy, d.zw);", 3},
+          {"sample_base", 2, "  uint sel = t_base_sampler & 3;\n  if (t_base_sampler & 4) {",
+           "  at = at * 0.5;\n  uint sel = t_base_sampler & 3;\n  if (t_base_sampler & 4) {", 3},
           {"base_linear", 3, "  float3 l = g * (261120.0 * scale) + offset;", "  float3 l = g * (261120.0 * scale);", 3},
           {"layer normal", 2, "  [branch] if (light_mode & 4) {\n    float3 N = light_normalize(normal);\n    float facing",
            "  if (light_mode & 4) normal = -normal;\n  [branch] if (light_mode & 4) {\n    float3 N = light_normalize(normal);\n    float facing", 4},
@@ -4982,9 +5113,13 @@ int main() {
     if (!same_compiler) {
       std::cout << "wind: NOT JUDGED: this compiler is not the one the clay programs' bytes of before the wind were recorded with\n";
     } else {
+      for (const char* changed : {kClayTexturedPs, kClayTerrainLayerPs, kClayTerrainFarPs, kClayShadowPs}) {
+        if (SamplerSelectBefore(changed) == changed) return WindCaseFails(__LINE__);  // (the transform reaches the four sampler programs)
+      }
       for (size_t i = 0; i + 1 < std::size(before); ++i) {
         size_t size = 0;
-        const uint64_t hash = CodeHash(before[i].name, before[i].src, before[i].target, &size);
+        const std::string historical = SamplerSelectBefore(before[i].src);  // (the sampler sites as before sub-project 15)
+        const uint64_t hash = CodeHash(before[i].name, historical.c_str(), before[i].target, &size);
         if (hash != before[i].hash || size != before[i].size) {
           std::cerr << before[i].name << " without CLAY_WIND is not the program of before the wind: " << size << " bytes, hash " << std::hex
                     << hash << std::dec << "\n";
@@ -5138,8 +5273,9 @@ int main() {
       if (!same_compiler) {
         std::cout << "coverage: NOT JUDGED: this compiler is not the one the textured programs' bytes of before were recorded with\n";
       } else {
-        if (CodeHash("clay_textured_ps", kClayTexturedPs, "ps_5_0", &size) != 0x0A1DC9F23AF13290ull || size != 23936) return fails(__LINE__);
-        if (CodeHash("clay_textured_depth_ps", kClayTexturedDepthPs, "ps_5_0", &size) != 0xF057CCDD7BE1C5C7ull || size != 6016) return fails(__LINE__);
+        // (sub-project 15: the sampler sites as they were before the level-0 bit; case 52 holds the transform to the four programs)
+        if (CodeHash("clay_textured_ps", SamplerSelectBefore(kClayTexturedPs).c_str(), "ps_5_0", &size) != 0x0A1DC9F23AF13290ull || size != 23936) return fails(__LINE__);
+        if (CodeHash("clay_textured_depth_ps", SamplerSelectBefore(kClayTexturedDepthPs).c_str(), "ps_5_0", &size) != 0xF057CCDD7BE1C5C7ull || size != 6016) return fails(__LINE__);
         // (control: the half program is another program)
         if (CodeHash("clay_textured_half_ps", kClayTexturedHalfPs, "ps_5_0", &size) == 0x0A1DC9F23AF13290ull || size == 0) return fails(__LINE__);
       }
@@ -5361,9 +5497,13 @@ int main() {
     if (!same_compiler) {
       std::cout << "impostors: NOT JUDGED: this compiler is not the one the programs' bytes of before the impostor step were recorded with\n";
     } else {
+      for (const char* changed : {kClayTexturedPs, kClayTerrainLayerPs, kClayTerrainFarPs, kClayShadowPs}) {
+        if (SamplerSelectBefore(changed) == changed) return fails(__LINE__);  // (the transform reaches the four sampler programs)
+      }
       for (size_t i = 0; i + 1 < std::size(before); ++i) {
         size_t size = 0;
-        const uint64_t hash = CodeHash(before[i].name, before[i].src, before[i].target, &size);
+        const std::string historical = SamplerSelectBefore(before[i].src);  // (the sampler sites as before sub-project 15)
+        const uint64_t hash = CodeHash(before[i].name, historical.c_str(), before[i].target, &size);
         if (hash != before[i].hash || size != before[i].size) {
           std::cerr << before[i].name << " is not the program of before the impostor step: " << size << " bytes, hash " << std::hex << hash << std::dec << "\n";
           return fails(__LINE__);
@@ -5686,9 +5826,13 @@ int main() {
     if (!same_compiler) {
       std::cout << "water: NOT JUDGED: this compiler is not the one the programs' bytes of before the water were recorded with\n";
     } else {
+      for (const char* changed : {kClayTexturedPs, kClayTerrainLayerPs, kClayTerrainFarPs, kClayShadowPs}) {
+        if (SamplerSelectBefore(changed) == changed) return fails(__LINE__);  // (the transform reaches the four sampler programs)
+      }
       for (size_t i = 0; i + 1 < std::size(before); ++i) {
         size_t size = 0;
-        const uint64_t hash = CodeHash(before[i].name, before[i].src, before[i].target, &size);
+        const std::string historical = SamplerSelectBefore(before[i].src);  // (the sampler sites as before sub-project 15)
+        const uint64_t hash = CodeHash(before[i].name, historical.c_str(), before[i].target, &size);
         if (hash != before[i].hash || size != before[i].size) {
           std::cerr << before[i].name << " is not the program of before the water: " << size << " bytes, hash " << std::hex << hash << std::dec << "\n";
           return fails(__LINE__);

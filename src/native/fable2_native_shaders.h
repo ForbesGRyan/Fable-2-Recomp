@@ -808,9 +808,16 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
   float3 base;
   if (textured != 0) {
     float4 t;
-    if (sampler_index == 0) t = albedo.Sample(s_point_wrap, uv);
-    else if (sampler_index == 1) t = albedo.Sample(s_linear_wrap, uv);
-    else if (sampler_index == 2) t = albedo.Sample(s_point_clamp, uv);
+    // (the word's bit 2: level 0 only, an isotropic SampleLevel; texture_decode.h, SamplerBits)
+    uint sampler_select = sampler_index & 3;
+    if (sampler_index & 4) {
+      if (sampler_select == 0) t = albedo.SampleLevel(s_point_wrap, uv, 0);
+      else if (sampler_select == 1) t = albedo.SampleLevel(s_linear_wrap, uv, 0);
+      else if (sampler_select == 2) t = albedo.SampleLevel(s_point_clamp, uv, 0);
+      else t = albedo.SampleLevel(s_linear_clamp, uv, 0);
+    } else if (sampler_select == 0) t = albedo.Sample(s_point_wrap, uv);
+    else if (sampler_select == 1) t = albedo.Sample(s_linear_wrap, uv);
+    else if (sampler_select == 2) t = albedo.Sample(s_point_clamp, uv);
     else t = albedo.Sample(s_linear_clamp, uv);
     if (alpha_mode & 0x200) t.rgb = saturate(t.rgb / max(t.a, 1.0 / 255.0));
     float a = alpha_scale;
@@ -1026,9 +1033,16 @@ bool alpha_passes(float a, float ref, uint func) {
   return true;
 }
 float4 sample_colour(float2 at) {
-  if (t_colour_sampler == 0) return t_colour.Sample(s_point_wrap, at);
-  if (t_colour_sampler == 1) return t_colour.Sample(s_linear_wrap, at);
-  if (t_colour_sampler == 2) return t_colour.Sample(s_point_clamp, at);
+  uint sel = t_colour_sampler & 3;
+  if (t_colour_sampler & 4) {
+    if (sel == 0) return t_colour.SampleLevel(s_point_wrap, at, 0);
+    if (sel == 1) return t_colour.SampleLevel(s_linear_wrap, at, 0);
+    if (sel == 2) return t_colour.SampleLevel(s_point_clamp, at, 0);
+    return t_colour.SampleLevel(s_linear_clamp, at, 0);
+  }
+  if (sel == 0) return t_colour.Sample(s_point_wrap, at);
+  if (sel == 1) return t_colour.Sample(s_linear_wrap, at);
+  if (sel == 2) return t_colour.Sample(s_point_clamp, at);
   return t_colour.Sample(s_linear_clamp, at);
 }
 // What the console's fetch gives for a component whose sign field is 3 (gamma): the stored value through
@@ -1047,9 +1061,15 @@ float3 base_linear(float3 g) {
 // filter, as the game's fetch gives them.
 float4 sample_base(float2 at, float4 d) {
   float4 t;
-  if (t_base_sampler == 0) t = t_base.SampleGrad(s_point_wrap, at, d.xy, d.zw);
-  else if (t_base_sampler == 1) t = t_base.SampleGrad(s_linear_wrap, at, d.xy, d.zw);
-  else if (t_base_sampler == 2) t = t_base.SampleGrad(s_point_clamp, at, d.xy, d.zw);
+  uint sel = t_base_sampler & 3;
+  if (t_base_sampler & 4) {
+    if (sel == 0) t = t_base.SampleLevel(s_point_wrap, at, 0);
+    else if (sel == 1) t = t_base.SampleLevel(s_linear_wrap, at, 0);
+    else if (sel == 2) t = t_base.SampleLevel(s_point_clamp, at, 0);
+    else t = t_base.SampleLevel(s_linear_clamp, at, 0);
+  } else if (sel == 0) t = t_base.SampleGrad(s_point_wrap, at, d.xy, d.zw);
+  else if (sel == 1) t = t_base.SampleGrad(s_linear_wrap, at, d.xy, d.zw);
+  else if (sel == 2) t = t_base.SampleGrad(s_point_clamp, at, d.xy, d.zw);
   else t = t_base.SampleGrad(s_linear_clamp, at, d.xy, d.zw);
   float3 l = base_linear(t.rgb);
   return float4((t_base_gamma & 1) ? l.r : t.r, (t_base_gamma & 2) ? l.g : t.g, (t_base_gamma & 4) ? l.b : t.b, t.a);
@@ -1093,9 +1113,16 @@ Texture2D t_side : register(t7);
 Texture2D shadow_mask : register(t4);
 // The side texture at `at` with the screen derivatives d = (ddx, ddy) of the coordinate.
 float4 sample_side(float2 at, float4 d) {
-  if (t_side_sampler == 0) return t_side.SampleGrad(s_point_wrap, at, d.xy, d.zw);
-  if (t_side_sampler == 1) return t_side.SampleGrad(s_linear_wrap, at, d.xy, d.zw);
-  if (t_side_sampler == 2) return t_side.SampleGrad(s_point_clamp, at, d.xy, d.zw);
+  uint sel = t_side_sampler & 3;
+  if (t_side_sampler & 4) {
+    if (sel == 0) return t_side.SampleLevel(s_point_wrap, at, 0);
+    if (sel == 1) return t_side.SampleLevel(s_linear_wrap, at, 0);
+    if (sel == 2) return t_side.SampleLevel(s_point_clamp, at, 0);
+    return t_side.SampleLevel(s_linear_clamp, at, 0);
+  }
+  if (sel == 0) return t_side.SampleGrad(s_point_wrap, at, d.xy, d.zw);
+  if (sel == 1) return t_side.SampleGrad(s_linear_wrap, at, d.xy, d.zw);
+  if (sel == 2) return t_side.SampleGrad(s_point_clamp, at, d.xy, d.zw);
   return t_side.SampleGrad(s_linear_clamp, at, d.xy, d.zw);
 }
 float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOORD1,
@@ -1195,9 +1222,15 @@ bool alpha_passes(float a, float ref, uint func) {
 float main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOORD1) : SV_Depth {
   if (textured != 0) {
     float4 t;
-    if (sampler_index == 0) t = albedo.Sample(s_point_wrap, uv);
-    else if (sampler_index == 1) t = albedo.Sample(s_linear_wrap, uv);
-    else if (sampler_index == 2) t = albedo.Sample(s_point_clamp, uv);
+    uint sampler_select = sampler_index & 3;
+    if (sampler_index & 4) {
+      if (sampler_select == 0) t = albedo.SampleLevel(s_point_wrap, uv, 0);
+      else if (sampler_select == 1) t = albedo.SampleLevel(s_linear_wrap, uv, 0);
+      else if (sampler_select == 2) t = albedo.SampleLevel(s_point_clamp, uv, 0);
+      else t = albedo.SampleLevel(s_linear_clamp, uv, 0);
+    } else if (sampler_select == 0) t = albedo.Sample(s_point_wrap, uv);
+    else if (sampler_select == 1) t = albedo.Sample(s_linear_wrap, uv);
+    else if (sampler_select == 2) t = albedo.Sample(s_point_clamp, uv);
     else t = albedo.Sample(s_linear_clamp, uv);
     float a = alpha_scale;
     if (alpha_mode & 0x10) {

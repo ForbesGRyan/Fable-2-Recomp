@@ -924,10 +924,10 @@ class ClayPass {
   nrhi::TextureView* water_blur_view_ = nullptr;
   bool water_objects_ = false, water_objects_failed_ = false;
   // The RHI has no layout destruction: cache the six filtering modes, including hot reload.
-  nrhi::BindingLayout* water_layouts_[kWaterFilterModes] = {};
+  nrhi::BindingLayout* water_layouts_[kFilterModes] = {};
   nrhi::Shader* water_vs_ = nullptr;
   nrhi::Shader* water_ps_ = nullptr;
-  nrhi::Pipeline* water_pipelines_[kWaterFilterModes][3] = {};   // filter mode, then capture::Cull
+  nrhi::Pipeline* water_pipelines_[kFilterModes][3] = {};   // filter mode, then capture::Cull
   uint32_t water_step_slots_ = 0;
   ClayFrameSlotPlan water_slots_{};
   struct WaterSurface {

@@ -12,7 +12,7 @@
 #include "../capture/guest_read.h"
 #include "../capture/xdk_hook_ids.h"
 #include "../fable2_native_shaders.h"
-#include "water_sampler.h"
+#include "clay_samplers.h"
 
 namespace fable2::native::render {
 
@@ -2812,7 +2812,7 @@ void ClayPass::DestroyWaterObjects() {
 }
 
 bool ClayPass::EnsureWaterObjects(nrhi::Device* dev, uint32_t filter_mode) {
-  if (filter_mode >= kWaterFilterModes) return false;
+  if (filter_mode >= kFilterModes) return false;
   if (water_objects_ && water_pipelines_[filter_mode][0]) return true;
   if (water_objects_failed_ || !ready_ || dev != device_) return false;
   auto fail = [&](const char* what) {
@@ -2848,7 +2848,7 @@ bool ClayPass::EnsureWaterObjects(nrhi::Device* dev, uint32_t filter_mode) {
     static_assert(kClayStaticSamplers == 4 && kWaterParamIndices == kWaterParamPositions + 1 && kWaterParamPair == kWaterParamPositions + 2);
     // SampleGrad normal fetches inherit the shared override. Mask/reflection use
     // SampleLevel(0), which remains isotropic even with an anisotropic sampler.
-    ConfigureWaterSamplers(desc, filter_mode);
+    ConfigureClaySamplers(desc, filter_mode);
     desc.allow_input_layout = false;
     layout = dev->CreateBindingLayout(desc);
     if (!layout) return fail("water binding layout creation");
@@ -2890,7 +2890,7 @@ bool ClayPass::EnsureWaterObjects(nrhi::Device* dev, uint32_t filter_mode) {
               "record, b2 the frame's block, t3 to t5 the positions, the indices and the mask's coordinates, t0 to t2 the mask, the "
               "normal map and the record's reflection target; normal filtering {}, anisotropic_override mode {})",
               sizeof(ClayWaterConstants), kClayWaterSlots,
-              filter_mode ? std::to_string(WaterFilterAnisotropy(filter_mode)) + "x anisotropic" : "linear",
+              filter_mode ? std::to_string(FilterAnisotropy(filter_mode)) + "x anisotropic" : "linear",
               filter_mode);
   return true;
 }

@@ -2673,15 +2673,15 @@ static void ReflectionTargetTests() {
 
 static void WaterTests() {
   // SDK modes: no override/disabled and invalid values retain linear; 1..5 force 1x..16x.
-  CHECK(867, kWaterFilterModes == 6 && WaterFilterMode(-1) == 0 && WaterFilterMode(0) == 0 &&
-                 WaterFilterMode(-2) == 0 && WaterFilterMode(6) == 0 &&
-                 WaterFilterMode(std::numeric_limits<int32_t>::min()) == 0 &&
-                 WaterFilterMode(std::numeric_limits<int32_t>::max()) == 0);
+  CHECK(867, kFilterModes == 6 && FilterMode(-1) == 0 && FilterMode(0) == 0 &&
+                 FilterMode(-2) == 0 && FilterMode(6) == 0 &&
+                 FilterMode(std::numeric_limits<int32_t>::min()) == 0 &&
+                 FilterMode(std::numeric_limits<int32_t>::max()) == 0);
   constexpr uint32_t anisotropy[] = {1, 1, 2, 4, 8, 16};
-  for (uint32_t mode = 0; mode < kWaterFilterModes; ++mode) {
-    CHECK(867, WaterFilterMode(int32_t(mode)) == mode && WaterFilterAnisotropy(mode) == anisotropy[mode]);
+  for (uint32_t mode = 0; mode < kFilterModes; ++mode) {
+    CHECK(867, FilterMode(int32_t(mode)) == mode && FilterAnisotropy(mode) == anisotropy[mode]);
   }
-  CHECK(867, WaterFilterAnisotropy(6) == 1 && WaterFilterAnisotropy(~0u) == 1);
+  CHECK(867, FilterAnisotropy(6) == 1 && FilterAnisotropy(~0u) == 1);
   using namespace water_pins;
   const float kNan = std::numeric_limits<float>::quiet_NaN();
   CHECK(838, std::string(ClayWaterName(ClayWater::kDrawn)) == "drawn" && std::string(ClayWaterName(ClayWater::kOpaqueLive)) == "opaque-live" &&

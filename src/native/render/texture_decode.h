@@ -783,7 +783,7 @@ inline uint32_t SamplerBits(const TextureFetch& t, uint32_t levels) {
 }
 
 // The word TextureCache::Resolve hands out: an albedo's SamplerBits of the levels the cache bound; a water
-// texture's SamplerIndex (the water step's own rule, water_sampler.h, judges its filtering).
+// texture's SamplerIndex (the water step's own rule, clay_samplers.h, judges its filtering).
 inline uint32_t ResolveSamplerWord(const TextureFetch& t, uint32_t bound_levels, bool water) {
   return water ? SamplerIndex(t) : SamplerBits(t, bound_levels);
 }

@@ -631,6 +631,10 @@ static const char kPinLight[] = R"pin(cbuffer Frame : register(b2) {
   float4 f_inv0; float4 f_inv1; float4 f_inv2; float4 f_inv3;   // the frame's inverse view-projection, rows
   float4 f_scatter[64];                  // tf4: the in-scatter colour by the angle to the axis (rgb)
   float4 f_transmit[256];                // tf5: the transmittance by distance (rgb)
+  float4 f_lanterns[256];                // the frame's lanterns, four float4 each: (pos, w), (col, blend), (range, cone_cos, cone_scale, shadow), (axis, 0)
+#elif defined(CLAY_LANTERNS_VS)
+  float4 f_fog_pad[327];                 // the fog's tail, which the vertex shader does not read
+  float4 f_lanterns[256];
 #endif
 };
 float3 light_normalize(float3 v) {
@@ -2079,7 +2083,8 @@ int main() {
       const unsigned object_count = sizeof(kClayObjectFields) / sizeof(kClayObjectFields[0]);
       using fable2::native::render::ClayFogConstants;
       static_assert(fable2::native::render::kClayFrameLightBytes == kClayFrameLightSize && sizeof(ClayFrameConstants) == kClayFrameSize &&
-                    kClayFrameLightSize == 112 && kClayFrameSize == 5344 && sizeof(ClayObjectConstants) == 288);
+                    kClayFrameLightSize == 112 && kClayFrameSize == 9440 && kClayFrameLanternSize == 5344 &&
+                    fable2::native::render::kClayFrameLanternBytes == kClayFrameLanternSize && sizeof(ClayObjectConstants) == 288);
       // The fog's tail of the frame's block (kClayFrameFogFields) against the C++ struct, and the whole
       // block as the lit pixel shaders declare it: the light's fields, then the tail's.
       const unsigned fog_count = sizeof(kClayFrameFogFields) / sizeof(kClayFrameFogFields[0]);
@@ -2112,10 +2117,21 @@ int main() {
         // (the tables are arrays of float4 a register apart: 64 and 256 registers; the sky step will read
         // f_scatter at the same offset)
         if (kClayFrameFogFields[12].offset != 224 || kClayFrameFogFields[12].bytes != 64 * 16 || kClayFrameFogFields[13].offset != 1248 ||
-            kClayFrameFogFields[13].bytes != 256 * 16 || kClayFrameFogFields[13].offset + kClayFrameFogFields[13].bytes != kClayFrameSize) return 89;
+            kClayFrameFogFields[13].bytes != 256 * 16 || kClayFrameFogFields[13].offset + kClayFrameFogFields[13].bytes != kClayFrameLanternSize) return 89;
+        // (the local lights' lanterns after the tables, to the block's end: 64 lanterns of four registers)
+        if (std::size(kClayFrameLanternFields) != 1 || strcmp(kClayFrameLanternFields[0].name, "f_lanterns") ||
+            kClayFrameLanternFields[0].offset != offsetof(ClayFrameConstants, lanterns) ||
+            kClayFrameLanternFields[0].bytes != sizeof(ClayFrameConstants::lanterns) || kClayFrameLanternFields[0].bytes != 256 * 16 ||
+            kClayFrameLanternFields[0].offset + kClayFrameLanternFields[0].bytes != kClayFrameSize) return 89;
       }
       std::vector<fable2::native::shaders::ClayBufferField> frame_with_fog(kClayFrameFields, kClayFrameFields + 14);
       frame_with_fog.insert(frame_with_fog.end(), kClayFrameFogFields, kClayFrameFogFields + fog_count);
+      frame_with_fog.insert(frame_with_fog.end(), std::begin(kClayFrameLanternFields), std::end(kClayFrameLanternFields));
+      // The vertex shader's block (CLAY_LANTERNS_VS): the light's fields, one pad over the fog's tail, and
+      // the lanterns where the lit pixel shaders have them.
+      std::vector<fable2::native::shaders::ClayBufferField> frame_vs(kClayFrameFields, kClayFrameFields + 14);
+      frame_vs.push_back({"f_fog_pad", kClayFrameLightSize, kClayFrameLanternSize - kClayFrameLightSize});
+      frame_vs.insert(frame_vs.end(), std::begin(kClayFrameLanternFields), std::end(kClayFrameLanternFields));
       const struct {
         const char* name;
         size_t offset, bytes;
@@ -2170,9 +2186,10 @@ int main() {
         if (strstr(src, "float exposure") || strstr(src, "f_pad3")) return 89;
       }
       for (int i = 0; i < 4; ++i) {
-        // The vertex shader declares the light's part; the three lit pixel shaders the whole block.
+        // The vertex shader declares the light's part, a pad and the lanterns (the local lights: f_lanterns at
+        // 5344, as the lit pixel shaders have it); the three lit pixel shaders the whole block.
         const char* target = i == 0 ? "vs_5_0" : "ps_5_0";
-        const int at = i == 0 ? BufferLayoutMismatch("lit", lit_shaders[i], target, "Frame", kClayFrameFields, frame_count, kClayFrameLightSize)
+        const int at = i == 0 ? BufferLayoutMismatch("lit", lit_shaders[i], target, "Frame", frame_vs.data(), unsigned(frame_vs.size()), kClayFrameSize)
                               : BufferLayoutMismatch("lit", lit_shaders[i], target, "Frame", frame_with_fog.data(),
                                                      unsigned(frame_with_fog.size()), kClayFrameSize);
         if (at) {
@@ -2668,7 +2685,7 @@ int main() {
           // of the frame's registers 4 and 5, so it declares six registers of the block, and samples the
           // mask at t4; no unlit program does either)
           if (slot != (lit && !plant ? 18u : 0u) || ReadsBlock(listing, "cb1") != (lit && !plant) ||
-              frame != (!lit ? 4u : kClayFrameSize / 16) || frame_dynamic != lit || ReadsFrameBeyondPost(listing) != lit ||
+              frame != (!lit ? 4u : kClayFrameLanternSize / 16) || frame_dynamic != lit || ReadsFrameBeyondPost(listing) != lit ||
               !ReadsComponent(listing, "cb2[3]", 'w') ||
               ReadsComponent(listing, "cb2[7]", 'w') != lit || (listing.find("cb2[6]") != std::string::npos) != lit ||
               (listing.find("cb2[13]") != std::string::npos) != lit || (listing.find("cb1[17]") != std::string::npos) != (lit && !plant) ||
@@ -3391,7 +3408,7 @@ int main() {
       const std::string listing = Disassembly(s.name, WithLightMode(s.src, mode).c_str(), "ps_5_0");
       const std::string before = Disassembly("without_fog", WithLightMode(without_fog(s.src).c_str(), mode).c_str(), "ps_5_0");
       bool dynamic = false;
-      if (DeclaredRegisters(listing, 2, &dynamic) != kClayFrameSize / 16 || !dynamic) return 202;
+      if (DeclaredRegisters(listing, 2, &dynamic) != kClayFrameLanternSize / 16 || !dynamic) return 202;
       const size_t table = listing.find(" + 14]");  // f_scatter starts at register 14 (byte 224)
       const size_t far_table = listing.find(" + 78]");  // f_transmit at register 78 (byte 1248)
       const size_t test = listing.find("\nif_");
@@ -3526,6 +3543,7 @@ int main() {
       const unsigned light = sizeof(kClayFrameFields) / sizeof(kClayFrameFields[0]), tail = sizeof(kClayFrameFogFields) / sizeof(kClayFrameFogFields[0]);
       std::vector<ClayBufferField> frame(kClayFrameFields, kClayFrameFields + light);
       frame.insert(frame.end(), kClayFrameFogFields, kClayFrameFogFields + tail);
+      frame.insert(frame.end(), std::begin(kClayFrameLanternFields), std::end(kClayFrameLanternFields));  // (unread here)
       if (int at = BufferLayoutMismatch("clay_sky_ps", s, "ps_5_0", "Frame", frame.data(), unsigned(frame.size()), kClayFrameSize)) {
         std::cerr << "cbuffer Frame of the sky shader: " << at << "\n";
         return 206;
@@ -3784,7 +3802,7 @@ int main() {
         const std::string listing = Disassembly(s.name, WithLightMode(s.src, bits).c_str(), "ps_5_0");
         const std::string plain = Disassembly(s.name, WithLightMode(s.src, 0).c_str(), "ps_5_0");
         bool dynamic = false;
-        if (DeclaredRegisters(listing, 2, &dynamic) != kClayFrameSize / 16 || !dynamic) return 211;
+        if (DeclaredRegisters(listing, 2, &dynamic) != kClayFrameLanternSize / 16 || !dynamic) return 211;
         const size_t table = listing.find(" + 14]"), far_table = listing.find(" + 78]"), test = listing.find("\nif_");
         if (table == std::string::npos || far_table == std::string::npos || test == std::string::npos || test > table || test > far_table) return 211;
         if (HasOp(listing, "sqrt") || LoopInstructions(listing) != 0 || listing.find("ld_structured") != std::string::npos) return 211;
@@ -4981,11 +4999,11 @@ int main() {
       uint64_t hash;
       size_t size;
     } before[] = {
-        {"clay_vs", kClayVs, "vs_5_0", 0xF0C497A468DB5633ull, 10428},
-        {"clay_ps", kClayPs, "ps_5_0", 0xA7ECF4E6B3AACD13ull, 8052},
-        {"clay_textured_ps", kClayTexturedPs, "ps_5_0", 0x0A1DC9F23AF13290ull, 23936},
-        {"clay_terrain_layer_ps", kClayTerrainLayerPs, "ps_5_0", 0x6642A40C9496D997ull, 16452},
-        {"clay_terrain_far_ps", kClayTerrainFarPs, "ps_5_0", 0xBE457649660BC0AAull, 13324},
+        {"clay_vs", kClayVs, "vs_5_0", 0xF2F04B1393A09DEBull, 10600},
+        {"clay_ps", kClayPs, "ps_5_0", 0x641C4964951B95DDull, 8140},
+        {"clay_textured_ps", kClayTexturedPs, "ps_5_0", 0x32CE7FFFD48D9D1Full, 24024},
+        {"clay_terrain_layer_ps", kClayTerrainLayerPs, "ps_5_0", 0x16571B05FB1B94CEull, 16540},
+        {"clay_terrain_far_ps", kClayTerrainFarPs, "ps_5_0", 0x41A819169232191Dull, 13412},
         {"clay_textured_depth_ps", kClayTexturedDepthPs, "ps_5_0", 0xF057CCDD7BE1C5C7ull, 6016},
         {"clay_terrain_layer_depth_ps", kClayTerrainLayerDepthPs, "ps_5_0", 0x277FB8D3A19E5FC8ull, 5484},
         {"clay_terrain_far_depth_ps", kClayTerrainFarDepthPs, "ps_5_0", 0x1DB48924B7D66149ull, 2580},
@@ -5154,10 +5172,10 @@ int main() {
       if (!same_compiler) {
         std::cout << "coverage: NOT JUDGED: this compiler is not the one the textured programs' bytes of before were recorded with\n";
       } else {
-        if (CodeHash("clay_textured_ps", kClayTexturedPs, "ps_5_0", &size) != 0x0A1DC9F23AF13290ull || size != 23936) return fails(__LINE__);
+        if (CodeHash("clay_textured_ps", kClayTexturedPs, "ps_5_0", &size) != 0x32CE7FFFD48D9D1Full || size != 24024) return fails(__LINE__);
         if (CodeHash("clay_textured_depth_ps", kClayTexturedDepthPs, "ps_5_0", &size) != 0xF057CCDD7BE1C5C7ull || size != 6016) return fails(__LINE__);
         // (control: the half program is another program)
-        if (CodeHash("clay_textured_half_ps", kClayTexturedHalfPs, "ps_5_0", &size) == 0x0A1DC9F23AF13290ull || size == 0) return fails(__LINE__);
+        if (CodeHash("clay_textured_half_ps", kClayTexturedHalfPs, "ps_5_0", &size) == 0x32CE7FFFD48D9D1Full || size == 0) return fails(__LINE__);
       }
     }
     // The text's rule: everything of the coverage stands between #ifdef CLAY_COVERAGE and its #endif, three times
@@ -5335,20 +5353,20 @@ int main() {
         {"kFullscreenVs", kFullscreenVs, "vs_5_0", 0x2CA6AC1051441F86ull, 736},
         {"kPatternPs", kPatternPs, "ps_5_0", 0x335F8BDAD9F39207ull, 1036},
         {"kGridPs", kGridPs, "ps_5_0", 0xA7462A7107F0D99Eull, 784},
-        {"kClayVs", kClayVs, "vs_5_0", 0xF0C497A468DB5633ull, 10428},
-        {"kClayWindVs", kClayWindVs, "vs_5_0", 0x8ECF56628514A56Full, 19396},
-        {"kClayPs", kClayPs, "ps_5_0", 0xA7ECF4E6B3AACD13ull, 8052},
-        {"kClayTexturedPs", kClayTexturedPs, "ps_5_0", 0x0A1DC9F23AF13290ull, 23936},
+        {"kClayVs", kClayVs, "vs_5_0", 0xF2F04B1393A09DEBull, 10600},
+        {"kClayWindVs", kClayWindVs, "vs_5_0", 0x3C02F85AD59F36F5ull, 19568},
+        {"kClayPs", kClayPs, "ps_5_0", 0x641C4964951B95DDull, 8140},
+        {"kClayTexturedPs", kClayTexturedPs, "ps_5_0", 0x32CE7FFFD48D9D1Full, 24024},
         {"kClayTexturedDepthPs", kClayTexturedDepthPs, "ps_5_0", 0xF057CCDD7BE1C5C7ull, 6016},
-        {"kClayTexturedHalfPs", kClayTexturedHalfPs, "ps_5_0", 0xF2EC866E7560C7AAull, 23912},
-        {"kClayTexturedFullPs", kClayTexturedFullPs, "ps_5_0", 0xC6A183D761A3549Aull, 24236},
-        {"kClayTerrainLayerPs", kClayTerrainLayerPs, "ps_5_0", 0x6642A40C9496D997ull, 16452},
+        {"kClayTexturedHalfPs", kClayTexturedHalfPs, "ps_5_0", 0xB3921E3A06E393EEull, 24000},
+        {"kClayTexturedFullPs", kClayTexturedFullPs, "ps_5_0", 0xCDE38443D7C3884Aull, 24324},
+        {"kClayTerrainLayerPs", kClayTerrainLayerPs, "ps_5_0", 0x16571B05FB1B94CEull, 16540},
         {"kClayTerrainLayerDepthPs", kClayTerrainLayerDepthPs, "ps_5_0", 0x277FB8D3A19E5FC8ull, 5484},
-        {"kClayTerrainFarPs", kClayTerrainFarPs, "ps_5_0", 0xBE457649660BC0AAull, 13324},
+        {"kClayTerrainFarPs", kClayTerrainFarPs, "ps_5_0", 0x41A819169232191Dull, 13412},
         {"kClayTerrainFarDepthPs", kClayTerrainFarDepthPs, "ps_5_0", 0x1DB48924B7D66149ull, 2580},
         {"kClayShadowPs", kClayShadowPs, "ps_5_0", 0x2AEE57793156E0D9ull, 3920},
         {"kSkyVs", kSkyVs, "vs_5_0", 0x1261ACAA62F3AF95ull, 668},
-        {"kClaySkyPs", kClaySkyPs, "ps_5_0", 0xDD2C6D7B5E83AE48ull, 7012},
+        {"kClaySkyPs", kClaySkyPs, "ps_5_0", 0x63C9D2D9E8D7481Dull, 7100},
         {"kClayMaskPs", kClayMaskPs, "ps_5_0", 0x849E900311D40504ull, 12476},
         {"kOutputMapPs", kOutputMapPs, "ps_5_0", 0x70D413120D3278B1ull, 1072},
         {"kClayPostCompositePs", kClayPostCompositePs, "ps_5_0", 0x3A946A88248D92DEull, 5692},
@@ -5388,7 +5406,7 @@ int main() {
       // (control: the comparison sees one changed operand of the sky's program, the new programs' neighbour)
       size_t size = 0;
       const std::string other = Changed(kClaySkyPs, "sky * f_exposure", "sky * f_exposure * 1.01");
-      if (other.empty() || CodeHash("clay_sky_other", other.c_str(), "ps_5_0", &size) == 0xDD2C6D7B5E83AE48ull) return fails(__LINE__);
+      if (other.empty() || CodeHash("clay_sky_other", other.c_str(), "ps_5_0", &size) == 0x63C9D2D9E8D7481Dull) return fails(__LINE__);
     }
     // (the text's rule: no program of before names anything of the step; the two new programs are the frame's
     // light text with the fog's tail and their own)
@@ -5438,7 +5456,7 @@ int main() {
         BindPoint("clay_impostor_ps", s, "ps_5_0", "i_linear_clamp") != 3) return fails(__LINE__);
     bool dynamic = false;
     if (!HasLineWith(vs, "dcl_resource_structured", "t1, 16") || DeclaredRegisters(vs, 0) != kClayImpostorSize / 16 ||
-        DeclaredRegisters(vs, 2, &dynamic) != kClayFrameSize / 16 || !dynamic || DeclaredRegisters(ps, 0) != kClayImpostorSize / 16) {
+        DeclaredRegisters(vs, 2, &dynamic) != kClayFrameLanternSize / 16 || !dynamic || DeclaredRegisters(ps, 0) != kClayImpostorSize / 16) {
       std::cerr << "the impostor programs' declarations\n" << Code(vs);
       return fails(__LINE__);
     }
@@ -5657,20 +5675,20 @@ int main() {
         {"kFullscreenVs", kFullscreenVs, "vs_5_0", 0x2CA6AC1051441F86ull, 736},
         {"kPatternPs", kPatternPs, "ps_5_0", 0x335F8BDAD9F39207ull, 1036},
         {"kGridPs", kGridPs, "ps_5_0", 0xA7462A7107F0D99Eull, 784},
-        {"kClayVs", kClayVs, "vs_5_0", 0xF0C497A468DB5633ull, 10428},
-        {"kClayWindVs", kClayWindVs, "vs_5_0", 0x8ECF56628514A56Full, 19396},
-        {"kClayPs", kClayPs, "ps_5_0", 0xA7ECF4E6B3AACD13ull, 8052},
-        {"kClayTexturedPs", kClayTexturedPs, "ps_5_0", 0x0A1DC9F23AF13290ull, 23936},
+        {"kClayVs", kClayVs, "vs_5_0", 0xF2F04B1393A09DEBull, 10600},
+        {"kClayWindVs", kClayWindVs, "vs_5_0", 0x3C02F85AD59F36F5ull, 19568},
+        {"kClayPs", kClayPs, "ps_5_0", 0x641C4964951B95DDull, 8140},
+        {"kClayTexturedPs", kClayTexturedPs, "ps_5_0", 0x32CE7FFFD48D9D1Full, 24024},
         {"kClayTexturedDepthPs", kClayTexturedDepthPs, "ps_5_0", 0xF057CCDD7BE1C5C7ull, 6016},
-        {"kClayTexturedHalfPs", kClayTexturedHalfPs, "ps_5_0", 0xF2EC866E7560C7AAull, 23912},
-        {"kClayTexturedFullPs", kClayTexturedFullPs, "ps_5_0", 0xC6A183D761A3549Aull, 24236},
-        {"kClayTerrainLayerPs", kClayTerrainLayerPs, "ps_5_0", 0x6642A40C9496D997ull, 16452},
+        {"kClayTexturedHalfPs", kClayTexturedHalfPs, "ps_5_0", 0xB3921E3A06E393EEull, 24000},
+        {"kClayTexturedFullPs", kClayTexturedFullPs, "ps_5_0", 0xCDE38443D7C3884Aull, 24324},
+        {"kClayTerrainLayerPs", kClayTerrainLayerPs, "ps_5_0", 0x16571B05FB1B94CEull, 16540},
         {"kClayTerrainLayerDepthPs", kClayTerrainLayerDepthPs, "ps_5_0", 0x277FB8D3A19E5FC8ull, 5484},
-        {"kClayTerrainFarPs", kClayTerrainFarPs, "ps_5_0", 0xBE457649660BC0AAull, 13324},
+        {"kClayTerrainFarPs", kClayTerrainFarPs, "ps_5_0", 0x41A819169232191Dull, 13412},
         {"kClayTerrainFarDepthPs", kClayTerrainFarDepthPs, "ps_5_0", 0x1DB48924B7D66149ull, 2580},
         {"kClayShadowPs", kClayShadowPs, "ps_5_0", 0x2AEE57793156E0D9ull, 3920},
         {"kSkyVs", kSkyVs, "vs_5_0", 0x1261ACAA62F3AF95ull, 668},
-        {"kClaySkyPs", kClaySkyPs, "ps_5_0", 0xDD2C6D7B5E83AE48ull, 7012},
+        {"kClaySkyPs", kClaySkyPs, "ps_5_0", 0x63C9D2D9E8D7481Dull, 7100},
         {"kClayMaskPs", kClayMaskPs, "ps_5_0", 0x849E900311D40504ull, 12476},
         {"kOutputMapPs", kOutputMapPs, "ps_5_0", 0x70D413120D3278B1ull, 1072},
         {"kClayPostCompositePs", kClayPostCompositePs, "ps_5_0", 0x3A946A88248D92DEull, 5692},
@@ -5691,7 +5709,7 @@ int main() {
         {"kCompositePs", kCompositePs, "ps_5_0", 0x19D6BE7E821E13DAull, 1148},
         {"kShadowViewPs", kShadowViewPs, "ps_5_0", 0x709681412917DA48ull, 3364},
         {"kClayDepthPackPs", kClayDepthPackPs, "ps_5_0", 0xF95B335D4903FCCDull, 1100},
-        {"kClayImpostorVs", kClayImpostorVs, "vs_5_0", 0x39D9EE9A01798C33ull, 9240},
+        {"kClayImpostorVs", kClayImpostorVs, "vs_5_0", 0xB0F4D8751CBFF3D3ull, 9328},
         {"kClayImpostorPs", kClayImpostorPs, "ps_5_0", 0xF4892CA24ACE1320ull, 3168},
         {"canary", "float4 main(float4 p : SV_Position) : SV_Target { return p * 0.25 + 1.0; }", "ps_5_0", 0x144FCFF10FDFCCA2ull, 532},
     };
@@ -5713,7 +5731,7 @@ int main() {
       // (control: the comparison sees one changed operand of the sky's pixel program, which the targets are drawn by)
       size_t size = 0;
       const std::string other = Changed(kClaySkyPs, "sky * f_exposure", "sky * f_exposure * 1.01");
-      if (other.empty() || CodeHash("clay_sky_other", other.c_str(), "ps_5_0", &size) == 0xDD2C6D7B5E83AE48ull) return fails(__LINE__);
+      if (other.empty() || CodeHash("clay_sky_other", other.c_str(), "ps_5_0", &size) == 0x63C9D2D9E8D7481Dull) return fails(__LINE__);
     }
     // (the text's rule: no program of before names anything of the water)
     for (size_t i = 0; i + 1 < std::size(before); ++i) {
@@ -5824,7 +5842,7 @@ int main() {
     bool water_dynamic = false;
     if (!HasLineWith(wvs, "dcl_resource_structured", "t3, 16") || !HasLineWith(wvs, "dcl_resource_structured", "t4, 4") ||
         !HasLineWith(wvs, "dcl_resource_structured", "t5, 8") || DeclaredRegisters(wvs, 0) != kClayWaterSize / 16 ||
-        DeclaredRegisters(wps, 0) != 28 || DeclaredRegisters(wps, 2, &water_dynamic) != kClayFrameSize / 16 || !water_dynamic) {
+        DeclaredRegisters(wps, 0) != 28 || DeclaredRegisters(wps, 2, &water_dynamic) != kClayFrameLanternSize / 16 || !water_dynamic) {
       std::cerr << "the water programs' declarations\n" << Code(wvs);
       return fails(__LINE__);
     }

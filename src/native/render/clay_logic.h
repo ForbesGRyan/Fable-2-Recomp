@@ -2241,6 +2241,25 @@ static_assert(uint32_t(capture::WindFamily::kCount) - 1 <= (kLightModeWindMask >
 constexpr uint32_t LightModeWind(capture::WindFamily f) {
   return f == capture::WindFamily::kNone || f >= capture::WindFamily::kCount ? 0u : uint32_t(f) << kLightModeWindShift;
 }
+// The local lights (local lights design, 2026-10-13). kLightModeLanterns (with kLightModeLit; read by
+// the lit pixel paths and, for a leaf, the vertex path): the draw has lanterns in the frame's buffer
+// (ClayFrameConstants::lanterns), the range in the word's upper bits: the first lantern's index in
+// bits 16 to 21 (0 to 63) and the count in bits 22 to 24 (1 to 6). A range that is empty or past the
+// buffer gives 0 (no bit: the draw is lit by the sun alone), so no shader loop can read past it.
+inline constexpr uint32_t kLightModeLanterns = 2048u, kLightModeLanternFirstShift = 16, kLightModeLanternCountShift = 22;
+inline constexpr uint32_t kMaxFrameLanterns = 64;
+// (the flag and the two fields are clear of the light's seven bits, the four fog bits and the wind's two,
+// and of each other; the count's three bits hold kMaxLightSetLanterns, the first's six the last lantern)
+static_assert(((kLightModeLanterns | (63u << kLightModeLanternFirstShift) | (7u << kLightModeLanternCountShift)) &
+               (kLightModeCount - 1 + kLightModeUnlitFog + kLightModeUnlitFogAlpha + kLightModeLitNoFog + kLightModeUnlitFogTree +
+                kLightModeWindMask)) == 0 &&
+              (kLightModeLanterns & ((63u << kLightModeLanternFirstShift) | (7u << kLightModeLanternCountShift))) == 0 &&
+              (63u << kLightModeLanternFirstShift) < (1u << kLightModeLanternCountShift) && (7u << kLightModeLanternCountShift) < (1u << 25) &&
+              kMaxFrameLanterns - 1 <= 63u && capture::kMaxLightSetLanterns <= 7u);
+constexpr uint32_t LightModeLanterns(uint32_t first, uint32_t count) {
+  if (count == 0 || count > capture::kMaxLightSetLanterns || first >= kMaxFrameLanterns || first + count > kMaxFrameLanterns) return 0u;
+  return kLightModeLanterns | (first << kLightModeLanternFirstShift) | (count << kLightModeLanternCountShift);
+}
 
 // The light_mode of a lit mesh record by its vertex kind and family: a colour
 // stream's object (6), an object or trunk with probe colours (14), an
@@ -2890,6 +2909,10 @@ static_assert(sizeof(ClayFogConstants) == 48);
 // does (the controller's ruling of 2026-10-09: the layout has no binding parameter left for two
 // textures; arrays need no texture, no upload and no neutral object, and the read is table_1d
 // exactly). The sky step (plan Task 5) reads the in-scatter table from the same place.
+// The local lights' tail after the tables (kClayFrameLanternBytes on; shaders::kClayFrameLanternFields):
+// the frame's lanterns, which every program that declares the fog's tail declares after it, and the
+// vertex shader (CLAY_LANTERNS_VS) behind a pad over the fog's tail; a draw's range of them is in its
+// light_mode (LightModeLanterns). The root signature has no binding parameter left, so they ride here.
 struct ClayFrameConstants {
   float sun_dir[3];     // c80.xyz of a one-light draw (bit-equal to c109.xyz: MakeLightBlock), as it is
   uint32_t light_on;    // 1: the frame is lit; 0: no draw of it is (the other fields are zero)
@@ -2912,10 +2935,15 @@ struct ClayFrameConstants {
   float inv_view_proj[4][4];                // rows: world (x, y, z, w) = rows . (X, Y, depth, 1), as the mask step's
   float scatter[kFogScatterTexels][4];      // tf4 decoded, rgb (the fourth float 0)
   float transmit[kFogTransmitTexels][4];    // tf5 decoded, rgb
+  // The local lights' tail: all zero unless MakeLanternBuffer filled it for this frame.
+  float lanterns[kMaxFrameLanterns][16];    // the frame's lanterns (capture::LocalLight, four float4 each): MakeLanternBuffer
 };
 inline constexpr uint32_t kClayFrameLightBytes = offsetof(ClayFrameConstants, fog);
-static_assert(kClayFrameLightBytes == 112 && sizeof(ClayFrameConstants) == 5344 && offsetof(ClayFrameConstants, inv_view_proj) == 160 &&
-              offsetof(ClayFrameConstants, scatter) == 224 && offsetof(ClayFrameConstants, transmit) == 1248);
+// Where the lanterns start (the fog's tail ends): shaders::kClayFrameLanternSize.
+inline constexpr uint32_t kClayFrameLanternBytes = offsetof(ClayFrameConstants, lanterns);
+static_assert(kClayFrameLightBytes == 112 && sizeof(ClayFrameConstants) == 9440 && offsetof(ClayFrameConstants, inv_view_proj) == 160 &&
+              offsetof(ClayFrameConstants, scatter) == 224 && offsetof(ClayFrameConstants, transmit) == 1248 &&
+              kClayFrameLanternBytes == 5344 && sizeof(capture::LocalLight) == sizeof(ClayFrameConstants::lanterns[0]));
 
 // The frame's constants from its light block. Lit only with the switch on and a valid block whose
 // every value is a number of usable size (the block's own rules: light_block.h, MakeLightBlock; a
@@ -2949,6 +2977,34 @@ inline ClayFrameConstants MakeClayFrameConstants(const capture::LightBlock& b, C
     c.eye_on = 1;
   }
   return c;
+}
+
+// The frame's lanterns from its light sets (local lights): a set is drawn when it is valid and its sun
+// is the frame's (sun_dir bit-equal to the block's: the set and the block are the same frame's light),
+// its lanterns copied in order while the buffer has room (kMaxFrameLanterns); plan.first/count[i] is set
+// i's range (count 0: not drawn). Every lantern is copied as it is: MakeLightSet checked its values.
+// A frame keeps capture::kMaxFrameLightSets sets; a set past them is not looked at. A set refused for
+// room does not end the walk: a smaller one after it may still fit. The buffer is cleared first, so
+// that no lantern of another frame (or of a set refused) is left behind its last range.
+struct LanternPlan {
+  uint16_t first[capture::kMaxFrameLightSets] = {};
+  uint8_t count[capture::kMaxFrameLightSets] = {};
+  uint32_t lanterns = 0, sets_drawn = 0, sets_refused_sun = 0, sets_refused_room = 0;
+};
+inline LanternPlan MakeLanternBuffer(ClayFrameConstants& c, const std::vector<capture::LightSet>& sets) {
+  LanternPlan plan;
+  std::memset(c.lanterns, 0, sizeof(c.lanterns));
+  for (size_t i = 0; i < sets.size() && i < capture::kMaxFrameLightSets; ++i) {
+    const capture::LightSet& s = sets[i];
+    if (!s.valid || s.count == 0 || s.count > capture::kMaxLightSetLanterns) continue;  // (no such valid set: MakeLightSet)
+    if (!c.light_on || std::memcmp(s.sun_dir, c.sun_dir, sizeof(c.sun_dir)) != 0) { ++plan.sets_refused_sun; continue; }
+    if (plan.lanterns + s.count > kMaxFrameLanterns) { ++plan.sets_refused_room; continue; }
+    plan.first[i] = uint16_t(plan.lanterns);
+    plan.count[i] = uint8_t(s.count);
+    for (uint32_t j = 0; j < s.count; ++j) std::memcpy(c.lanterns[plan.lanterns++], &s.lights[j], sizeof(capture::LocalLight));
+    ++plan.sets_drawn;
+  }
+  return plan;
 }
 
 // Where a lit pixel reads the screen mask (cbuffer Frame's f_mask_du, f_mask_dv): the factors of
@@ -5819,12 +5875,13 @@ inline constexpr uint32_t kClayTerrainSlotBytes = 256;  // the RHI's constant bu
 // the vertex shader declares for every draw, a terrain draw's and an unlit draw's included (they do
 // not read it; a validation layer holds the declaration against the buffer all the same).
 inline constexpr uint32_t kClayObjectSlotBytes = 512;
-// The small slots the frame's block takes at the buffer's head (21: 5,344 bytes). Slot 0 is also what
+// The small slots the frame's block takes at the buffer's head (37: 9,440 bytes; 21 before the local lights'
+// lanterns). Slot 0 is also what
 // b1 is bound to before a draw binds its own: the buffer holds kClayObjectSlotBytes from there.
 inline constexpr uint32_t kClayFrameSlots = (sizeof(ClayFrameConstants) + kClayTerrainSlotBytes - 1) / kClayTerrainSlotBytes;
 static_assert(sizeof(ClayObjectConstants) <= kClayObjectSlotBytes && sizeof(ClayTerrainConstants) <= kClayTerrainSlotBytes &&
               kClayFrameLightBytes <= kClayTerrainSlotBytes && sizeof(ClayFrameConstants) <= kClayFrameSlots * kClayTerrainSlotBytes &&
-              kClayFrameSlots == 21 && kClayObjectSlotBytes % kClayTerrainSlotBytes == 0);
+              kClayFrameSlots == 37 && kClayObjectSlotBytes % kClayTerrainSlotBytes == 0);
 // The buffer's size is a multiple of this (256 small slots), so that the pool's same-size reuse
 // holds while the number of terrain draws and lit objects moves.
 inline constexpr uint64_t kClayConstantBufferStep = 256ull * kClayTerrainSlotBytes;
@@ -7843,7 +7900,7 @@ inline constexpr uint32_t kClayWaterSlots = (sizeof(ClayWaterConstants) + kClayT
 // i; target k's sky and blur constants in one slot after the records; four target frame blocks
 // at the next 4 * kClayFrameSlots slots; then one slot per reflection terrain record (at most256).
 inline constexpr uint32_t kClayWaterStepSlots = kClayWaterSlots * capture::kMaxWaterRecords + kMaxWaterTargets + kMaxWaterTargets * kClayFrameSlots + capture::kMaxReflectionDraws;
-static_assert(kClayWaterSlots == 2 && kClayWaterStepSlots == 472);
+static_assert(kClayWaterSlots == 2 && kClayWaterStepSlots == 536);  // (472 before the lanterns: four frame blocks of 21 slots)
 constexpr uint32_t ClayWaterRecordSlot(const ClayFrameSlotPlan& plan, uint32_t i) { return plan.water0 + kClayWaterSlots * i; }
 constexpr uint32_t ClayWaterTargetSlot(const ClayFrameSlotPlan& plan, uint32_t k) {
   return plan.water0 + kClayWaterSlots * capture::kMaxWaterRecords + k;

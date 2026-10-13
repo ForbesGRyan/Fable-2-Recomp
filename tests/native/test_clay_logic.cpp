@@ -2659,7 +2659,7 @@ static void ReflectionTargetTests() {
                  ReflectionViewUsable(nullptr, 0, captured_rows));
   float rows[4][4] = {{2, 0, 0, 4}, {0, 3, 0, 5}, {0, 0, 4, 6}, {0, 0, 1, 0}};
   const auto slots = PlanClayFrameSlots(7, 2, 0, kClayWaterStepSlots);
-  CHECK(861, kClayWaterStepSlots == 472 && ClayWaterFrameSlot(slots, 3) + kClayFrameSlots == ClayWaterReflectionSlot(slots, 0) &&
+  CHECK(861, kClayWaterStepSlots == 536 && ClayWaterFrameSlot(slots, 3) + kClayFrameSlots == ClayWaterReflectionSlot(slots, 0) &&
                  ClayWaterReflectionSlot(slots, 255) + 1 == slots.water0 + kClayWaterStepSlots);
   CHECK(861, PlanClayFrameSlots(7, 2).object0 == PlanClayFrameSlots(7, 2, 0, 0).object0);
   ClayFrameConstants frame{}; frame.eye_on = 1; frame.eye[0] = 7; frame.eye[1] = 8; frame.eye[2] = 11;
@@ -3023,7 +3023,7 @@ static void WaterTests() {
                    ClayWaterTargetSlot(with, 0) == with.water0 + 128 && ClayWaterTargetSlot(with, 3) == with.water0 + 131 &&
                    ClayWaterFrameSlot(with) == with.water0 + 132 && ClayWaterReflectionSlot(with, 256) == with.object0);
   }
-  CHECK(845, kClayWaterSlots == 2 && kClayWaterStepSlots == 2 * capture::kMaxWaterRecords + kMaxWaterTargets + 4 * kClayFrameSlots + 256 && kClayWaterStepSlots == 472);
+  CHECK(845, kClayWaterSlots == 2 && kClayWaterStepSlots == 2 * capture::kMaxWaterRecords + kMaxWaterTargets + 4 * kClayFrameSlots + 256 && kClayWaterStepSlots == 536);
   // 846 to 848: the step's place (Review Focus 5). The bridge's shape: opaque records, the first surface place
   // at seq 1628, a blended group behind it.
   {
@@ -4399,6 +4399,53 @@ static void SunTreeTests() {
     CHECK(764, SunTreeRecord(records, 4, 0) == 0 && SunTreeRecord(records, 4, 4) == 2 && SunTreeRecord(records, 4, 9) == 3);
     CHECK(764, SunTreeRecord(records, 4, 5) == kNoSunTreeRecord && SunTreeRecord(records, 4, capture::kNoDepthPlace) == kNoSunTreeRecord &&
                    SunTreeRecord(records, 0, 0) == kNoSunTreeRecord && SunTreeRecord(nullptr, 4, 0) == kNoSunTreeRecord);
+  }
+}
+
+// The local lights' frame buffer (local lights, plan Task 6; clay_logic.h, LightModeLanterns and
+// MakeLanternBuffer). Numbered 868 on: 867 is the water's filter modes' (WaterTests).
+static void LanternBufferTests() {
+  // 868-873: the lantern word and the frame's lantern buffer.
+  {
+    CHECK(868, LightModeLanterns(0, 0) == 0 && LightModeLanterns(63, 2) == 0 && LightModeLanterns(5, 7) == 0);
+    const uint32_t w = LightModeLanterns(5, 3);
+    CHECK(869, (w & kLightModeLanterns) && ((w >> kLightModeLanternFirstShift) & 63) == 5 && ((w >> kLightModeLanternCountShift) & 7) == 3 &&
+               (w & (kLightModeCount - 1 + kLightModeUnlitFog + kLightModeUnlitFogAlpha + kLightModeLitNoFog + kLightModeUnlitFogTree + kLightModeWindMask)) == 0);
+    // (the edges: the last lantern alone, six ending at the buffer's end, a range past it)
+    CHECK(869, LightModeLanterns(63, 1) == (kLightModeLanterns | (63u << kLightModeLanternFirstShift) | (1u << kLightModeLanternCountShift)) &&
+               LightModeLanterns(58, 6) != 0 && LightModeLanterns(59, 6) == 0 && LightModeLanterns(64, 1) == 0 && LightModeLanterns(0, 6) != 0);
+    ClayFrameConstants c{};
+    c.light_on = 1; c.sun_dir[0] = -0.671334f; c.sun_dir[1] = 0.0940108f; c.sun_dir[2] = 0.735169f;
+    std::vector<capture::LightSet> sets(3);
+    for (auto& s : sets) { s.valid = true; s.count = 2; s.sun_slot = 2; std::memcpy(s.sun_dir, c.sun_dir, sizeof(c.sun_dir));
+                           s.lights[0].pos[0] = 93.75f; s.lights[0].col[0] = 1.5f; s.lights[0].range = 0.25f; s.lights[0].w = 1.0f;
+                           s.lights[1].pos[0] = 115.9f; s.lights[1].col[0] = 1.6f; s.lights[1].range = 0.23f; s.lights[1].w = 1.0f; }
+    sets[1].sun_dir[0] = -0.5f;         // another sun: refused
+    sets[2].valid = false;              // invalid: refused (not counted as a sun refusal)
+    const LanternPlan plan = MakeLanternBuffer(c, sets);
+    CHECK(870, plan.sets_drawn == 1 && plan.sets_refused_sun == 1 && plan.lanterns == 2 && plan.first[0] == 0 && plan.count[0] == 2 &&
+               plan.count[1] == 0 && plan.count[2] == 0);
+    CHECK(871, c.lanterns[0][0] == 93.75f && c.lanterns[0][3] == 1.0f && c.lanterns[0][4] == 1.5f && c.lanterns[0][8] == 0.25f &&
+               c.lanterns[1][0] == 115.9f && c.lanterns[1][8] == 0.23f && c.lanterns[2][0] == 0.0f);
+    // No room. A frame keeps kMaxFrameLightSets sets: ten of six lanterns take 60; the eleventh (six) is
+    // refused for room, the twelfth (four) fills the buffer to 64 from 60, the last four (two each) are
+    // refused for room; a seventeenth set, past what a frame keeps, is not looked at.
+    std::vector<capture::LightSet> many(capture::kMaxFrameLightSets + 1, sets[0]);
+    for (size_t i = 0; i < many.size(); ++i) {
+      many[i].count = i < 11 ? 6 : i == 11 ? 4 : 2;
+      for (uint32_t j = 0; j < many[i].count; ++j) { many[i].lights[j].pos[0] = float(i); many[i].lights[j].pos[1] = float(j); }
+    }
+    ClayFrameConstants d{}; d.light_on = 1; std::memcpy(d.sun_dir, c.sun_dir, sizeof(c.sun_dir));
+    d.lanterns[63][15] = 7.0f;          // (a value of before: the buffer is cleared first)
+    const LanternPlan p2 = MakeLanternBuffer(d, many);
+    CHECK(872, p2.sets_drawn == 11 && p2.sets_refused_room == 5 && p2.sets_refused_sun == 0 && p2.lanterns == 64 && p2.first[9] == 54 &&
+               p2.count[9] == 6 && p2.count[10] == 0 && p2.first[11] == 60 && p2.count[11] == 4 && p2.count[12] == 0 &&
+               d.lanterns[54][0] == 9.0f && d.lanterns[59][1] == 5.0f && d.lanterns[60][0] == 11.0f && d.lanterns[63][1] == 3.0f &&
+               d.lanterns[63][15] == 0.0f && LightModeLanterns(p2.first[11], p2.count[11]) != 0);
+    // A frame without light: nothing is written, every set refused for the sun.
+    ClayFrameConstants e{};
+    const LanternPlan p3 = MakeLanternBuffer(e, sets);
+    CHECK(873, p3.sets_drawn == 0 && p3.sets_refused_sun == 2 && p3.lanterns == 0 && e.lanterns[0][0] == 0.0f);
   }
 }
 
@@ -10468,13 +10515,13 @@ int main() {
     // post sub-project), then the large slots. No two uses share a slot, and
     // the buffer sized for the frame (every terrain record, drawn with its material or not) holds them.
     {
-      static_assert(kClayFrameSlots == 21);
+      static_assert(kClayFrameSlots == 37);  // (21 before the local lights' lanterns)
       const ClayFrameSlotPlan none = PlanClayFrameSlots(0, 0);
-      CHECK(598, kClayFrameTerrainSlot0 == 21 && none.plant0 == 21 && none.mask == 21 && none.sky == 22 && none.post == 23 &&
-                     none.quad0 == 48 && none.object0 == 96);
-      CHECK(598, ClayFrameSmallSlots(0, 0) == 96 && ClayFrameSmallSlots(7, 3) == 106 && kClayPostSlots == 25);
+      CHECK(598, kClayFrameTerrainSlot0 == 37 && none.plant0 == 37 && none.mask == 37 && none.sky == 38 && none.post == 39 &&
+                     none.quad0 == 64 && none.object0 == 112);
+      CHECK(598, ClayFrameSmallSlots(0, 0) == 112 && ClayFrameSmallSlots(7, 3) == 122 && kClayPostSlots == 25);
       const ClayFrameSlotPlan some = PlanClayFrameSlots(5, 3);
-      CHECK(598, some.plant0 == 26 && some.mask == 29 && some.sky == 30 && some.post == 31 && some.quad0 == 56 && some.object0 == 104);
+      CHECK(598, some.plant0 == 42 && some.mask == 45 && some.sky == 46 && some.post == 47 && some.quad0 == 72 && some.object0 == 120);
       for (uint32_t records : {0u, 1u, 5u, 600u}) {
         for (uint32_t drawn : {0u, 1u, 5u, 600u}) {
           if (drawn > records) continue;
@@ -10791,15 +10838,16 @@ int main() {
       return std::memcmp(reinterpret_cast<const unsigned char*>(&c) + kClayFrameLightBytes, zero, sizeof(zero)) == 0;
     };
     {
-      static_assert(sizeof(ClayFrameConstants) == 5344 && kClayFrameLightBytes == 112 && offsetof(ClayFrameConstants, fog) == 112 &&
+      static_assert(sizeof(ClayFrameConstants) == 9440 && kClayFrameLightBytes == 112 && offsetof(ClayFrameConstants, fog) == 112 &&
                     offsetof(ClayFrameConstants, inv_view_proj) == 160 && offsetof(ClayFrameConstants, scatter) == 224 &&
                     offsetof(ClayFrameConstants, transmit) == 1248 && sizeof(ClayFrameConstants::scatter) == 64 * 16 &&
-                    sizeof(ClayFrameConstants::transmit) == 256 * 16);
-      // The frame's block is the head of the frame's constant buffer: 21 small slots, bound at b2 at
-      // offset 0; the other small slots follow it.
-      static_assert(kClayFrameSlots == 21 && kClayFrameSlots * kClayTerrainSlotBytes >= sizeof(ClayFrameConstants) &&
+                    sizeof(ClayFrameConstants::transmit) == 256 * 16 && kClayFrameLanternBytes == 5344 &&
+                    sizeof(ClayFrameConstants::lanterns) == 64 * 64);
+      // The frame's block is the head of the frame's constant buffer: 37 small slots (21 before the
+      // local lights' lanterns), bound at b2 at offset 0; the other small slots follow it.
+      static_assert(kClayFrameSlots == 37 && kClayFrameSlots * kClayTerrainSlotBytes >= sizeof(ClayFrameConstants) &&
                     (kClayFrameSlots - 1) * kClayTerrainSlotBytes < sizeof(ClayFrameConstants));
-      CHECK(584, ClaySmallSlotOffset(kClayFrameSlots) == 5376 && ClayConstantBufferBytes(kClayFrameSlots + 1, 0) == 65536);
+      CHECK(584, ClaySmallSlotOffset(kClayFrameSlots) == 9472 && ClayConstantBufferBytes(kClayFrameSlots + 1, 0) == 65536);
       // A frame as MakeClayFrameConstants makes it has no fog: the tail is zero.
       ClayFrameConstants c = lit_frame();
       CHECK(584, c.light_on == 1 && c.eye_on == 1 && tail_is_zero(c) && c.fog.on == 0);
@@ -13393,7 +13441,7 @@ int main() {
                        ClaySmallSlotOffset(p.quad0 + kClayQuadSlots * (i + 1)));
       }
       CHECK(638, ClaySmallSlotOffset(p.quad0 + kClayQuadSlots * capture::kMaxQuadRecords) == ClaySmallSlotOffset(p.object0));
-      CHECK(638, p.object0 <= ClayFrameSmallSlots(5, 3) && ClayFrameSmallSlots(0, 0) == 96);
+      CHECK(638, p.object0 <= ClayFrameSmallSlots(5, 3) && ClayFrameSmallSlots(0, 0) == 112);  // (96 before the lanterns)
     }
 
     // 639: the bloom's verdict when its objects are missing has a word of its own (review of plan Task 8,
@@ -13432,6 +13480,7 @@ int main() {
   ImpostorTests();
   WaterTests();
   ReflectionTargetTests();
+  std::thread(LanternBufferTests).join();
   if (g_fail) return g_fail;
   std::cout << "PASS: clay color, keys, vertex counts, index ranges, constants, status text, "
                "uv keys, texture text, instanced keys, pipeline keys and slots, draw state, alpha constants, "

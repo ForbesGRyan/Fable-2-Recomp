@@ -163,7 +163,13 @@ inline constexpr ClayBufferField kClayFrameFogFields[] = {
     {"f_inv0", 160, 16},      {"f_inv1", 176, 16},      {"f_inv2", 192, 16},       {"f_inv3", 208, 16},
     {"f_scatter", 224, 1024}, {"f_transmit", 1248, 4096},
 };
-inline constexpr unsigned kClayFrameLightSize = 112, kClayFrameSize = 5344;
+// The local lights' tail after the fog's (ClayFrameConstants::lanterns; clay_logic.h, MakeLanternBuffer): the
+// frame's lanterns, 64 of four float4 each (capture::LocalLight). Every program that declares the fog's tail
+// declares it after the tables; the vertex shader (CLAY_LANTERNS_VS, which its text defines) declares it behind
+// a pad over the fog's tail (f_fog_pad, 5,232 bytes at 112), so that it reaches the lanterns at the same offset.
+// All zero in a frame without lanterns: a draw reads them only under light_mode's lantern bit, its range.
+inline constexpr ClayBufferField kClayFrameLanternFields[] = {{"f_lanterns", 5344, 4096}};
+inline constexpr unsigned kClayFrameLightSize = 112, kClayFrameSize = 9440, kClayFrameLanternSize = 5344;
 inline constexpr ClayBufferField kClayObjectFields[] = {
     {"o_rot0", 0, 16}, {"o_rot1", 16, 16}, {"o_rot2", 32, 16},        {"o_c49", 48, 12},
     {"o_c27w", 60, 4}, {"o_c26", 64, 12},  {"o_colour_power", 76, 4}, {"o_probe", 80, 192},
@@ -234,6 +240,10 @@ cbuffer Frame : register(b2) {
   float4 f_inv0; float4 f_inv1; float4 f_inv2; float4 f_inv3;   // the frame's inverse view-projection, rows
   float4 f_scatter[64];                  // tf4: the in-scatter colour by the angle to the axis (rgb)
   float4 f_transmit[256];                // tf5: the transmittance by distance (rgb)
+  float4 f_lanterns[256];                // the frame's lanterns, four float4 each: (pos, w), (col, blend), (range, cone_cos, cone_scale, shadow), (axis, 0)
+#elif defined(CLAY_LANTERNS_VS)
+  float4 f_fog_pad[327];                 // the fog's tail, which the vertex shader does not read
+  float4 f_lanterns[256];
 #endif
 };
 float3 light_normalize(float3 v) {
@@ -413,7 +423,7 @@ cbuffer Object : register(b1) {
 };
 )hlsl"
 
-#define FABLE2_CLAY_VS_HLSL FABLE2_CLAY_DRAW_HLSL FABLE2_CLAY_LIGHT_HLSL FABLE2_CLAY_OBJECT_HLSL R"hlsl(
+#define FABLE2_CLAY_VS_HLSL "#define CLAY_LANTERNS_VS 1\n" FABLE2_CLAY_DRAW_HLSL FABLE2_CLAY_LIGHT_HLSL FABLE2_CLAY_OBJECT_HLSL R"hlsl(
 StructuredBuffer<float4> positions : register(t0);
 StructuredBuffer<uint> indices : register(t1);
 StructuredBuffer<float2> uvs : register(t2);

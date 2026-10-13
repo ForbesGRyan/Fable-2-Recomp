@@ -321,3 +321,80 @@ read it). The mirror text's plane height and the terrain's `world` are untouched
 4. Lantern buffer, draw word, pixel and leaf paths, C++ mirrors, switch; shader tests.
 5. Build, software adapter, bridge captures, measures, cost; documents and user checks;
    closing.
+
+## Implementation notes
+
+Added at the closing (2026-10-13; plan `docs/superpowers/plans/2026-10-13-native-renderer-local-lights.md`, ledger
+`.superpowers/sdd/2026-10-13-native-renderer-local-lights/progress.md`, commits `7a88155` to `9ac83e7` and the closing
+documents). The record of what was built is frame-map section 14, "Native light", "Local lights".
+
+### Built differently from the design
+
+- **The lantern loop is unrolled, and the distance is `d2 * rsqrt(d2)`.** Section 4 asked for "a loop of at most seven";
+  the shader tests forbid loops in every clay program (`test_native_shaders.cpp` code 151) and square roots in the pixel
+  shaders (code 64). `LocalLights` is `[unroll] for j < 6`, each lantern under its own
+  `[branch] if (j < count && first + j < 64)`, inside `[branch] if (light_mode & 2048)`: six, the most lanterns a set
+  can have before a sun in slot 6 (`kMaxLightSetLanterns`). The C++ mirror keeps `std::sqrt`; for `d2` at or above 3e38
+  the shader gives a distance of 0 (full light) where Python gives a range of 0 (a deferred minor; no captured value
+  comes near it). The root-word textured program grew from 24 KB to 42 KB.
+- **`MakeLightSet` compares nothing with the frame; the pass does.** As section 2 already says in its last sentences:
+  the set carries its sun's direction and `MakeLanternBuffer` refuses a set whose sun is not bit-equal to the frame
+  block's (ruling 4). The capture-time refusals are `not-this-scene`, `no-sun`, `unread` and `unusable`, and the
+  builder's `too-many`.
+- **The lantern tail in the frame buffer and the packed draw word** were already the design (ruling 8, amended into
+  this spec with the plan at `7a88155`): the tail is at byte 5,344, 64 lanterns, the buffer 9,440 bytes and 37 slots;
+  bit 11, bits 16 to 21, bits 22 to 24. The frame keeps at most `kMaxFrameLightSets` = 16 sets, not the eight of
+  section 2 (ledger ruling 1); the per-thread cache holds 16 uploads.
+- **The capture's word is latched like the wind's.** `SetLocalLightsWanted` sets `g_local_lights_wanted`, which the
+  capture latches into `g_local_lights_frame` at a frame boundary with records, so one frame never mixes draws with and
+  without sets; a set read in one frame and offered after its end is dropped.
+- **`world_pos` for all objects.** `MakeLightInputs` takes the translation `c4..c6 .w` for every `kObject`,
+  `kTreeTrunk` and `kTreeLeaf` draw, and `MakeClayObjectConstants` refuses an object or trunk whose translation is not a
+  usable position or whose inverse scale is not a usable value, as it did for a leaf. That is a new refusal for
+  objects; the bridge run r2's light line equals run 774's (no draw refused by it there).
+- **The leaf's interpolator layout.** The front colour sum travels in `bend.xyz` (`bend.w` unused) and the back sum in
+  a new `float3 back : TEXCOORD7`; the vertex block forms each lantern's distance, range and cone itself rather than
+  through `LocalLight` (it needs `spot` for `LeafLight`, not the term), so those statements are repeated there (a
+  deferred minor: a shared `LanternSpot` helper).
+- **The programs' bytes with the switch off** are not those of before (criterion 3): the vertex shader hands on world
+  positions unconditionally and every program that declares the fog's tail declares the lanterns after it. Ledger
+  ruling 4 replaces the byte pin.
+
+### Rulings made during the work
+
+Copied from the ledger, where they were made by the controller:
+
+1. (ledger, the preflight scan, before Task 1) `kMaxFrameLightSets = 16` lives in `light_block.h` beside `kMaxLightSetLanterns` (Task 4 defines it; the builder, `LightSetCache` sizing and Task 6's `LanternPlan` use it) — why: one constant for the frame's set count across capture and pass; Task 6's text already asks for it — cost if wrong: none beyond a rename.
+2. (ledger, Task 3) LightSetSunSlot keeps requiring c112 AND c113 read (the capture reads both at every set; c113.xyz is 0 in every captured two-/four-light set, c113.w is never read) — why: one rule for all seven slots, no special case for sets without a second bank — cost if wrong: a set whose c113 is unread is refused as no-sun, counted.
+3. (ledger, Task 4) LightSetThisScene keying on c80's upload covers c96..c113 too — why: frame-map section 14 shows c80..c115 loaded as ONE 36-register block by LoadAluConstants per light set — cost if wrong: a set whose later registers came from another upload is read as one, unobserved. (The ledger line adds: unread c112/c113 reported kNoSun rather than kUnread (Task 3; cosmetic, counted either way))
+4. (ledger, Task 5) spec criterion 3's 'programs of before at their bytes with the switch off' is unattainable once the vertex shader hands on world positions and the pixel shaders carry the lantern branch; it becomes: with the lantern bit clear (switch off) no program reads the lantern tail and the picture is the picture of before (held by the light-mode loop test and the bridge off-run) — why: the VS change is unconditional by design (spec section 3) — cost if wrong: a byte-level regression with the switch off would be caught only by the off-run's measures.
+5. (ledger, Task 6) the lanterns branch stays based on 3c84229 and is NOT rebased onto native-renderer-aniso b9011ca (sub-project 15, closed, unmerged) during the plan — why: that branch edits clay_pass.cpp/.h, clay_logic.h, fable2_native_shaders.h and the tests that Tasks 6-8 are editing now; the integration target of both branches is the user's call — cost if wrong: a later merge of the two resolves conflicts in those files once.
+6. (ledger, Task 7) the plant pixel paths' 'world' IS the world position — the instanced plants' flat positions are expanded after the instance rows (geometry_cache.h, instance_expand.h) and the vertex shader hands p.xyz on unchanged for them (Task 5 kept that) — cost if wrong: plant lanterns at the wrong place; the bridge capture's plant pools would show it. (The ledger line adds: The mirror text's VsOut insertion: the suite's compile-time anchors hold (the suite passes))
+
+### Criteria
+
+1. **Met.** `light_check.py --multi-lanterns --trials 400`: all 24 pairs of the six families (with the campfire's
+   seven-light layers and bark) agree in 400 of 400 trials at every lantern slot before the game's sun, the largest
+   relative difference 2.26e-15 (`out/native-evidence/lighting/lanterns/light_check_multi_lanterns.txt`); the tests
+   (`MultiLanterns`) fail on a wrong colour, a moved position or a dropped term.
+2. **Met in part.** Bridge capture, disc of radius 2 units, native over game in luminance: lantern 2 0.8661 with the
+   switch off, 0.9678 with it on, inside [0.8, 1.25] and better; lantern 1 1.0018 off and 1.0061 on, its pool not
+   measurable by day in that disc (neutral, not a success). Outside the discs 1.0152 off against 1.0136 on, unchanged
+   within the spread (`r2_on_lantern_regions.txt`, `r3_off_lantern_regions.txt`).
+3. **Met, with the byte pin replaced by ledger ruling 4.** 0 debug-layer errors with the switch on (run r4,
+   `--d3d12_debug=true --fable2_native_d3d_messages=true`, WARP, 200 s); the native suite (exit 0) and the Python
+   suite pass; with the lantern bit clear no program reads the tail (code 168), and the off-run r3's picture is the
+   picture of before.
+4. **Met.** GPU busy median 30.38 to 30.64 ms on against 30.43 to 30.62 ms off, frame median 37.47 to 37.54 against
+   37.45 to 37.61 ms: about 0.0 ms against the +0.5 ms bound (`timing.txt`).
+5. **Met.** Frame-map section 14 names what is drawn and what is not (reflections, the swayed position, specular, the
+   per-light shadow map, `b135`, slots after the sun, the crowd and building pairs pending); user checks 107 to 110,
+   and checks 32a, 38 and 59 re-read.
+
+### User-present runs
+
+Every game run of this follow-up (r1 to r6, Task 9) was made by the controller from the main session with
+`tools\drive_game.ps1 -UserPresent -BootSave Hero000`, `RUN UNCHECKED`, with the user at the machine: the dispatched
+implementer's gated run was refused by the idle gate (input and sound for 1,800 s), the user stopped it and gave their
+leave, "continue". Report: `.superpowers/sdd/2026-10-13-native-renderer-local-lights/task-9-report.md`, copied to
+the evidence folder's `README.md`.

@@ -91,7 +91,8 @@ Out (each with where it goes):
   slot 9. Sub-project 8, directly after this one.
 - Further lights (the 2- and 4-light shader variants are drawn with their sun and ambient
   only). Their constants are recorded if the source of item 1 yields them at no extra cost,
-  for a later task.
+  for a later task. (Done since 2026-10-13 by the local lights follow-up:
+  `2026-10-13-native-renderer-local-lights-design.md`; ruling 5 below is superseded.)
 - Normal maps, specular, the cube map and emissive blocks. A follow-up of this sub-project
   ("surface detail"), after shadows.
 - Fog, sky, far haze, the post chain (exposure table, bloom), water, fur, particles: the
@@ -232,7 +233,11 @@ that names a family without its inputs, in the strict style the materials fix wa
    from ambient and diffuse — cost if wrong: rock and bark look smooth.
 5. Sun and ambient only; the further lights of the 2- and 4-light variants are not drawn —
    why: the reachable scenes are daylight; the constants are unread — cost if wrong: lantern
-   light is missing near the path.
+   light is missing near the path. **Superseded 2026-10-13** by the local lights follow-up
+   (`2026-10-13-native-renderer-local-lights-design.md`): the cost was paid (the user: "it
+   seems that the lanterns and torches aren't illuminating nearby areas"), and the lanterns
+   before the sun of every two-, four- and seven-light draw are now drawn
+   (`--fable2_native_local_lights`, default on).
 6. A linear float target with a fixed square-root output mapping and one calibrated exposure
    number — why: light must be added in linear space, the layers then blend as the game's
    do, and the game's exposure belongs to the post chain — cost if wrong: brightness is

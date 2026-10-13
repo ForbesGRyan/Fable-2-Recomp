@@ -8,6 +8,8 @@ Usage: light_check.py --all [--trials N] [--seed S] [--dumps DIR]
        light_check.py --list
        light_check.py --multi-sun [--trials N]     (the two- and four-light pairs as the game draws them,
                       the sun in slot 1 or 2 behind dark lanterns, against the ONE-light function)
+       light_check.py --multi-lanterns [--trials N]     (every multi-light pair with lit lanterns in each
+                      slot before the game's sun slot, against the one-light function plus local_lights)
        light_check.py --coverage <native_discovery_*.jsonl> [...]     (which share of a capture's
                       main-scene draws the checked pairs are; needs no dumps)
 
@@ -266,6 +268,36 @@ def _sun_in_slot(rng, c, slot, lights=4):
     return sun_dir, sun_col
 
 
+def _lanterns_in_slots(rng, c, sun_slot, world, lights=4):
+    """After _sun_in_slot: every slot before the sun's a lit lantern (the game's sets list lanterns first).
+    A position near the vertex (|V| from 0 to about 2 / c96 so that the range term is not always 0 or 1),
+    w = 1, a colour in [0.2, 2], c94 = 1 (one trial in three a blend in (0, 1): the general form), c96 in
+    [0, 0.5], a random cone axis, c105 in [-1, 0.5], c107 in [0.5, 3], c112 = 0 (one trial in three a random
+    strength: the shadow form). Returns the lanterns as local_light's keyword dicts, in slot order."""
+    out = []
+    for j in range(sun_slot):
+        bank = j >= 4
+        comp = j - 4 if bank else j
+        blend_reg, range_reg, cos_reg, scale_reg, shadow_reg = (95, 97, 106, 108, 113) if bank else (94, 96, 105, 107, 112)
+        for reg in (blend_reg, range_reg, cos_reg, scale_reg, shadow_reg):
+            c.setdefault(reg, [0.0] * 4)
+        L = dict(pos=[world[i] + rng.uniform(-8.0, 8.0) for i in range(3)], w=1.0,
+                 col=[rng.uniform(0.2, 2.0) for _ in range(3)],
+                 blend=rng.choice([1.0, 1.0, rng.random()]), range_scale=rng.uniform(0.0, 0.5),
+                 axis=unit(rng), cone_cos=rng.uniform(-1.0, 0.5), cone_scale=rng.uniform(0.5, 3.0),
+                 shadow=rng.choice([0.0, 0.0, rng.random()]))
+        c[80 + j] = list(L["pos"]) + [1.0]
+        c[87 + j] = list(L["col"]) + [1.0]
+        c[98 + j] = list(L["axis"]) + [0.0]
+        c[blend_reg][comp] = L["blend"]
+        c[range_reg][comp] = L["range_scale"]
+        c[cos_reg][comp] = L["cone_cos"]
+        c[scale_reg][comp] = L["cone_scale"]
+        c[shadow_reg][comp] = L["shadow"]
+        out.append(L)
+    return out
+
+
 def _light0(c, normal, world):
     """n_dot_sun and the cone and range inputs of light 0 of a multi-light shader."""
     v = [c[80][i] - world[i] * c[80][3] for i in range(3)]
@@ -316,7 +348,7 @@ def _layer_vertex(vs, text, rng):
     return regs, [x, y, math.sqrt(abs(1 - x * x - y * y))], c
 
 
-def _terrain_layer_driver(ps, vs, dumps, multi, sun_slot=None):
+def _terrain_layer_driver(ps, vs, dumps, multi, sun_slot=None, lanterns=False):
     """`sun_slot` (a multi-light shader only): the light set is the game's with the sun in that slot
     (_sun_in_slot), and the formula is fed as a ONE-light draw is: the sun's direction as it is, the
     one-light gate. That is the check of controller amendment C2 (check_multi_sun)."""
@@ -337,6 +369,7 @@ def _terrain_layer_driver(ps, vs, dumps, multi, sun_slot=None):
             _extra_lights(rng, c, lights=light_count(ps, vs))
             if sun_slot is not None:
                 _sun_in_slot(rng, c, sun_slot, lights=light_count(ps, vs))
+                lantern_list = _lanterns_in_slots(rng, c, sun_slot, world, lights=light_count(ps, vs)) if lanterns else []
                 sun = 80 + sun_slot
         mask = rng.random()
         albedo = [x * x for x in tex(0, tuple(regs[slots["detail"]][:2]))[:3]]
@@ -359,9 +392,10 @@ def _terrain_layer_driver(ps, vs, dumps, multi, sun_slot=None):
         else:
             n_dot_sun = lf.sat(lf.dot(normal, c[sun][:3]))
             gate = lf.sun_gate_single(mask=mask, facing=facing)
+        lights = lf.local_lights(world, normal, lantern_list, mask=mask, facing=facing) if lanterns else None
         args = dict(A=albedo, baked=tex(3, tuple(regs[slots["base"]][:2]))[:3], tint=c[21][:3], tint_pow=c[21][3],
                     add=c[20][:3], floor=c[22][:3], t=lf.ambient_t(lf.ambient_axis(n_vs, vc[19][:3]), n_vs),
-                    n_dot_sun=n_dot_sun, sun_col=c[sun + 7][:3], c11x=c[11][0], sun_gate=gate)
+                    n_dot_sun=n_dot_sun, sun_col=c[sun + 7][:3], c11x=c[11][0], sun_gate=gate, lights=lights)
         return Case(c, regs, lambda slot, coords, attrs: _flat_or_tex(slot, coords, attrs, mask), args, [c[20][3]] * 3)
 
     return ue.load(dumps, ps, "frag"), make_case
@@ -529,7 +563,7 @@ def _object_vertex(vs, text, rng):
     return regs, normal, colour, c
 
 
-def _object_driver(ps, vs, dumps, multi, sun_slot=None):
+def _object_driver(ps, vs, dumps, multi, sun_slot=None, lanterns=False):
     """`sun_slot`: as _terrain_layer_driver's."""
     vs_text = ue.load(dumps, vs, "vert")
 
@@ -555,6 +589,7 @@ def _object_driver(ps, vs, dumps, multi, sun_slot=None):
             _extra_lights(rng, c, lights=light_count(ps, vs))
             if sun_slot is not None:
                 _sun_in_slot(rng, c, sun_slot, lights=light_count(ps, vs))
+                lantern_list = _lanterns_in_slots(rng, c, sun_slot, regs[2][:3], lights=light_count(ps, vs)) if lanterns else []
                 sun = 80 + sun_slot
         mask = rng.random()
         texel = [rng.uniform(0.05, 1.0) for _ in range(4)]         # tf0: colour and alpha
@@ -580,9 +615,10 @@ def _object_driver(ps, vs, dumps, multi, sun_slot=None):
         else:
             n_dot_sun = lf.sat(lf.dot(normal, c[sun][:3]))
             gate = lf.sun_gate_single(mask=mask)
+        lights = lf.local_lights(regs[2][:3], normal, lantern_list, mask=mask, facing=1.0) if lanterns else None
         args = dict(A=albedo, vcolour=vcolour, tint=c[21][:3], tint_pow=c[21][3], add=c[20][:3], floor=c[22][:3],
                     t=lf.ambient_t(lf.ambient_axis(n_vs, vc[19][:3]), n_vs), n_dot_sun=n_dot_sun, sun_col=c[sun + 7][:3],
-                    c27w=c[27][3], sun_gate=gate, c49=c[49][:3])
+                    c27w=c[27][3], sun_gate=gate, c49=c[49][:3], lights=lights)
         return Case(c, regs, sampler, args, [c[20][3] * c[26][i] for i in range(3)], bools)
 
     return ue.load(dumps, ps, "frag"), make_case
@@ -626,7 +662,7 @@ _LEAF_VS = {
 PS_LITERALS.update({"7CD57B81550F19E3": {254: [0.5, 0.0, 0.0, 0.0], 255: [1.0, 0.0, 0.4, 0.6]}})
 
 
-def _leaf_driver(ps, vs, dumps, sun_slot=None):
+def _leaf_driver(ps, vs, dumps, sun_slot=None, lanterns=False):
     """`sun_slot` (a two- or four-light vertex shader only): the vertex shader's light set is the game's
     with the sun in that slot (_sun_in_slot, its registers 80.., 87.. and 94 taken as the vertex side's
     76.., 83.. and 90), and the formula is fed as a ONE-light draw is: the sun's direction as it is and no
@@ -661,6 +697,11 @@ def _leaf_driver(ps, vs, dumps, sun_slot=None):
             for j in range(4):
                 vc[76 + j], vc[83 + j] = game[80 + j], game[87 + j]
             vc[90] = game[94]
+            if lanterns:
+                lantern_list = _lanterns_in_slots(rng, game, sun_slot, [0.0, 0.0, 0.0])
+                for j in range(sun_slot):
+                    vc[76 + j], vc[83 + j], vc[94 + j] = game[80 + j], game[87 + j], game[98 + j]
+                vc[90], vc[92], vc[101], vc[103] = game[94], game[96], game[105], game[107]
             sun = sun_slot
         vc.update(info["literals"])
         vertex = Vertex(rng)
@@ -678,6 +719,18 @@ def _leaf_driver(ps, vs, dumps, sun_slot=None):
         else:
             light_dir, spot = lf.normalize(vc[76 + sun][:3]), 1.0
         front, back = lf.leaf_light(normal, view, light_dir, vc[50][3], spot)
+        front3 = [s * front for s in vc[83 + sun][:3]]
+        back3 = [s * back for s in vc[83 + sun][:3]]
+        if sun_slot is not None and lanterns:
+            for j in range(sun_slot):
+                to_light = [vc[76 + j][i] - world[i] * vc[76 + j][3] for i in range(3)]
+                ld = lf.normalize(to_light)
+                rng_ = lf.sat(1.0 - math.sqrt(lf.dot(to_light, to_light)) * vc[92][j])
+                cone = lf.sat((lf.dot(ld, vc[94 + j][:3]) - vc[101][j]) * vc[103][j])
+                spot = 1.0 + vc[90][j] * (cone * rng_ - 1.0)
+                f, b = lf.leaf_light(normal, view, ld, vc[50][3], spot)
+                front3 = [front3[i] + vc[83 + j][i] * f for i in range(3)]
+                back3 = [back3[i] + vc[83 + j][i] * b for i in range(3)]
         a0 = int(e[(0, 0)][2])
         probe = lf.probe_colour(vc[28 + a0][:3], [vc[29 + a0], vc[30 + a0], vc[31 + a0]], e[(1, 0)])
         gr, gc = info["gamma"]
@@ -700,8 +753,8 @@ def _leaf_driver(ps, vs, dumps, sun_slot=None):
 
         # The mask's two factors with the shader's own literals: gain c255.w = 0.6, bias c255.z = 0.4.
         m1, m2 = lf.leaf_mask(mask, c[255][3], c[255][2])
-        args = dict(A=[x * x / (texel[3] * texel[3]) for x in texel[:3]], vs_ambient=ambient, front=front, back=back,
-                    sun_col=vc[83 + sun][:3], c27w=c[27][3], m1=m1, m2=m2, c49=c[49][:3])
+        args = dict(A=[x * x / (texel[3] * texel[3]) for x in texel[:3]], vs_ambient=ambient, front3=front3, back3=back3,
+                    c27w=c[27][3], m1=m1, m2=m2, c49=c[49][:3])
         # b132: the colour times o4 plus o5, the vertex fog (1 and 0 while it is off). b129 stays clear.
         return Case(c, regs, sampler, args, [c[20][3] * c[26][i] for i in range(3)], rng.choice([(), (132,)]))
 
@@ -788,7 +841,7 @@ def _plant_vertex(vs, text, rng):
     return regs, normal, up, height, colour, c
 
 
-def _plant_driver(ps, vs, dumps, multi, lit, sun_slot=None):
+def _plant_driver(ps, vs, dumps, multi, lit, sun_slot=None, lanterns=False):
     """`sun_slot`: as _terrain_layer_driver's."""
     vs_text = ue.load(dumps, vs, "vert")
 
@@ -808,6 +861,7 @@ def _plant_driver(ps, vs, dumps, multi, lit, sun_slot=None):
             _extra_lights(rng, c)
             if sun_slot is not None:
                 _sun_in_slot(rng, c, sun_slot)
+                lantern_list = _lanterns_in_slots(rng, c, sun_slot, regs[2][:3], lights=light_count(ps, vs)) if lanterns else []
                 sun = 80 + sun_slot
         mask = rng.random()
         texel = [rng.uniform(0.05, 1.0) for _ in range(4)]
@@ -826,14 +880,15 @@ def _plant_driver(ps, vs, dumps, multi, lit, sun_slot=None):
         else:
             n_dot_sun = lf.sat(lf.dot(n_lit, c[sun][:3]))
             gate = lf.sun_gate_single(mask=mask)
+        lights = lf.local_lights(regs[2][:3], n_lit, lantern_list, mask=mask, facing=1.0) if lanterns else None
         if lit:
             # These shaders read neither c27 nor c49: the object formula with both at 1.
             args = dict(A=albedo, vcolour=colour, tint=vc[18][:3], tint_pow=vc[18][3], add=c[20][:3], floor=c[22][:3],
                         t=lf.ambient_t(lf.ambient_axis(normal, vc[19][:3]), n_lit), n_dot_sun=n_dot_sun,
-                        sun_col=c[sun + 7][:3], c27w=1.0, sun_gate=gate, c49=[1.0, 1.0, 1.0])
+                        sun_col=c[sun + 7][:3], c27w=1.0, sun_gate=gate, c49=[1.0, 1.0, 1.0], lights=lights)
         else:
             args = dict(A=albedo, vs_ambient=lf.instance_ambient(colour, vc[18][:3], vc[18][3], vc[54][:3]),
-                        n_dot_sun=n_dot_sun, sun_col=c[sun + 7][:3], sun_gate=gate)
+                        n_dot_sun=n_dot_sun, sun_col=c[sun + 7][:3], sun_gate=gate, lights=lights)
         return Case(c, regs, sampler, args, [c[20][3]] * 3)
 
     return ue.load(dumps, ps, "frag"), make_case
@@ -876,8 +931,8 @@ FORMULAS = {
     "object-multi": lf.lit_object,
     "tree-trunk": lf.lit_object,
     "tree-trunk-multi": lf.lit_object,
-    "tree-leaf": lf.tree_leaf,
-    "tree-leaf-multi": lf.tree_leaf,
+    "tree-leaf": lf.tree_leaf_sums,
+    "tree-leaf-multi": lf.tree_leaf_sums,
     "plant": lf.plant,
     "plant-multi": lf.plant,
     "plant-lit": lf.lit_object,
@@ -1010,6 +1065,45 @@ def print_multi_sun(trials, seed, dumps):
                     if res.first_bad:
                         k, got, want_ = res.first_bad
                         print(f"    first disagreement, trial {k}: microcode {got} formula {want_}")
+    return bad
+
+
+_LANTERN_DRIVERS = {
+    "terrain-layer-multi": lambda ps, vs, dumps, slot: _terrain_layer_driver(ps, vs, dumps, multi=True, sun_slot=slot, lanterns=True),
+    "object-multi": lambda ps, vs, dumps, slot: _object_driver(ps, vs, dumps, multi=True, sun_slot=slot, lanterns=True),
+    "tree-trunk-multi": lambda ps, vs, dumps, slot: _object_driver(ps, vs, dumps, multi=True, sun_slot=slot, lanterns=True),
+    "plant-multi": lambda ps, vs, dumps, slot: _plant_driver(ps, vs, dumps, True, lit=False, sun_slot=slot, lanterns=True),
+    "plant-lit-multi": lambda ps, vs, dumps, slot: _plant_driver(ps, vs, dumps, True, lit=True, sun_slot=slot, lanterns=True),
+    "tree-leaf-multi": lambda ps, vs, dumps, slot: _leaf_driver(ps, vs, dumps, sun_slot=slot, lanterns=True),
+}
+
+
+def check_multi_lanterns(family, ps, vs, trials=200, seed=1, dumps=DUMPS, tol=TOLERANCE):
+    """Whether a multi-light pair, drawn with the game's set (the sun in GAME_SUN_SLOT) and lit lanterns in
+    every slot before it, is its family's one-light function of the sun plus local_lights over the
+    lanterns (lighting-formulas.md, the multi form per slot). A pair that agrees may be drawn with its
+    lanterns by the native pass (local lights design, ruling 2); one that does not stays sun-only."""
+    if family not in _LANTERN_DRIVERS:
+        raise KeyError(f"{family}: not a family --multi-lanterns checks")
+    slot = GAME_SUN_SLOT[light_count(ps, vs)]
+    ps_text, make_case = _LANTERN_DRIVERS[family](ps, vs, dumps, slot)
+    return check(ps_text, make_case, FORMULAS[family], trials, seed, tol)
+
+
+def print_multi_lanterns(trials, seed, dumps):
+    """Every pair of MULTI_SUN_FAMILIES with lanterns before the game's sun slot. Returns the pairs that disagree."""
+    bad = 0
+    for family in MULTI_SUN_FAMILIES:
+        for ps, vs in FAMILIES[family]:
+            lights = light_count(ps, vs)
+            res = check_multi_lanterns(family, ps, vs, trials, seed, dumps)
+            print(f"{family}: ps {ps} vs {vs} ({lights} lights, sun in slot {GAME_SUN_SLOT[lights]}, "
+                  f"{GAME_SUN_SLOT[lights]} lanterns): {res.line()}")
+            if not res.ok:
+                bad += 1
+                if res.first_bad:
+                    k, got, want_ = res.first_bad
+                    print(f"    first disagreement, trial {k}: microcode {got} formula {want_}")
     return bad
 
 
@@ -1317,6 +1411,9 @@ def main(argv=None):
     ap.add_argument("--multi-sun", action="store_true",
                     help="the two- and four-light pairs of the terrain, object, trunk, plant and leaf families with the sun "
                          "in slot 1 to 3 and dark lanterns, against their family's one-light function")
+    ap.add_argument("--multi-lanterns", action="store_true",
+                    help="every multi-light pair with lit lanterns before the game's sun slot, against the one-light "
+                         "function plus local_lights")
     ap.add_argument("--all", action="store_true", help="every pair of FAMILIES, then the mask shaders (MASK_FAMILIES)")
     ap.add_argument("--family", choices=sorted(FAMILIES) + sorted(MASK_FAMILIES))
     ap.add_argument("--shader", help="with --family: only this pixel shader (16 hex digits)")
@@ -1337,16 +1434,24 @@ def main(argv=None):
             for ps in shaders:
                 print(f"{family}: ps {ps}")
         return 0
-    if not args.all and not args.family and not args.multi_sun:
+    if not args.all and not args.family and not args.multi_sun and not args.multi_lanterns:
         ap.print_usage(sys.stderr)
         return 2
     if not args.dumps.is_dir():
         print(f"no shader dumps at {args.dumps}", file=sys.stderr)
         return 2
-    if args.multi_sun:
-        bad = print_multi_sun(args.trials, args.seed, args.dumps)
-        print(f"{bad} pairs disagree at the slot the game puts the sun in ({args.trials} trials each, tolerance "
-              f"{TOLERANCE:g} relative)")
+    if args.multi_sun or args.multi_lanterns:
+        bad = 0
+        if args.multi_sun:
+            n = print_multi_sun(args.trials, args.seed, args.dumps)
+            print(f"{n} pairs disagree at the slot the game puts the sun in ({args.trials} trials each, tolerance "
+                  f"{TOLERANCE:g} relative)")
+            bad += n
+        if args.multi_lanterns:
+            n = print_multi_lanterns(args.trials, args.seed, args.dumps)
+            print(f"{n} pairs disagree with lanterns before the game's sun slot ({args.trials} trials each, tolerance "
+                  f"{TOLERANCE:g} relative)")
+            bad += n
         return 0 if bad == 0 else 1
     want = args.shader.upper().replace("0X", "") if args.shader else None
     todo = [(f, ps, vs) for f, pairs in FAMILIES.items() for ps, vs in pairs

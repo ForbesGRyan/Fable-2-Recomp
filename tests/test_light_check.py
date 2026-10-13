@@ -848,6 +848,46 @@ class MultiSun(unittest.TestCase):
 
 
 @unittest.skipUnless(DUMPS.is_dir(), NO_DUMPS)
+class MultiLanterns(unittest.TestCase):
+    """Local lights (plan Task 2): with the game's light set (the sun in its slot) and random lanterns
+    in every slot before it, each multi-light pair is its one-light function of the sun plus the sum of
+    local_light over the lanterns. Only pairs that agree here are drawn with lanterns by the native pass."""
+    TRIALS = 24
+
+    def test_every_pair_agrees_with_lanterns_before_the_sun(self):
+        checked = 0
+        for family in lc.MULTI_SUN_FAMILIES:
+            for ps, vs in lc.FAMILIES[family]:
+                with self.subTest(family=family, ps=ps, vs=vs):
+                    res = lc.check_multi_lanterns(family, ps, vs, trials=self.TRIALS)
+                    self.assertTrue(res.ok, f"{res.agree}/{res.trials} worst {res.worst:.3g} {res.first_bad}")
+                    self.assertEqual(res.trials, self.TRIALS)
+                    checked += 1
+        self.assertEqual(checked, 24)   # 21 two- and four-light pairs, 3 seven-light (campfire: 2f1001b)
+
+    def test_a_lantern_term_dropped_or_moved_fails(self):
+        family, (ps, vs) = "object-multi", lc.FAMILIES["object-multi"][0]
+        with mock.patch.object(lc.lf, "local_lights", lambda *a, **k: [0.0, 0.0, 0.0]):
+            self.assertFalse(lc.check_multi_lanterns(family, ps, vs, trials=8).ok)
+        real = lc.lf.local_light
+        with mock.patch.object(lc.lf, "local_light", lambda P, N, **k: real([x + 1.0 for x in P], N, **k)):
+            self.assertFalse(lc.check_multi_lanterns(family, ps, vs, trials=8).ok)
+
+    def test_the_lanterns_stand_before_the_sun_and_nowhere_else(self):
+        rng = random.Random(3)
+        c = {}
+        lc._sun_in_slot(rng, c, 2)
+        lanterns = lc._lanterns_in_slots(rng, c, 2, [1.0, 2.0, 3.0])
+        self.assertEqual(len(lanterns), 2)
+        for j, L in enumerate(lanterns):
+            self.assertEqual(c[80 + j][3], 1.0)
+            self.assertEqual(c[87 + j][:3], L["col"])
+            self.assertEqual(c[112][j], L["shadow"])
+        self.assertEqual(c[112][2], 1.0)
+        self.assertEqual(c[87 + 3], [0.0] * 4)
+
+
+@unittest.skipUnless(DUMPS.is_dir(), NO_DUMPS)
 class RealDumps(unittest.TestCase):
     TRIALS = 24
 
@@ -968,10 +1008,10 @@ class RealDumps(unittest.TestCase):
             return [x * 0.5 for x in lf.plant(**a)]
 
         def leaf_without_the_green_test(**a):
-            return lf.tree_leaf(**dict(a, A=[a["A"][0], max(a["A"][0], a["A"][1]), a["A"][2]]))
+            return lf.tree_leaf_sums(**dict(a, A=[a["A"][0], max(a["A"][0], a["A"][1]), a["A"][2]]))
 
         def leaf_c27w_on_the_sun(**a):
-            return lf.tree_leaf(**dict(a, front=a["front"] * a["c27w"]))
+            return lf.tree_leaf_sums(**dict(a, front3=[x * a["c27w"] for x in a["front3"]]))
 
         for family, wrong in (("plant", plant_with_the_ambient_factor), ("plant-multi", plant_with_the_ambient_factor),
                               ("tree-leaf", leaf_without_the_green_test), ("tree-leaf", leaf_c27w_on_the_sun),

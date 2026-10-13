@@ -112,6 +112,12 @@ class ClayPass {
   // other record is drawn at rest by the clay vertex shader in every pass, as always, counted by
   // reason (ClayStats::wind_rest; the Wind line). With it off nothing of the wind is made, read,
   // bound or drawn.
+  // `local_lights` (fable2_native_local_lights; clay_logic.h, "The local lights"; local lights design
+  // 2026-10-13): in a lit frame the scene's light sets (FrameScene::light_sets) are put in the frame
+  // block's lantern tail (MakeLanternBuffer), and every lit draw of the main scene whose light set was
+  // put there carries its range in light_mode (LightModeLanterns): its lit path adds those lanterns
+  // before the set's sun. The reflection's draws and the pre-pass carry none. With it off (or an unlit
+  // frame) the tail is zero and no draw has the bits: the picture of before (ClayStats::lanterns_*).
   // `coverage` (fable2_native_coverage; clay_logic.h, "Coverage"): a coverage record that the frame
   // draws with its texture is drawn by its parts, each by its own program: the pixels with one covered
   // sample by the half program in two steps (their depth, then their colour blended at one half without
@@ -144,8 +150,8 @@ class ClayPass {
   // shadow-map draw of the surface. With the switch off nothing of it is made, bound, reserved or drawn, and the
   // frame's slot plan is the one of before.
   void Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene, ClayColor color,
-              bool textured, ClayLight light, bool shadows, bool fog, bool wind, bool coverage, capture::ImpostorMode impostors, bool water,
-              const ClayPostRequest& post, ClayStats& st, TextureStats& tst);
+              bool textured, ClayLight light, bool shadows, bool fog, bool wind, bool local_lights, bool coverage,
+              capture::ImpostorMode impostors, bool water, const ClayPostRequest& post, ClayStats& st, TextureStats& tst);
   // The mapped target (display values, 8 bits): what the composite views
   // sample. Left in kPixelShaderResource after Render, and written by the same
   // Render that drew the linear target (by the output mapping, or by the ramp
@@ -1112,6 +1118,9 @@ class ClayPass {
   // small slots in use before the first object (the frame's, the terrain's and
   // the plants': ClayObjectSlotOffset(object_slot0_, slot) is an object's).
   ClayFrameConstants frame_{};
+  // The frame's lantern ranges by light set (MakeLanternBuffer; empty with the local lights off or
+  // an unlit frame): DrawPrepared puts a main-scene lit draw's range in its light_mode.
+  LanternPlan lantern_plan_{};
   std::vector<ClayObjectConstants> object_constants_;
   std::vector<ClayObjectConstants> plant_constants_;
   uint32_t object_slot0_ = 0, plant_slot0_ = 0;

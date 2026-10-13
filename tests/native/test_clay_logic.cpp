@@ -7754,6 +7754,23 @@ int main() {
                    "Light: on, block valid, lit 684 (terrain-layer 492, terrain-far 72, object 120, tree-trunk 0, plant 0, "
                    "plant-lit 0, tree-leaf 0), unlit 264 {light-unknown: 262, normal-unsupported: 2}, unknown {0x7CD57B81550F19E3: 3, "
                    "0x8D900846800943C8: 2, 0x401A000000000001: 1}, sun (-0.633, 0.035, 0.773) colour (0.990, 0.831, 0.400)");
+    // 878-881: the line's lanterns (local lights): the frame's sets drawn, the lit draws given a
+    // range and the sets refused, zero counts left out; "none" with the switch on and nothing; no
+    // word with the switch off.
+    {
+      const std::string base = FormatLightDrawnText(st);
+      st.lanterns_sets = 2; st.lanterns_draws = 37; st.lanterns_refused_sun = 1; st.lanterns_refused_room = 0;
+      CHECK(878, FormatLightDrawnText(st) == base);
+      st.lanterns_on = true;
+      CHECK(878, FormatLightDrawnText(st) == base + "; lanterns: sets 2, draws 37 (refused: sun 1)");
+      st.lanterns_refused_room = 4;
+      CHECK(879, FormatLightDrawnText(st) == base + "; lanterns: sets 2, draws 37 (refused: sun 1, room 4)");
+      st.lanterns_sets = st.lanterns_draws = 0; st.lanterns_refused_sun = 0;
+      CHECK(880, FormatLightDrawnText(st) == base + "; lanterns: refused: room 4");
+      st.lanterns_refused_room = 0;
+      CHECK(881, FormatLightDrawnText(st) == base + "; lanterns: none");
+      st.lanterns_on = false;
+    }
     CHECK(484, std::string(ClayUnlitName(ClayUnlit::kOff)) == "light-off" && std::string(ClayUnlitName(ClayUnlit::kBlock)) == "light-block" &&
                    std::string(ClayUnlitName(ClayUnlit::kUnknown)) == "light-unknown" &&
                    std::string(ClayUnlitName(ClayUnlit::kNormal)) == "normal-unsupported");

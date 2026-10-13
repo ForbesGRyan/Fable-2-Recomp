@@ -927,6 +927,9 @@ void ClayPass::FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, Te
       }
       for (TerrainPlanItem& item : terrain_items_) item.usable = false;
       frame_ = ClayFrameConstants{};
+      // (nor lanterns: the frame's block, its tail with it, is not uploaded)
+      lantern_plan_ = LanternPlan{};
+      st.lanterns_sets = st.lanterns_refused_sun = st.lanterns_refused_room = 0;
     }
   }
   if (textured) {
@@ -1427,6 +1430,17 @@ void ClayPass::DrawPrepared(nrhi::Cmd* cmd, const Prepared& p, ClayColor color, 
         // record with the leaf bit.
         light_mode |= LitObjectMode(p.light->kind, p.light->family);
         light_count = p.light_count;  // the smallest count of its normals and its kind's other buffers
+      }
+      // Its lanterns (local lights): the range of its light set in the frame's lantern tail, when the
+      // set was put there (lantern_plan_; a far terrain record names no set). Inside `!depth_only`, so
+      // the pre-pass's word stays as before; never for a draw of the water's reflection
+      // (`reflection_height`: DrawWaterTargets' mirrored scene, local lights design ruling 6), whose
+      // word is of its own. The draws given a range are counted from light_mode at the colour draw.
+      if (lantern_plan_.lanterns && p.light && !reflection_height) {
+        const uint16_t set = p.light->light_set;
+        if (set != capture::kNoSideIndex && set < capture::kMaxFrameLightSets && lantern_plan_.count[set]) {
+          light_mode |= LightModeLanterns(lantern_plan_.first[set], lantern_plan_.count[set]);
+        }
       }
     }
     // The draw's fog in a fogged frame (DrawFogOf: one rule for lit and unlit draws; the frame's
@@ -3757,8 +3771,8 @@ bool ClayPass::TakeSceneDump(nrhi::Device* dev, std::vector<uint8_t>* file) {
 }
 
 void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene, ClayColor color,
-                      bool textured, ClayLight light, bool shadows, bool fog, bool wind, bool coverage, capture::ImpostorMode impostors, bool water,
-                      const ClayPostRequest& post, ClayStats& st, TextureStats& tst) {
+                      bool textured, ClayLight light, bool shadows, bool fog, bool wind, bool local_lights, bool coverage,
+                      capture::ImpostorMode impostors, bool water, const ClayPostRequest& post, ClayStats& st, TextureStats& tst) {
   if (!ready_ || dev != device_) return;
   // The frame's impostors: the switch as it is now, in a scene captured with it (ClayImpostorMode). Off: nothing
   // below makes an object, reserves a slot, binds or draws anything of the step, and the frame's slot plan is
@@ -3857,6 +3871,19 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   if (!textured) light = ClayLight::kOff;
   frame_ = MakeClayFrameConstants(scene.light, light);
   SetClayFrameMask(frame_, kWidth, kHeight);  // (where a lit pixel reads the screen mask)
+  // The frame's lanterns (local lights): in a lit frame with the switch, the scene's light sets in the
+  // block's tail and each set's range for DrawPrepared; otherwise no range and a zero tail (the frame's
+  // block is uploaded whole, tail and all), so that no draw reads a lantern.
+  lantern_plan_ = LanternPlan{};
+  st.lanterns_on = local_lights;
+  if (local_lights && frame_.light_on) {
+    lantern_plan_ = MakeLanternBuffer(frame_, scene.light_sets);
+    st.lanterns_sets = lantern_plan_.sets_drawn;
+    st.lanterns_refused_sun = lantern_plan_.sets_refused_sun;
+    st.lanterns_refused_room = lantern_plan_.sets_refused_room;
+  } else {
+    std::memset(frame_.lanterns, 0, sizeof(frame_.lanterns));
+  }
   // The frame's post (DecideClayPost: one chain, the first thing missing decides), here, before
   // anything reads the frame's exposure or its unlit word: a frame is a post frame or today's, never a
   // mixture. The switch as it is now; the frame's light; the scene's own post block (never one beyond
@@ -5583,6 +5610,7 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     // The light of the drawn record: its family's, or why it has none.
     if (p.lit) {
       ++st.light_drawn[size_t(p.light->family)];
+      if (light_mode & kLightModeLanterns) ++st.lanterns_draws;  // (the record's own draw in place)
     } else {
       const ClayUnlit why = light != ClayLight::kOn ? ClayUnlit::kOff
                             : !frame_.light_on      ? ClayUnlit::kBlock

@@ -666,6 +666,13 @@ struct ClayStats {
   uint32_t light_unlit[4] = {};
   capture::ShaderTally<32> light_unlit_by_ps;
   float light_sun_dir[3] = {}, light_sun_col[3] = {};
+  // The local lights as drawn (the Light line's "lanterns"). lanterns_on: fable2_native_local_lights
+  // as the Render read it. lanterns_sets / lanterns_refused_sun / lanterns_refused_room: the frame's
+  // light sets put in the lantern buffer and those refused (MakeLanternBuffer's LanternPlan; a lit
+  // frame only). lanterns_draws: the main scene's lit draws given a lantern range (counted at the
+  // colour draw; the reflection's draws have none).
+  bool lanterns_on = false;
+  uint32_t lanterns_sets = 0, lanterns_draws = 0, lanterns_refused_sun = 0, lanterns_refused_room = 0;
   // The shadow maps ("Native shadow maps" below; the Shadow line). shadow_switch:
   // fable2_native_shadows is on, or the scene holds shadow records all the same
   // (taken before the switch went off): what "Shadow: on" means, set once a
@@ -9045,7 +9052,8 @@ inline std::string FormatLightText(const ClayStats& st) {
 // block the pass could use, the drawn records lit by their family's function
 // (by family), the drawn records without light by reason, the pixel shaders of
 // those unlit for a reason of their own (light-unknown and normal-unsupported
-// together, top eight), and the frame's sun.
+// together, top eight), the frame's sun, and with the local lights on their
+// lanterns (the sets drawn, the draws given a range, the sets refused).
 inline std::string FormatLightDrawnText(const ClayStats& st) {
   constexpr size_t kTop = 8;
   std::string text = std::string("Light: ") + (st.light_switch ? "on" : "off");
@@ -9092,6 +9100,22 @@ inline std::string FormatLightDrawnText(const ClayStats& st) {
     std::snprintf(buf, sizeof(buf), ", sun (%.3f, %.3f, %.3f) colour (%.3f, %.3f, %.3f)", st.light_sun_dir[0],
                   st.light_sun_dir[1], st.light_sun_dir[2], st.light_sun_col[0], st.light_sun_col[1], st.light_sun_col[2]);
     text += buf;
+  }
+  if (st.lanterns_on) {
+    // "; lanterns: sets N, draws M (refused: sun a, room b)", zero counts left out.
+    std::string drawn, refused;
+    auto add = [](std::string& s, const char* name, uint32_t n) {
+      if (n) s += std::string(s.empty() ? "" : ", ") + name + " " + std::to_string(n);
+    };
+    add(drawn, "sets", st.lanterns_sets);
+    add(drawn, "draws", st.lanterns_draws);
+    add(refused, "sun", st.lanterns_refused_sun);
+    add(refused, "room", st.lanterns_refused_room);
+    text += "; lanterns: ";
+    if (drawn.empty() && refused.empty()) text += "none";
+    else if (refused.empty()) text += drawn;
+    else if (drawn.empty()) text += "refused: " + refused;
+    else text += drawn + " (refused: " + refused + ")";
   }
   return text;
 }

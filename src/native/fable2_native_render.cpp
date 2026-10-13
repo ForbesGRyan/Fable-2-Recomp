@@ -114,6 +114,13 @@ REXCVAR_DEFINE_STRING(fable2_native_wind, "off", "Fable2",
                       "view draws those records moved as the game's vertex shader moves them, in colour, depth and shadow "
                       "(F3: the Wind line); off (or false, 0; the default) = none of it is read, made or drawn. Frame map "
                       "section 18.");
+REXCVAR_DEFINE_STRING(fable2_native_local_lights, "on", "Fable2",
+                      "Native local lights (lanterns and torches of the two-, four- and seven-light shaders; local lights "
+                      "design 2026-10-13): on (or true, 1; the default) = with a composite view the capture reads each "
+                      "multi-light draw's light set once per upload and the native view adds the lanterns before the "
+                      "set's sun to its lit draws (F3: the Light line's lanterns); off (or false, 0) = none of it is read "
+                      "or drawn, the picture of before. On by default: without it the lit scenes of the multi-light "
+                      "shaders lose the light the game gives them.");
 REXCVAR_DEFINE_STRING(fable2_native_impostors, "off", "Fable2",
                       "Native impostors (sub-project 12: the far woods; frame map section 19): flat = with a composite "
                       "view the capture also reads the game's impostor draws (one quad a far tree, vertex shader 129F "
@@ -458,6 +465,19 @@ bool CurrentWind() {
   if (!recognized && !warned.exchange(true)) {
     REXLOG_WARN("[native] unknown fable2_native_wind '{}', using off (accepted: {})", REXCVAR_GET(fable2_native_wind),
                 render::kClaySwitchWords);
+  }
+  return on;
+}
+
+// fable2_native_local_lights: read like the wind's switch (on by default); anything else is off, with
+// one warning that names the words. The capture reads the draws' light sets with it.
+bool CurrentLocalLights() {
+  static std::atomic<bool> warned{false};
+  bool recognized = true;
+  const bool on = render::ParseClayLight(REXCVAR_GET(fable2_native_local_lights), &recognized) == render::ClayLight::kOn;
+  if (!recognized && !warned.exchange(true)) {
+    REXLOG_WARN("[native] unknown fable2_native_local_lights '{}', using off (accepted: {})",
+                REXCVAR_GET(fable2_native_local_lights), render::kClaySwitchWords);
   }
   return on;
 }
@@ -881,8 +901,8 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
   if (g_impostor_feed_valid) g_clay->SetImpostorPictureFeed(&g_impostor_feed);   // (a diagnostic: never without its switch)
   // (the water's switch, read once a frame: off, nothing of the water is reached in the pass)
   const bool water = CurrentWater();
-  g_clay->Render(ctx.cmd, ctx.device, *scene, CurrentClayColor(), textures, CurrentClayLight(), CurrentShadows(), CurrentFog(), CurrentWind(), CurrentCoverage(),
-                 impostors, water, post, st, tst);
+  g_clay->Render(ctx.cmd, ctx.device, *scene, CurrentClayColor(), textures, CurrentClayLight(), CurrentShadows(), CurrentFog(), CurrentWind(),
+                 CurrentLocalLights(), CurrentCoverage(), impostors, water, post, st, tst);
   g_shadows_usable.store(g_clay->shadows_usable(), std::memory_order_relaxed);
   SetStatus(render::FormatStatusText(*scene, st, textures ? &tst : nullptr) + "\n" +
             render::FormatLightDrawnText(st) + "\n" + render::FormatShadowText(st) + "\n" + render::FormatFogText(st) + "\n" +
@@ -1221,6 +1241,9 @@ void Install(rex::memory::Memory* memory) {
     REXLOG_INFO("[native] wind: on (fable2_native_wind; the wind inputs of the draws whose vertex shader sways are read in a "
                 "frame with records, and the native view draws those records moved)");
   }
+  REXLOG_INFO("[native] local lights: {} (fable2_native_local_lights; on: each multi-light draw's light set is read once per "
+              "upload, and the native view adds its lanterns before the set's sun to the draw's lit path)",
+              CurrentLocalLights() ? "on" : "off");
   if (CurrentCoverage()) {
     REXLOG_INFO("[native] coverage: on (fable2_native_coverage; the native view draws a coverage record's half-covered pixels at one half "
                 "over what lies behind: a late record's in its place, an early record's in a tail after the opaque records)");
@@ -1321,6 +1344,8 @@ void PollFrame() {
   capture::SetSunWanted(SunRecordsWanted(PostWanted(wanted), CurrentSun()));
   // (the wind's word like the others: before the records' when switching on, after it when switching off)
   capture::SetWindWanted(wanted && CurrentWind());
+  // (and the local lights': off without a composite view)
+  capture::SetLocalLightsWanted(wanted && CurrentLocalLights());
   // (and the impostors' word: off without a composite view)
   capture::SetImpostorsWanted(wanted ? CurrentImpostors() : capture::ImpostorMode::kOff);
   // (and the water's: off without a composite view)

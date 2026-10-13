@@ -1763,8 +1763,11 @@ int main() {
   }
   // 56: sub-project 15: the sampler words' bit 2 (level 0 only). Each of the five sites selects the register by
   // the word's low two bits and, with bit 2, samples with SampleLevel 0 (bilinear at level 0, isotropic whatever
-  // s1 and s3 are: D3D11.3 functional spec 7.18.11); without it as before. The compiled programs read sample_l
-  // beside sample / sample_d at those sites.
+  // s1 and s3 are: D3D11.3 functional spec 7.18.11); without it as before. The compiled programs have a sample_l
+  // on each site's own register (by register: the lit programs' shadow mask at t4 is a sample_l of its own): the
+  // albedo's t3 in the textured and shadow programs, the colour's t5 and the base map's t8 in both terrain
+  // programs, the side texture's t7 in the layer program; and the layer program's derivative fetches (sample_d)
+  // on t7 and t8 are still there.
   {
     using namespace fable2::native::shaders;
     const char* sites[] = {
@@ -1775,11 +1778,33 @@ int main() {
     };
     if (!strstr(kClayTexturedPs, sites[0]) || !strstr(kClayShadowPs, sites[0]) || !strstr(kClayTerrainLayerPs, sites[1]) ||
         !strstr(kClayTerrainFarPs, sites[1]) || !strstr(kClayTerrainLayerPs, sites[2]) || !strstr(kClayTerrainLayerPs, sites[3])) return 56;
-    for (const char* src : {kClayTexturedPs, kClayShadowPs, kClayTerrainLayerPs, kClayTerrainFarPs}) {
-      const std::string l = Disassembly("level0", src, "ps_5_0");
-      if (l.find("sample_l") == std::string::npos) return 56;
+    const struct {
+      const char* name;
+      const char* src;
+      int level[3];  // the registers with a sample_l of the site (-1: none)
+      int grad[2];   // the registers with a sample_d (-1: none)
+    } programs[] = {
+        {"clay_textured_ps", kClayTexturedPs, {3, -1, -1}, {-1, -1}},
+        {"clay_shadow_ps", kClayShadowPs, {3, -1, -1}, {-1, -1}},
+        {"clay_terrain_layer_ps", kClayTerrainLayerPs, {5, 7, 8}, {7, 8}},
+        {"clay_terrain_far_ps", kClayTerrainFarPs, {5, 8, -1}, {-1, -1}},
+    };
+    for (const auto& p : programs) {
+      const std::string l = Disassembly(p.name, p.src, "ps_5_0");
+      if (l.empty()) return 56;
+      for (int reg : p.level) {
+        if (reg >= 0 && TextureReadDepth(l, "sample_l", reg) < 0) {
+          std::cerr << p.name << ": no sample_l on t" << reg << "\n";
+          return 56;
+        }
+      }
+      for (int reg : p.grad) {
+        if (reg >= 0 && TextureReadDepth(l, "sample_d", reg) < 0) {
+          std::cerr << p.name << ": no sample_d on t" << reg << "\n";
+          return 56;
+        }
+      }
     }
-    if (!DisassemblyHas("clay_terrain_layer_ps", kClayTerrainLayerPs, "ps_5_0", "sample_d")) return 56;
     std::cout << "level-0 bit: five sites select by the low bits and SampleLevel 0 with bit 2\n";
   }
   // The draw constants (cbuffer Draw, register b0) lie where ClayConstants has them, in the compiled

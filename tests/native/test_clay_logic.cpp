@@ -7869,6 +7869,25 @@ int main() {
     capture::LightInputs skinned = obj;
     skinned.world_scale = 1.0f;
     CHECK(495, MakeClayObjectConstants(skinned, &oc) && oc.rot[0][1] == -2.0f && oc.rot[1][0] == 2.0f);
+    // 863-866: an object's and a trunk's translation and inverse scale reach the constants as a leaf's do.
+    {
+      capture::LightInputs l = obj;
+      l.kind = LightVertexKind::kStream;
+      l.colour_power = 2.2f;
+      l.world_pos[0] = 93.75f; l.world_pos[1] = 161.3f; l.world_pos[2] = 42.4f;
+      l.world_scale = 2.0f;
+      CHECK(863, MakeClayObjectConstants(l, &oc) && oc.rot[0][3] == 93.75f && oc.rot[2][3] == 42.4f && oc.leaf[1] == 0.5f);
+      l.world_pos[1] = 2.0e6f;   // past kLightPositionMax: refused as a whole
+      CHECK(864, !MakeClayObjectConstants(l, &oc) && std::memcmp(&oc, &empty, sizeof(oc)) == 0);
+      capture::LightInputs t = trunk;
+      t.world_pos[2] = -3.0f; t.world_scale = 0.8f;
+      CHECK(865, MakeClayObjectConstants(t, &oc) && oc.rot[2][3] == -3.0f && std::fabs(oc.leaf[1] - 1.25f) < 1e-6f);
+      capture::LightInputs p;   // kInstance: the bend constants keep the fourth components
+      p.family = LightFamily::kPlant;
+      p.kind = LightVertexKind::kInstance;
+      p.vs_const[0][0] = 1.0f; p.vs_const[0][1] = -200.0f; p.vs_const[0][2] = 100.0f;
+      CHECK(866, MakeClayObjectConstants(p, &oc) && oc.rot[0][3] == p.vs_const[0][0] && oc.leaf[1] == 0.0f);
+    }
     // 496: refused as a whole on one value that is not a number or not of usable size, in any of the
     // forty-eight probe components and in every value a stream object's block is refused for.
     for (int reg = 0; reg < 12; ++reg) {
@@ -8490,21 +8509,23 @@ int main() {
                    std::memcmp(oc.probe, probe, sizeof(probe)) == 0);
     // (leaf[2], leaf[3]: the trees' fog; these inputs have no scale: case 586)
     CHECK(527, oc.leaf[0] == 0.4f && oc.leaf[1] == 2.0f && oc.leaf[2] == 0.0f && oc.leaf[3] == kTreeFogFormNone);
-    // No other kind of record carries the wrap or the inverse scale: a trunk with the same inputs has zeros there.
+    // Only a leaf carries the wrap; a trunk and an object carry the translation and the inverse scale as
+    // a leaf does (since the local lights), and the wrap is zero for them.
     {
       capture::LightInputs trunk = li;
       trunk.family = LightFamily::kTreeTrunk;
       ClayObjectConstants t;
-      CHECK(527, MakeClayObjectConstants(trunk, &t) && t.rot[0][3] == 0.0f && t.rot[1][3] == 0.0f && t.rot[2][3] == 0.0f &&
-                     t.leaf[0] == 0.0f && t.leaf[1] == 0.0f && t.leaf[2] == 0.0f && t.leaf[3] == kTreeFogFormNone && t.colour_power == 0.0f);
+      CHECK(527, MakeClayObjectConstants(trunk, &t) && t.rot[0][3] == 1.0f && t.rot[1][3] == 2.0f && t.rot[2][3] == 3.0f &&
+                     t.leaf[0] == 0.0f && t.leaf[1] == 2.0f && t.leaf[2] == 0.0f && t.leaf[3] == kTreeFogFormNone && t.colour_power == 0.0f);
       capture::LightInputs object = li;
       object.family = LightFamily::kObject;
-      CHECK(527, MakeClayObjectConstants(object, &t) && t.rot[1][3] == 0.0f && t.leaf[0] == 0.0f && t.leaf[1] == 0.0f &&
+      CHECK(527, MakeClayObjectConstants(object, &t) && t.rot[1][3] == 2.0f && t.leaf[0] == 0.0f && t.leaf[1] == 2.0f &&
                      t.leaf[2] == 0.0f && t.leaf[3] == kTreeFogFormGround);
-      // (and a value of theirs that is not a number does not refuse a trunk, which does not read it)
-      trunk.world_pos[1] = nan;
+      // (and a wrap that is not a number does not refuse a trunk, which does not read it; a translation does)
       trunk.wrap = inf;
-      CHECK(527, MakeClayObjectConstants(trunk, &t) && t.rot[1][3] == 0.0f && t.leaf[0] == 0.0f);
+      CHECK(527, MakeClayObjectConstants(trunk, &t) && t.rot[1][3] == 2.0f && t.leaf[0] == 0.0f);
+      trunk.world_pos[1] = nan;
+      CHECK(527, !MakeClayObjectConstants(trunk, &t));
     }
     // 528: refused as a whole on one value that is not a number or not of usable size: the three of
     // the translation (a position: up to kLightPositionMax), the wrap (0 to kLightValueMax: the

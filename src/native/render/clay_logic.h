@@ -3045,7 +3045,7 @@ constexpr bool LightObjectReady(capture::LightVertexKind kind, bool normals, boo
 // instanced plant's values all lie in the first kClayPlantConstantBytes: it has a small slot.
 struct ClayObjectConstants {
   // Rows of M = world_rot * world_scale in xyz: the game's own (R n) * c7.w. The fourth components
-  // are 0 for an object or trunk, and for a leaf the world position's translation (vertex c4..c6 .w). An instanced plant has no rows (its normals are in the world
+  // are the world position's translation (vertex c4..c6 .w) for an object, trunk or leaf. An instanced plant has no rows (its normals are in the world
   // already; xyz 0, not read) and carries its bend constants there: vertex c45.x, c45.y, c45.z (the
   // strength, and the scale and offset of the height blend) in rot[0][3], rot[1][3], rot[2][3].
   float rot[3][4];
@@ -3057,8 +3057,9 @@ struct ClayObjectConstants {
   // kInstanceColourPower, the factor of the frame's exponent in the instance colour's.
   float colour_power;
   float probe[capture::kLightProbeRegisters][4];  // kProbe: vertex c28..c39 (three sets of four); else 0, not read
-  // [0], [1]: a leaf only (zero otherwise, not read): vertex c50.w, the wrap of the front light; the
-  // inverse of c7.w, which takes the scale out of M p for the world position.
+  // [0]: a leaf only (zero otherwise, not read): vertex c50.w, the wrap of the front light.
+  // [1]: an object, trunk or leaf (an instanced plant: zero, not read): the inverse of c7.w, which
+  // takes the scale out of M p for the world position.
   // [2], [3]: the draw's fog ("Native fog" below). [3] the form (kTreeFogForm*): the ground form for
   // an object; for a trunk or a leaf the trees' form with the scale [2] (vertex c8.x), or no fog
   // when the draw has no usable scale ([2] is then 0).
@@ -3092,8 +3093,8 @@ constexpr bool TreeFogScaleUsable(float c8x) { return c8x >= 0.0f && c8x <= capt
 // (0, 8] or each of the forty-eight components of the probe registers. An instanced plant (family
 // plant or plant-lit on the instance kind): the three bend constants c45.xyz; nothing else of the
 // inputs is read or carried (it has no world rotation, its shaders read no c27, c49 or c26, and
-// c45.w is no bend constant). A leaf: a trunk's values, and its world translation (a position), its
-// wrap (0 to kLightValueMax) and a scale whose inverse is usable. All or nothing: no block is made
+// c45.w is no bend constant). An object or trunk also: its world translation (a position) and a scale
+// whose inverse is usable. A leaf: a trunk's values and its wrap (0 to kLightValueMax). All or nothing: no block is made
 // with one value left out.
 inline bool MakeClayObjectConstants(const capture::LightInputs& l, ClayObjectConstants* out) {
   *out = ClayObjectConstants{};
@@ -3143,17 +3144,18 @@ inline bool MakeClayObjectConstants(const capture::LightInputs& l, ClayObjectCon
     c.leaf[2] = usable ? l.tree_fog : 0.0f;
     c.leaf[3] = usable ? kTreeFogFormTree : kTreeFogFormNone;
   }
+  // The translation and the inverse of the scale (ClassifyRotation above refused a scale of zero).
+  const float inv_scale = 1.0f / l.world_scale;
+  if (!LightValueUsable(inv_scale)) return false;
+  for (int r = 0; r < 3; ++r) {
+    if (!LightPositionUsable(l.world_pos[r])) return false;
+    c.rot[r][3] = l.world_pos[r];
+  }
+  c.leaf[1] = inv_scale;
   if (leaf) {
-    // The translation, the wrap (the front light divides by 1 + wrap: not negative) and the
-    // inverse of the scale (ClassifyRotation above refused a scale of zero).
-    const float inv_scale = 1.0f / l.world_scale;
-    if (!(l.wrap >= 0.0f) || !LightValueUsable(l.wrap) || !LightValueUsable(inv_scale)) return false;
-    for (int r = 0; r < 3; ++r) {
-      if (!LightPositionUsable(l.world_pos[r])) return false;
-      c.rot[r][3] = l.world_pos[r];
-    }
+    // The wrap (the front light divides by 1 + wrap: not negative).
+    if (!(l.wrap >= 0.0f) || !LightValueUsable(l.wrap)) return false;
     c.leaf[0] = l.wrap;
-    c.leaf[1] = inv_scale;
     c.colour_power = kLeafColourPower;
   }
   *out = c;

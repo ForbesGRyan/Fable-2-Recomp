@@ -89,8 +89,9 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
 // target has no alpha channel and no sign: a blend's terms are all products of
 // values and factors that are not negative). Every clay
 // shader declares the one cbuffer Draw (ClayConstants). The vertex shader also
-// hands on the position it read (`world`: for a terrain record the world
-// position x, y, height), which only the terrain pixel shaders below use.
+// hands on a position (`world`: for a terrain record the world position x, y,
+// height; the position as read for the instanced plants; the world position
+// (M p) / c7.w + c4..c6 .w for a lit object, trunk or leaf).
 //
 // The light (frame-map section 14, "Native light"; clay_logic.h, "Native
 // light"). Draw's light_mode says what the draw has: bit 0, the game's terrain
@@ -392,13 +393,15 @@ float3 FogUnlitTree(float3 c, FogPoint p, float scale) { return c; }
 cbuffer Object : register(b1) {
   float4 o_rot0; float4 o_rot1; float4 o_rot2;   // rows of M = c4..c6.xyz * c7.w (xyz); an instanced plant: no
                                                  // rows, and in the three w its bend constants c45.x, .y, .z;
-                                                 // a leaf: in the three w the world translation c4..c6 .w
+                                                 // an object, trunk or leaf: in the three w the world
+                                                 // translation c4..c6 .w
   float3 o_c49; float o_c27w;                    // pixel c49.xyz (the whole colour); c27.w (the ambient part)
   float3 o_c26; float o_colour_power;            // pixel c26.xyz (with the output scale); the stream colour's power
                                                  // (an instanced plant: 2.2, the factor of c21.w in its colour's
                                                  // exponent; a leaf: 2.2 * 0.4545, that of its ambient's)
   float4 o_probe[12];                            // vertex c28..c39: three probe sets of four (base, rows of r, g, b)
-  float4 o_leaf;                                 // a leaf: x vertex c50.w (the wrap of the front light), y 1 / c7.w;
+  float4 o_leaf;                                 // a leaf: x vertex c50.w (the wrap of the front light); an object,
+                                                 // trunk or leaf: y 1 / c7.w;
                                                  // the draw's fog: w the form (0 the ground form, 1 the trees', 2
                                                  // none), z the trees' scale (vertex c8.x)
 #ifdef CLAY_WIND
@@ -604,6 +607,9 @@ VsOut main(uint vid : SV_VertexID) {
     float3 n = normals[v];
     o.normal = float3(dot(o_rot0.xyz, n), dot(o_rot1.xyz, n), dot(o_rot2.xyz, n));
     o.axis = AmbientAxis(o.normal, f_axis);
+    // The world position: (M p) / c7.w + c4..c6 .w, the position at rest.
+    o.world = float3(dot(o_rot0.xyz, p.xyz), dot(o_rot1.xyz, p.xyz), dot(o_rot2.xyz, p.xyz)) * o_leaf.y +
+              float3(o_rot0.w, o_rot1.w, o_rot2.w);
     // t11 holds one word a vertex: the stream colour, or (light_mode bit 3) the vertex's probe set.
     uint word = colours[v];
     [branch] if (light_mode & 8) {
@@ -654,9 +660,9 @@ VsOut main(uint vid : SV_VertexID) {
     float4 w = probe_or_bend[v];
     float3 probe = o_probe[a0].xyz + float3(dot(o_probe[a0 + 1], w), dot(o_probe[a0 + 2], w), dot(o_probe[a0 + 3], w));
     o.vcolour = InstanceAmbient(probe, f_tint, o_colour_power * f_tint_pow, f_add);
-    float3 at = float3(dot(o_rot0.xyz, p.xyz), dot(o_rot1.xyz, p.xyz), dot(o_rot2.xyz, p.xyz)) * o_leaf.y +
-                float3(o_rot0.w, o_rot1.w, o_rot2.w);
-    o.bend = float4(LeafLight(N, light_normalize(f_eye - at), light_normalize(f_sun_dir), o_leaf.x, 1.0), 0, 0);
+    o.world = float3(dot(o_rot0.xyz, p.xyz), dot(o_rot1.xyz, p.xyz), dot(o_rot2.xyz, p.xyz)) * o_leaf.y +
+              float3(o_rot0.w, o_rot1.w, o_rot2.w);
+    o.bend = float4(LeafLight(N, light_normalize(f_eye - o.world), light_normalize(f_sun_dir), o_leaf.x, 1.0), 0, 0);
   }
   return o;
 }

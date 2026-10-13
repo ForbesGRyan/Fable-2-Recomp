@@ -846,6 +846,9 @@ static const char kPinVsMain[] = R"pin(VsOut main(uint vid : SV_VertexID) {
     float3 n = normals[v];
     o.normal = float3(dot(o_rot0.xyz, n), dot(o_rot1.xyz, n), dot(o_rot2.xyz, n));
     o.axis = AmbientAxis(o.normal, f_axis);
+    // The world position: (M p) / c7.w + c4..c6 .w, the position at rest.
+    o.world = float3(dot(o_rot0.xyz, p.xyz), dot(o_rot1.xyz, p.xyz), dot(o_rot2.xyz, p.xyz)) * o_leaf.y +
+              float3(o_rot0.w, o_rot1.w, o_rot2.w);
     // t11 holds one word a vertex: the stream colour, or (light_mode bit 3) the vertex's probe set.
     uint word = colours[v];
     [branch] if (light_mode & 8) {
@@ -896,9 +899,9 @@ static const char kPinVsMain[] = R"pin(VsOut main(uint vid : SV_VertexID) {
     float4 w = probe_or_bend[v];
     float3 probe = o_probe[a0].xyz + float3(dot(o_probe[a0 + 1], w), dot(o_probe[a0 + 2], w), dot(o_probe[a0 + 3], w));
     o.vcolour = InstanceAmbient(probe, f_tint, o_colour_power * f_tint_pow, f_add);
-    float3 at = float3(dot(o_rot0.xyz, p.xyz), dot(o_rot1.xyz, p.xyz), dot(o_rot2.xyz, p.xyz)) * o_leaf.y +
-                float3(o_rot0.w, o_rot1.w, o_rot2.w);
-    o.bend = float4(LeafLight(N, light_normalize(f_eye - at), light_normalize(f_sun_dir), o_leaf.x, 1.0), 0, 0);
+    o.world = float3(dot(o_rot0.xyz, p.xyz), dot(o_rot1.xyz, p.xyz), dot(o_rot2.xyz, p.xyz)) * o_leaf.y +
+              float3(o_rot0.w, o_rot1.w, o_rot2.w);
+    o.bend = float4(LeafLight(N, light_normalize(f_eye - o.world), light_normalize(f_sun_dir), o_leaf.x, 1.0), 0, 0);
   }
   return o;
 })pin";
@@ -1879,13 +1882,17 @@ int main() {
           !strstr(v, "StructuredBuffer<uint> colours : register(t11);")) return 82;
       // The object's block is not an instanced plant's: the plant's normal must not go through the rows
       // (the test of the block excludes the instance bit, and nothing else of the shader has the rows
-      // but the leaf's block, which comes after the plant's and under its own test).
-      const char* after_rows = rot + strlen("o.normal = float3(dot(o_rot0.xyz, n), dot(o_rot1.xyz, n), dot(o_rot2.xyz, n));");
+      // but the leaf's block, which comes after the plant's and under its own test). Since the local
+      // lights the object's own block also puts its position through them, for the world position.
+      const char* object_world =
+          strstr(rot, "o.world = float3(dot(o_rot0.xyz, p.xyz), dot(o_rot1.xyz, p.xyz), dot(o_rot2.xyz, p.xyz)) * o_leaf.y +");
+      const char* after_rows = strstr(v, "[branch] if ((light_mode & 82) == 18 && has_light) {");
       const char* leaf_test = strstr(v, "[branch] if ((light_mode & 90) == 74 && has_light) {");
       for (const char* row : {"o_rot0.xyz", "o_rot1.xyz", "o_rot2.xyz"}) {
         const char* again = strstr(after_rows, row);
         if (!leaf_test || !again || again < leaf_test) return 82;
       }
+      if (!object_world || !after_rows || !(rot < object_world && object_world < after_rows && object_world < word)) return 82;
       if (strstr(v, "if ((light_mode & 2) && has_light)") || strstr(v, "if ((light_mode & 18) == 2 && has_light)") ||
           strstr(v, "if ((light_mode & 18) == 18 && has_light)")) return 82;
       // The instanced plant (plan Task 8b), after the object's block and under its own test: the
@@ -1937,15 +1944,15 @@ int main() {
       const char* lw = set ? strstr(set, "float4 w = probe_or_bend[v];") : nullptr;
       const char* lprobe = strstr(v, "float3 probe = o_probe[a0].xyz + float3(dot(o_probe[a0 + 1], w), dot(o_probe[a0 + 2], w), dot(o_probe[a0 + 3], w));");
       const char* lamb = strstr(v, "o.vcolour = InstanceAmbient(probe, f_tint, o_colour_power * f_tint_pow, f_add);");
-      const char* where = strstr(v, "float3 at = float3(dot(o_rot0.xyz, p.xyz), dot(o_rot1.xyz, p.xyz), dot(o_rot2.xyz, p.xyz)) * o_leaf.y +");
-      const char* shift = strstr(v, "float3(o_rot0.w, o_rot1.w, o_rot2.w);");
-      const char* sides = strstr(v, "o.bend = float4(LeafLight(N, light_normalize(f_eye - at), light_normalize(f_sun_dir), o_leaf.x, 1.0), 0, 0);");
+      const char* where = leaf ? strstr(leaf, "o.world = float3(dot(o_rot0.xyz, p.xyz), dot(o_rot1.xyz, p.xyz), dot(o_rot2.xyz, p.xyz)) * o_leaf.y +") : nullptr;
+      const char* shift = where ? strstr(where, "float3(o_rot0.w, o_rot1.w, o_rot2.w);") : nullptr;
+      const char* sides = strstr(v, "o.bend = float4(LeafLight(N, light_normalize(f_eye - o.world), light_normalize(f_sun_dir), o_leaf.x, 1.0), 0, 0);");
       if (!leaf || !ln || !big_n || !keep || !no_t || !set || !lw || !lprobe || !lamb || !where || !shift || !sides) return 166;
       if (!(amb < leaf && leaf < ln && ln < big_n && big_n < keep && keep < no_t && no_t < set && set < lw && lw < lprobe &&
             lprobe < lamb && lamb < where && where < shift && shift < sides && sides < strstr(leaf, "return o;"))) return 166;
       // (one call of LeafLight in main, and the leaf's normal is never normalised: N is used as made)
       if (count(main_at, "LeafLight(") != 1 || strstr(v, "light_normalize(N)") || strstr(v, "normalize(N)") ||
-          count(main_at, "o_leaf.") != 2 || count(main_at, "f_eye") != 1) return 166;
+          count(main_at, "o_leaf.") != 3 || count(main_at, "f_eye") != 1) return 166;
       if (!strstr(v, "float4 o_leaf;") || !strstr(kClayTexturedPs, "float4 o_leaf;") || !strstr(v, "float3 f_eye; uint f_eye_on;")) return 166;
     }
     // The object (kClayTexturedPs): A is the albedo squared, clamped to [0, 1] before the square as the
@@ -2426,7 +2433,7 @@ int main() {
       }
       // The leaf's weights read before the leaf's test (every draw would load them): reported. (Into an
       // output no block writes: one that the blocks overwrite the compiler moves into their `else`.)
-      const std::string early_leaf = Changed(kClayVs, leaf_test, (std::string("  o.world += probe_or_bend[v].xyz;\n") + leaf_test).c_str());
+      const std::string early_leaf = Changed(kClayVs, leaf_test, (std::string("  o.ndc += probe_or_bend[v].xyz;\n") + leaf_test).c_str());
       const std::string early_leaf_listing = Disassembly("early_leaf_vs", early_leaf.c_str(), "vs_5_0");
       if (early_leaf.empty() || early_leaf_listing.empty() || BufferLoadGuard(early_leaf_listing, 12) != 0) return 158;
     }
@@ -2521,16 +2528,17 @@ int main() {
         if (!LoadsOnlyFrom(listing, buffer_registers) || LoopInstructions(listing) != 0 ||
             BindingsMismatch("clay_vs_mode", text.c_str(), "vs_5_0", true) != 0) return 160;
         // The draw's slot at b1 (cb1). Not read where no mesh block runs. An object or trunk: without
-        // the probe bit only its first five registers (the rows, c49 / c27.w, c26 / the colour's power:
-        // 80 bytes), by fixed index; with the probe bit seventeen, the probe registers by the clamped
-        // set index. An instanced plant (the probe bit beside its bits changes nothing): the first
-        // five by fixed index, of which it reads the rows' fourth components and the power: what a
-        // small slot holds. A leaf: all eighteen, the probe registers by the clamped set index and
-        // its own register (17: the wrap and the inverse scale) behind them.
+        // the probe bit all eighteen, the probe registers by the clamped set index (without it the
+        // probe registers are not read, and the compiler indexes none), and the register 17 behind
+        // them for the world position's inverse scale (since the local lights; the rows' fourth
+        // components are its translation). An instanced plant (the probe bit beside its bits changes
+        // nothing): the first five by fixed index, of which it reads the rows' fourth components and
+        // the power: what a small slot holds. A leaf: all eighteen, the probe registers by the
+        // clamped set index and its own register (17: the wrap and the inverse scale) behind them.
         bool dynamic = false;
         const unsigned registers = DeclaredRegisters(listing, 1, &dynamic);
-        if (registers != (leaf ? 18u : probe ? 17u : runs ? 5u : 0u) || dynamic != (probe || leaf) || ReadsBlock(listing, "cb1") != runs ||
-            (listing.find("cb1[17]") != std::string::npos) != leaf) {
+        if (registers != (leaf || object ? 18u : runs ? 5u : 0u) || dynamic != (probe || leaf) || ReadsBlock(listing, "cb1") != runs ||
+            (listing.find("cb1[17]") != std::string::npos) != (leaf || object)) {
           std::cerr << "light_mode " << mode << ": the vertex shader declares " << registers << " registers of cb1"
                     << (dynamic ? ", indexed by a value" : "") << "\n";
           return 160;
@@ -2549,14 +2557,15 @@ int main() {
           }
         }
         // The rows (the xyz of the first three registers) are an object's, trunk's or leaf's; a plant
-        // reads the three fourth components and no row: its normal goes through no rotation. A leaf
-        // reads the fourth components too, as the world position's translation, and the frame's eye.
+        // reads the three fourth components and no row: its normal goes through no rotation. An
+        // object, trunk or leaf reads the fourth components too, as the world position's translation;
+        // a leaf the frame's eye besides.
         const bool rows = HasLineWith(listing, "dp3", "cb1[0].xyzx") && HasLineWith(listing, "dp3", "cb1[1].xyzx") &&
                           HasLineWith(listing, "dp3", "cb1[2].xyzx");
         const bool bend_constants = HasLineWith(listing, "mad_sat", "cb1[1].w, cb1[2].w") && HasLineWith(listing, "mul", "cb1[0].wwww");
         const bool translation = listing.find("cb1[0].w") != std::string::npos && listing.find("cb1[1].w") != std::string::npos &&
                                  listing.find("cb1[2].w") != std::string::npos;
-        if (rows != (object || leaf) || bend_constants != plant || translation != (plant || leaf) ||
+        if (rows != (object || leaf) || bend_constants != plant || translation != (plant || leaf || object) ||
             (listing.find("cb2[6]") != std::string::npos) != leaf ||
             (plant && (listing.find("cb1[0].x") != std::string::npos || listing.find("cb1[3]") != std::string::npos))) {
           std::cerr << "light_mode " << mode << ": rows " << rows << ", bend constants " << bend_constants << "\n";
@@ -2874,9 +2883,16 @@ int main() {
           {"leaf normal", 0, "    o.normal = N;\n", "    N = light_normalize(N);\n    o.normal = N;\n", 1},
           {"leaf exponent", 0, "InstanceAmbient(probe, f_tint, o_colour_power * f_tint_pow, f_add);",
            "InstanceAmbient(probe, f_tint, f_tint_pow, f_add);", 1},
-          {"leaf translation", 0, " * o_leaf.y +\n                float3(o_rot0.w, o_rot1.w, o_rot2.w);", " * o_leaf.y;", 1},
-          {"leaf scale", 0, "dot(o_rot2.xyz, p.xyz)) * o_leaf.y +", "dot(o_rot2.xyz, p.xyz)) +", 1},
-          {"leaf view", 0, "light_normalize(f_eye - at)", "light_normalize(at - f_eye)", 1},
+          {"leaf translation", 0, " * o_leaf.y +\n              float3(o_rot0.w, o_rot1.w, o_rot2.w);\n    o.bend", " * o_leaf.y;\n    o.bend", 1},
+          {"leaf scale", 0, "f_add);\n    o.world = float3(dot(o_rot0.xyz, p.xyz), dot(o_rot1.xyz, p.xyz), dot(o_rot2.xyz, p.xyz)) * o_leaf.y +",
+           "f_add);\n    o.world = float3(dot(o_rot0.xyz, p.xyz), dot(o_rot1.xyz, p.xyz), dot(o_rot2.xyz, p.xyz)) +", 1},
+          {"leaf view", 0, "light_normalize(f_eye - o.world)", "light_normalize(o.world - f_eye)", 1},
+          // The object's and trunk's world position (the local lights): the translation, the scale taken
+          // out, the position at rest left as it is.
+          {"object translation", 0, " * o_leaf.y +\n              float3(o_rot0.w, o_rot1.w, o_rot2.w);\n    // t11", " * o_leaf.y;\n    // t11", 1},
+          {"object scale", 0, "at rest.\n    o.world = float3(dot(o_rot0.xyz, p.xyz), dot(o_rot1.xyz, p.xyz), dot(o_rot2.xyz, p.xyz)) * o_leaf.y +",
+           "at rest.\n    o.world = float3(dot(o_rot0.xyz, p.xyz), dot(o_rot1.xyz, p.xyz), dot(o_rot2.xyz, p.xyz)) +", 1},
+          {"object world position", 0, "at rest.\n    o.world = float3(dot(o_rot0.xyz, p.xyz),", "at rest.\n    o.world = float3(dot(o_rot0.xyz, n),", 1},
           {"leaf wrap", 0, "o_leaf.x, 1.0), 0, 0);", "0.0, 1.0), 0, 0);", 1},
           {"leaf clamp", 0, "uint a0 = min(colours[v], 8u);", "uint a0 = colours[v];", 1},
           {"leaf axis", 0, "    o.normal = N;\n    o.axis = float3(0, 0, 0);", "    o.normal = N;\n    o.axis = AmbientAxis(N, f_axis);", 1},
@@ -4965,7 +4981,7 @@ int main() {
       uint64_t hash;
       size_t size;
     } before[] = {
-        {"clay_vs", kClayVs, "vs_5_0", 0xC1D649CF4B9205C4ull, 10200},
+        {"clay_vs", kClayVs, "vs_5_0", 0xF0C497A468DB5633ull, 10428},
         {"clay_ps", kClayPs, "ps_5_0", 0xA7ECF4E6B3AACD13ull, 8052},
         {"clay_textured_ps", kClayTexturedPs, "ps_5_0", 0x0A1DC9F23AF13290ull, 23936},
         {"clay_terrain_layer_ps", kClayTerrainLayerPs, "ps_5_0", 0x6642A40C9496D997ull, 16452},
@@ -5080,7 +5096,7 @@ int main() {
                   WindWordsPerVertex(fable2::native::capture::WindFamily::kPlant) == 2);
     // Controls: a word read before the block, and a block without the vertex's bound, are seen.
     {
-      const std::string early = Changed(kClayWindVs, "  o.world = p.xyz;\n", "  o.world = p.xyz + wind_words[uint(v)];\n");  // (into an output no block writes)
+      const std::string early = Changed(kClayWindVs, "  o.world = p.xyz;\n", "  o.world = p.xyz;\n  o.ndc += wind_words[uint(v)];\n");  // (into an output no block writes)
       const std::string unbound = Changed(kClayWindVs, "  [branch] if (in_range && wind_family != 0) {\n", "  [branch] if (wind_family != 0) {\n");
       const std::string early_l = Disassembly("clay_wind_vs_early", early.c_str(), "vs_5_0"), unbound_l = Disassembly("clay_wind_vs_unbound", unbound.c_str(), "vs_5_0");
       if (early.empty() || unbound.empty() || early_l.empty() || unbound_l.empty() || BufferLoadGuard(early_l, 9) != 0 || Code(unbound_l) == Code(wind)) return WindCaseFails(__LINE__);
@@ -5319,8 +5335,8 @@ int main() {
         {"kFullscreenVs", kFullscreenVs, "vs_5_0", 0x2CA6AC1051441F86ull, 736},
         {"kPatternPs", kPatternPs, "ps_5_0", 0x335F8BDAD9F39207ull, 1036},
         {"kGridPs", kGridPs, "ps_5_0", 0xA7462A7107F0D99Eull, 784},
-        {"kClayVs", kClayVs, "vs_5_0", 0xC1D649CF4B9205C4ull, 10200},
-        {"kClayWindVs", kClayWindVs, "vs_5_0", 0x28D8FB586A9C2B79ull, 19168},
+        {"kClayVs", kClayVs, "vs_5_0", 0xF0C497A468DB5633ull, 10428},
+        {"kClayWindVs", kClayWindVs, "vs_5_0", 0x8ECF56628514A56Full, 19396},
         {"kClayPs", kClayPs, "ps_5_0", 0xA7ECF4E6B3AACD13ull, 8052},
         {"kClayTexturedPs", kClayTexturedPs, "ps_5_0", 0x0A1DC9F23AF13290ull, 23936},
         {"kClayTexturedDepthPs", kClayTexturedDepthPs, "ps_5_0", 0xF057CCDD7BE1C5C7ull, 6016},
@@ -5641,8 +5657,8 @@ int main() {
         {"kFullscreenVs", kFullscreenVs, "vs_5_0", 0x2CA6AC1051441F86ull, 736},
         {"kPatternPs", kPatternPs, "ps_5_0", 0x335F8BDAD9F39207ull, 1036},
         {"kGridPs", kGridPs, "ps_5_0", 0xA7462A7107F0D99Eull, 784},
-        {"kClayVs", kClayVs, "vs_5_0", 0xC1D649CF4B9205C4ull, 10200},
-        {"kClayWindVs", kClayWindVs, "vs_5_0", 0x28D8FB586A9C2B79ull, 19168},
+        {"kClayVs", kClayVs, "vs_5_0", 0xF0C497A468DB5633ull, 10428},
+        {"kClayWindVs", kClayWindVs, "vs_5_0", 0x8ECF56628514A56Full, 19396},
         {"kClayPs", kClayPs, "ps_5_0", 0xA7ECF4E6B3AACD13ull, 8052},
         {"kClayTexturedPs", kClayTexturedPs, "ps_5_0", 0x0A1DC9F23AF13290ull, 23936},
         {"kClayTexturedDepthPs", kClayTexturedDepthPs, "ps_5_0", 0xF057CCDD7BE1C5C7ull, 6016},

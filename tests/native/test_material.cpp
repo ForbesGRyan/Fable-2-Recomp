@@ -423,17 +423,14 @@ static int LightTests() {
     if (!Fails(t.d, LightReason::kLightUnknown, "register-unread")) return 258;
     t = StreamCase(); t.d.ps_regs.bank = nullptr;
     if (!Fails(t.d, LightReason::kLightUnknown, "register-unread")) return 259;
-    // A rotation that is not finite, in each of its nine components; then every other value the
-    // draw copies. (c4.w, c5.w, c6.w and c7.xyz are not read: not finite there is fine.)
+    // A rotation that is not finite, in each of its nine components, and a translation (c4.w, c5.w,
+    // c6.w: read for every object since the local lights, as a leaf's always were); then every other
+    // value the draw copies. (c7.xyz are not read: not finite there is fine.)
     for (uint32_t i = 0; i < 12; ++i) {
       for (float v : {inf, -inf, nan}) {
         t = StreamCase();
         t.vs[4 * 4 + i] = v;
-        if (i % 4 == 3) {
-          if (MakeLightInputs(t.d, &l) != LightReason::kNone) return 260;
-        } else if (!Fails(t.d, LightReason::kLightUnknown, "register-not-finite")) {
-          return 261;
-        }
+        if (!Fails(t.d, LightReason::kLightUnknown, "register-not-finite")) return i % 4 == 3 ? 260 : 261;
       }
     }
     for (uint32_t comp : {7u * 4 + 3, 20u * 4}) {
@@ -672,21 +669,22 @@ static int LightTests() {
     // ... and its own: the rows' fourth components (the world position's translation: the leaf's
     // light needs the vector to the eye) and c50.w.
     if (l.world_pos[0] != 91.0f || l.world_pos[1] != 92.0f || l.world_pos[2] != 93.0f || l.wrap != 0.4f) return 386;
-    // No other family carries them: neutral values.
+    // No other family carries the wrap (neutral); an object or trunk carries the translation as the
+    // leaf does (the lantern vector of the local lights needs the object's world position).
     LightCase o = ProbeCase();
-    if (MakeLightInputs(o.d, &l) != LightReason::kNone || l.world_pos[0] != 0.0f || l.world_pos[1] != 0.0f ||
-        l.world_pos[2] != 0.0f || l.wrap != 0.0f) {
+    if (MakeLightInputs(o.d, &l) != LightReason::kNone || l.world_pos[0] != 91.0f || l.world_pos[1] != 92.0f ||
+        l.world_pos[2] != 93.0f || l.wrap != 0.0f) {
       return 387;
     }
     o = StreamCase();
-    if (MakeLightInputs(o.d, &l) != LightReason::kNone || l.world_pos[1] != 0.0f || l.wrap != 0.0f) return 387;
+    if (MakeLightInputs(o.d, &l) != LightReason::kNone || l.world_pos[1] != 92.0f || l.wrap != 0.0f) return 387;
     o = ProbeCase(); o.d.ps = &kTrunkPs;
-    if (MakeLightInputs(o.d, &l) != LightReason::kNone || l.world_pos[2] != 0.0f || l.wrap != 0.0f) return 387;
+    if (MakeLightInputs(o.d, &l) != LightReason::kNone || l.world_pos[2] != 93.0f || l.wrap != 0.0f) return 387;
     const LightInputs fresh;
     if (fresh.world_pos[0] != 0.0f || fresh.world_pos[1] != 0.0f || fresh.world_pos[2] != 0.0f || fresh.wrap != 0.0f) return 388;
     static_assert(sizeof(LightInputs) == 336);
-    // Every value it reads is a number, the translation and the wrap included; an object's
-    // translation is not read (case 264 above).
+    // Every value it reads is a number, the translation and the wrap included (an object's
+    // translation too, since the local lights: case 260 above).
     for (uint32_t reg = 4; reg <= 6; ++reg) {
       LightCase t = LeafCase(); t.vs[reg * 4 + 3] = nan;
       if (!Fails(t.d, LightReason::kLightUnknown, "register-not-finite")) return 389;

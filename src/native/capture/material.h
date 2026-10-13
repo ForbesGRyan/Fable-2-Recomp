@@ -716,8 +716,9 @@ inline LightReason MakeLightInputs(const LightDraw& d, LightInputs* out, const c
   if (ps.family == LightFamily::kObject || ps.family == LightFamily::kTreeTrunk || leaf) {
     for (uint32_t row = 0; row < 3; ++row) {
       for (uint32_t c = 0; c < 3; ++c) take(d.vs_regs, kLightVsRotationReg + row, c, &l.world_rot[row][c]);
-      // A leaf: the row's fourth component too, the world position's translation.
-      if (leaf) take(d.vs_regs, kLightVsRotationReg + row, 3, &l.world_pos[row]);
+      // The row's fourth component too, the world position's translation (a leaf's light, and since
+      // the local lights every object's lantern vector).
+      take(d.vs_regs, kLightVsRotationReg + row, 3, &l.world_pos[row]);
     }
     if (leaf) take(d.vs_regs, kLightVsWrapReg, 3, &l.wrap);
     if (vs.scale_ref >= 0) {

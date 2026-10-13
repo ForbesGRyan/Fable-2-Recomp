@@ -326,12 +326,14 @@ nrhi::TextureView* TextureCache::ResolveFetch(nrhi::Cmd* cmd, nrhi::Device* dev,
   if (KnownBad(state)) return fail(MaterialStatus::kTextureBad);  // these contents failed to decode
 
   nrhi::TextureView* view = nullptr;
+  uint32_t bound_levels = plan.levels;
   const LookupResult found = index_.Lookup(key, state.sample_hash);
   if (found.hit) {
     if (auto it = entries_.find(found.id); it != entries_.end()) {
       view = it->second.view;
       uv_fix[0] = it->second.uv_fix[0];
       uv_fix[1] = it->second.uv_fix[1];
+      bound_levels = it->second.levels;
     }
   }
   if (!view) {
@@ -346,6 +348,7 @@ nrhi::TextureView* TextureCache::ResolveFetch(nrhi::Cmd* cmd, nrhi::Device* dev,
       if (!latched_) MarkBad(state);
       return nullptr;
     }
+    bound_levels = plan.levels;
     ++st.uploads;
     st.upload_bytes += guest_bytes;
   }
@@ -355,7 +358,7 @@ nrhi::TextureView* TextureCache::ResolveFetch(nrhi::Cmd* cmd, nrhi::Device* dev,
   // at its base alone sparkles (the review of Tasks 4 to 15: correlation 0.62 against 0.86). An albedo keeps its
   // base level, as before.
   if (water && plan.base_only && levels > 1) return fail(MaterialStatus::kTextureBad);
-  *sampler = SamplerIndex(t);
+  *sampler = ResolveSamplerWord(t, bound_levels, water != nullptr);
   if (IsMirror(t.clamp_x) || IsMirror(t.clamp_y)) ++st.mirror;
   *status = MaterialStatus::kTextured;
   return view;
@@ -505,6 +508,7 @@ nrhi::TextureView* TextureCache::Upload(nrhi::Cmd* cmd, nrhi::Device* dev, const
   e.tex = tex;
   e.view = view;
   e.bytes = tex_bytes;
+  e.levels = uint8_t(std::min<uint32_t>(plan.levels, 255));
   e.uv_fix[0] = float(t.width) / float(host_w);
   e.uv_fix[1] = float(t.height) / float(host_h);
   uv_fix[0] = e.uv_fix[0];

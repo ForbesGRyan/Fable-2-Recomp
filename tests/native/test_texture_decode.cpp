@@ -143,16 +143,20 @@ int main() {
   // the SDK would not filter anisotropically (one level, or a base-map mip filter).
   a = {}; a.filter = 1; a.clamp_x = 0; a.min_filter = 1; a.mip_filter = 1; MakeFc(a, fc);
   DecodeTextureFetch(fc, &t);
-  if (!t.min_linear || t.mip_filter != 1) return 33;
-  if (SamplerBits(t, 9) != 1) return 34;                                  // mipped linear: no bit 2
-  if (SamplerBits(t, 1) != (1u | kSamplerLevel0)) return 35;              // one level: bit 2
+  if (!t.min_linear || t.mip_filter != 1) return 40;
+  if (SamplerBits(t, 9) != 1) return 41;                                  // mipped linear: no bit 2
+  if (SamplerBits(t, 1) != (1u | kSamplerLevel0)) return 42;              // one level: bit 2
   a.mip_filter = 2; MakeFc(a, fc);                                         // mip base map
   DecodeTextureFetch(fc, &t);
-  if (t.mip_filter != 2 || SamplerBits(t, 9) != (1u | kSamplerLevel0)) return 36;
+  if (t.mip_filter != 2 || SamplerBits(t, 9) != (1u | kSamplerLevel0)) return 43;
   a.min_filter = 0; a.mip_filter = 0; MakeFc(a, fc);                       // min point, mip point
   DecodeTextureFetch(fc, &t);
-  if (t.min_linear || t.mip_filter != 0 || SamplerBits(t, 9) != 1) return 37;   // (approximated, as today)
-  if (kSamplerLevel0 != 4u || (SamplerBits(t, 0) & 3u) != SamplerIndex(t)) return 38;
+  if (t.min_linear || t.mip_filter != 0 || SamplerBits(t, 9) != 1) return 44;   // (approximated, as today)
+  if (kSamplerLevel0 != 4u || (SamplerBits(t, 0) & 3u) != SamplerIndex(t)) return 45;
+  // The cache's rule for the word it hands out (texture_cache.cpp, ResolveFetch): the bound levels decide,
+  // and a water texture never carries bit 2 (its shader treats 4..7 as linear clamp).
+  if (ResolveSamplerWord(t, 1, false) != (SamplerIndex(t) | kSamplerLevel0) || ResolveSamplerWord(t, 9, false) != SamplerIndex(t) ||
+      ResolveSamplerWord(t, 1, true) != SamplerIndex(t)) return 46;
   if (!IsMirror(1) || IsMirror(2) || IsMirror(0)) return 32;
   // Identity ignores sampler-only fields (clamps, filters) but not the address or format.
   uint32_t f1[6], f2[6];

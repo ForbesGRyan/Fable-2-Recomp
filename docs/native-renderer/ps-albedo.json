@@ -798,5 +798,81 @@
       ],
       "evidence": "light_check.py --all --trials 400 (out/native-evidence/lighting/task4_light_check_all.txt): the microcode's colour equals terrain_far (docs/native-renderer/lighting-formulas.md, \"Far terrain\") with vertex shader 5003700B7C9B1C16 400 of 400 trials (largest relative difference 1.16e-15)."
     }
+  },
+  "0xE0996BF4D9539D38": {
+    "kind": "terrain-layer",
+    "base_slot": 3,
+    "detail_slot": 0,
+    "steep": {
+      "threshold": 0.99609375,
+      "epsilon": 0.0001,
+      "side_slot": 13
+    },
+    "manual": true,
+    "evidence": "Campfire ground follow-up, 2026-10-12: native_discovery_20261012_175418.jsonl, main-scene DrawIndx:8221C9C8 tess rows, frames 2541/2542. Before fix: 39 terrain-inputs failures per frame (26 steep and 13 plain layers), 8 flat whole-square fallbacks and 31 omitted layers; native right half of shot_90s.png grey, emulated left half textured. Material-only interpreter proof: out/native-evidence/materials/campfire-ground/campfire_material_proof.json, 400 trials per shader, detail/steep colour and distance fade, b135 on/off; white tf3, ambient floor 1, light colours zero and fog off isolate material. The material rule keeps detail colour (tf3 is baked lighting). The initial material-only fix left lighting unclassified. The subsequent lighting proof is in light.evidence; pre-existing fog definitions are retained. Dump shader_E0996BF4D9539D38.ucode.frag, vertex C30A97D946FA2BE4: tf0(o2.xy) at 19, squared at 26; steep factor sat(abs(o3.z)*c45.y+c45.x) at 21, threshold c254.y at 22. tf13(o1.xy/o0.xy) at 27/28, squares 41/42, weights abs(nx)/den and abs(ny)/den with den=abs(nx)+abs(ny)+c255.w at 31-45; detail/side mix 43/44/46. tf3(o5.xy) at 54; distance fade and layer weight at 189-192. Captured ps_lit c254=(2,0.99609375,8,0), c255=(0,1,-1,0.0001) in every row. Decoded DXT1 thumbnails 17200052.png (tf0 detail) and 170A0052.png (tf13 rock side), campfire_material_thumbs; largest proof error 2.22e-16. tf2/tf14 are normal maps used for lighting.",
+    "light": {
+      "family": "terrain-layer-multi",
+      "vertex": [
+        "0xC30A97D946FA2BE4"
+      ],
+      "facing_scale": 8,
+      "evidence": "Campfire colour follow-up (2026-10-12), light_check.py: 400/400 first-light trials and 400/400 game-sun-slot-4 trials match terrain_layer, worst relative difference 9.37e-16. Seven-light shader: c80..c86 positions, c87..c93 colours, c112/c114 first four shadow strengths, c113/c115 final three. All 156 affected main-scene rows across run 763 captures native_discovery_20261012_181536/181551 have c84/c91 equal to the frame sun (direction w=0), c113=(1,0,0,0), c112=0, and c95.x=0. Proofs isolate each tested light with other colours zero and flat pixel normal maps, matching the established native sun/ambient model. Facing literal 8: c254.z. Captured vertex pair and ps_lit checked in every row. Proof script/results: out/native-evidence/lighting/campfire-colour/proof.json; plan docs/superpowers/plans/2026-10-12-native-renderer-campfire-colour.md. Local point lights and pixel normal mapping are not added by this registration."
+    }
+  },
+  "0x0981301D645E2517": {
+    "kind": "terrain-layer",
+    "base_slot": 3,
+    "detail_slot": 0,
+    "manual": true,
+    "evidence": "Campfire ground follow-up, 2026-10-12: native_discovery_20261012_175418.jsonl, main-scene DrawIndx:8221C9C8 tess rows, frames 2541/2542. Before fix: 39 terrain-inputs failures per frame (26 steep and 13 plain layers), 8 flat whole-square fallbacks and 31 omitted layers; native right half of shot_90s.png grey, emulated left half textured. Material-only interpreter proof: out/native-evidence/materials/campfire-ground/campfire_material_proof.json, 400 trials per shader, detail/steep colour and distance fade, b135 on/off; white tf3, ambient floor 1, light colours zero and fog off isolate material. The material rule keeps detail colour (tf3 is baked lighting). The initial material-only fix left lighting unclassified. The subsequent lighting proof is in light.evidence; pre-existing fog definitions are retained. Dump shader_0981301D645E2517.ucode.frag, vertex FB68A7F2301210E1: tf3(o3.xy) at 18, tf0(o0.xy) at 19, squared at 22; no tf13 side-colour block. Base tint/power and detail product at 23-45; distance fade and layer weight at 159-162. Captured ps_lit c254=(0,1,-1,8), c255=(2,0,0,0) in every row. Decoded DXT1 15420052.png thumbnail of this shader's tf0 detail texture. Largest material/alpha proof error 0. tf2 is a normal map used for lighting.",
+    "light": {
+      "family": "terrain-layer-multi",
+      "vertex": [
+        "0xFB68A7F2301210E1"
+      ],
+      "facing_scale": 8,
+      "evidence": "Campfire colour follow-up (2026-10-12), light_check.py: 400/400 first-light trials and 400/400 game-sun-slot-4 trials match terrain_layer, worst relative difference 9.29e-16. Seven-light shader: c80..c86 positions, c87..c93 colours, c112/c114 first four shadow strengths, c113/c115 final three. All 156 affected main-scene rows across run 763 captures native_discovery_20261012_181536/181551 have c84/c91 equal to the frame sun (direction w=0), c113=(1,0,0,0), c112=0, and c95.x=0. Proofs isolate each tested light with other colours zero and flat pixel normal maps, matching the established native sun/ambient model. Facing literal 8: c254.w. Captured vertex pair and ps_lit checked in every row. Proof script/results: out/native-evidence/lighting/campfire-colour/proof.json; plan docs/superpowers/plans/2026-10-12-native-renderer-campfire-colour.md. Local point lights and pixel normal mapping are not added by this registration."
+    }
+  },
+  "0x7928BAA7A6691A5D": {
+    "slot": 0,
+    "u": {
+      "input": "r0.x",
+      "stages": [
+        {
+          "scale": "c8.x",
+          "offset": "c8.z"
+        }
+      ]
+    },
+    "v": {
+      "input": "r0.y",
+      "stages": [
+        {
+          "scale": "c8.y",
+          "offset": "c8.w"
+        }
+      ]
+    },
+    "alpha": {
+      "source": "albedo",
+      "component": "w",
+      "scale": [
+        "c26.w",
+        "c15.w"
+      ],
+      "divide_by_alpha": true
+    },
+    "manual": true,
+    "evidence": "Run 764, native_discovery_20261012_183604.jsonl and _183619.jsonl: two main-scene trunk draws per frame, 8 rows total, paired with existing deformed VS 475EC9F795E5EDBB. Pixel dump 7928BAA7A6691A5D: coordinates c8 scale/offset at 24, tf0 at 29, RGB squared at 35, alpha-squared reciprocal at 42 and colour division at 47. shader_trace.py matches existing o0.xy trunk UV layout. Slot 0 textures 17FC0052 (DXT1 1024x1024) and 15630052 (DXT1 512x512) are the same bark textures as the supported two/four-light trunks; both decoded thumbnails inspected, alpha fully opaque. Captured c8=(1,1,0,0). Original split screenshots 60/75/90/96 seconds show the large grey trunk while other trunks carry bark. This checked registration addresses the seven-light variant. Proof and plan: out/native-evidence/materials/campfire-trees/, docs/superpowers/plans/2026-10-12-native-renderer-campfire-trees.md. After-fix hardware comparison pending.",
+    "alpha_manual": true,
+    "alpha_evidence": "shader_trace.py --alpha: tf0.w times c26.w and c15.w, no kills. Instructions 249/250 output that alpha; tf0 RGB is divided by alpha squared unconditionally at 42/47. All 8 main-scene rows across 4 frames use alpha test greater with reference 0, alpha-to-mask 0xAA, no blending, c26.w=c15.w=1. Both bark textures are fully opaque. Interpreter regression checks alpha with random texture alpha, c26.w and c15.w; colour proof includes randomized alpha division.",
+    "light": {
+      "family": "tree-trunk-multi",
+      "vertex": [
+        "0x475EC9F795E5EDBB"
+      ],
+      "evidence": "Seven-light trunk variant: c80..c86 positions, c87..c93 colours, second bank c95/c97/c102..104/c106/c108/c113/c115. Captured sun at c84/c91, w=0, c95.x=0, c113.xyz=(1,0,0), c112=0, direction equals c109.xyz in all 8 rows. Captured pixel literals c254=(1,0,-1,0.5), c255=(2,0,0,0); existing vertex literal table retained. light_check.py: 400/400 first-light trials and 400/400 sun-slot-4 trials against lit_object with flat pixel normals, black specular and other light colours zero, largest relative error 1.13e-15. Existing native trunk sun/ambient/probe model, point lights and pixel normal mapping outside that model. Vertex fog already follows supported trunk VS; pixel shader has no distance-fog table block, only the existing unsupported b129 volume (clear in captures)."
+    }
   }
 }

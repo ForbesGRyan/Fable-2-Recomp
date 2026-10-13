@@ -169,19 +169,19 @@ class GenAlphaKindTest(unittest.TestCase):
                 self._gen(entry)
             self.assertIn(self.H, str(cm.exception))
 
-    def test_the_table_has_the_three_steep_shaders(self):
-        # The three layer shaders paired with vertex shader C30A, with the literals of game session 1.
+    def test_the_table_has_the_four_steep_shaders(self):
+        # The C30A layer shaders: original three plus the campfire variant and its captured literals.
         import json
         root = Path(__file__).resolve().parent.parent
         data = json.loads((root / "docs" / "native-renderer" / "ps-albedo.json").read_text())
         steep = {k: v["steep"] for k, v in data.items() if "steep" in v}
-        self.assertEqual(sorted(steep), ["0x04F23292B2F44077", "0x45243B758F9272AB", "0x9C2144E42E95A76F"])
+        self.assertEqual(sorted(steep), ["0x04F23292B2F44077", "0x45243B758F9272AB", "0x9C2144E42E95A76F", "0xE0996BF4D9539D38"])
         for v in steep.values():
             self.assertEqual(v, {"threshold": 0.99609375, "epsilon": 0.0001, "side_slot": 13})
         vertex = json.loads((root / "docs" / "native-renderer" / "vs-transforms.json").read_text())
         lines = gen_albedo_table.generate(data, vertex).splitlines()
-        self.assertEqual(sum(", 13, 0.99609375f, 0.0001f)" in line for line in lines), 3)
-        self.assertEqual(sum(", -1, 0.0f, 0.0f)" in line for line in lines), 5)
+        self.assertEqual(sum(", 13, 0.99609375f, 0.0001f)" in line for line in lines), 4)
+        self.assertEqual(sum(", -1, 0.0f, 0.0f)" in line for line in lines), 6)
         # The generated table in the tree is this table's.
         inc = (root / "src" / "native" / "capture" / "ps_albedo_table.inc").read_text().splitlines()
         self.assertEqual(inc, lines)
@@ -668,7 +668,7 @@ class GenAlphaKindTest(unittest.TestCase):
         checked = {("tree-leaf" if family == "tree-leaf-multi" else family, ps, vs)
                    for family, pairs in light_check.FAMILIES.items() for ps, vs in pairs}
         self.assertEqual(table, checked)
-        self.assertEqual(len(table), 40)
+        self.assertEqual(len(table), 43)
         self.assertEqual(data["0x7CD57B81550F19E3"]["light"]["family"], "tree-leaf")
         self.assertEqual(data["0x7CD57B81550F19E3"]["light"]["vertex"],
                          ["0xA5846836C90E1192", "0xD7DD31B9BF194DE8", "0x2D40B53C926109BE"])

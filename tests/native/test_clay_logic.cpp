@@ -10425,7 +10425,7 @@ int main() {
         const DrawFog lit = RecordDrawFog(true, true, false, true, e.ps_hash, nullptr);
         CHECK(597, lit == (fogged || tree ? DrawFog::kLit : DrawFog::kLitNoFog));
       }
-      CHECK(597, entries == 21 && in_table == 16 && trees == 4 && bare == 1 && bare_hash == 0x26052DEFBA688AF2ull);
+      CHECK(597, entries == 24 && in_table == 18 && trees == 5 && bare == 1 && bare_hash == 0x26052DEFBA688AF2ull);
       CHECK(597, capture::PsLightFamily(0) == LightFamily::kNone && capture::PsLightFamily(0xF6D98C7B4D98438Bull) == LightFamily::kNone &&
                      capture::PsLightFamily(0x7CD57B81550F19E3ull) == LightFamily::kTreeLeaf &&
                      capture::PsLightFamily(0x26052DEFBA688AF2ull) == LightFamily::kPlant);

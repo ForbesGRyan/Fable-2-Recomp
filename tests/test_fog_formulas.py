@@ -800,7 +800,8 @@ class RealDumps(unittest.TestCase):
     def test_the_tree_pixel_shaders_apply_factor_and_add(self):
         self.assertEqual({(f, ps) for f, ps, _ in fc.APPLY_PAIRS},
                          {("tree-trunk", "00E09D1BC5295D52"), ("tree-trunk-multi", "58D3FAAAA84A48AA"),
-                          ("tree-trunk-multi", "2FBE9B4EE822609A"), ("tree-leaf", "7CD57B81550F19E3"),
+                          ("tree-trunk-multi", "2FBE9B4EE822609A"), ("tree-trunk-multi", "7928BAA7A6691A5D"),
+                          ("tree-leaf", "7CD57B81550F19E3"),
                           ("tree-leaf-multi", "7CD57B81550F19E3")})
         for family, ps, vs in fc.APPLY_PAIRS:
             with self.subTest(ps=ps, vs=vs):

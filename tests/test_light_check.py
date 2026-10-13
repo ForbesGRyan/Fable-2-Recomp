@@ -649,9 +649,8 @@ class MultiSun(unittest.TestCase):
                         self.assertTrue(res.ok, f"{res.agree}/{res.trials} worst {res.worst:.3g} {res.first_bad}")
                         self.assertEqual(res.trials, self.TRIALS)
                         checked += 1
-        # twenty-one pairs: fourteen of two lights (slot 1; six of them the plants', plan Task 8b; one the leaves',
-        # plan Task 8c), seven of four (slots 1 to 3; one the leaves')
-        self.assertEqual(checked, 35)
+        # Twenty-four pairs: fourteen of two lights, seven of four, three of seven.
+        self.assertEqual(checked, 53)
 
     def test_the_families_and_light_counts_cover_the_table(self):
         # Every -multi pair of every family is checked (the plants' since plan Task 8b), and has a light count.
@@ -660,12 +659,13 @@ class MultiSun(unittest.TestCase):
                 self.assertIn(family, lc.MULTI_SUN_FAMILIES)
             if family.endswith("-multi"):
                 for ps, vs in pairs:
-                    self.assertIn(lc.light_count(ps, vs), (2, 4))
+                    self.assertIn(lc.light_count(ps, vs), (2, 4, 7))
         # The light count is the registers the dump reads: c82 / c89 only in the four-light shaders.
         for ps, lights in lc.MULTI_LIGHTS.items():
             text = lc.ue.load(DUMPS, ps, "frag")
-            self.assertEqual("c89" in text and "c82" in text, lights == 4, ps)
+            self.assertEqual("c89" in text and "c82" in text, lights >= 4, ps)
             self.assertIn("c88", text)
+            self.assertEqual("c86" in text and "c93" in text, lights == 7, ps)
         # The leaves' lights are the VERTEX shader's (plan Task 8c: their pixel shader 7CD5... reads no light
         # register at all): c84 / c77 from two lights on, c85 / c78 only with four.
         self.assertEqual(lc.MULTI_LIGHTS_VS, {"D7DD31B9BF194DE8": 2, "2D40B53C926109BE": 4})
@@ -680,7 +680,7 @@ class MultiSun(unittest.TestCase):
         self.assertEqual(lc.light_count("7CD57B81550F19E3", "D7DD31B9BF194DE8"), 2)
         self.assertEqual(lc.light_count("7CD57B81550F19E3", "2D40B53C926109BE"), 4)
         self.assertEqual(lc.light_count("648B965C200A5113", "ECD66A10092E6562"), 2)
-        self.assertEqual(lc.GAME_SUN_SLOT, {2: 1, 4: 2})
+        self.assertEqual(lc.GAME_SUN_SLOT, {2: 1, 4: 2, 7: 4})
 
     def test_a_slot_the_shader_does_not_have_is_refused(self):
         with self.assertRaises(ValueError):
@@ -701,8 +701,8 @@ class MultiSun(unittest.TestCase):
         """check_multi_sun with the light set spoiled after _sun_in_slot made it."""
         real = lc._sun_in_slot
 
-        def spoiled(rng, c, s):
-            out = real(rng, c, s)
+        def spoiled(rng, c, s, **kwargs):
+            out = real(rng, c, s, **kwargs)
             spoil(c, s)
             return out
 
@@ -717,15 +717,20 @@ class MultiSun(unittest.TestCase):
 
         def mask_on_the_lantern(c, s):
             c[112] = [1.0, 0.0, 0.0, 0.0]           # the screen mask shadows light 0, not the sun
+            if 113 in c:
+                c[113] = [0.0] * 4
 
         def sun_with_a_cone(c, s):
-            c[94][s] = 1.0                          # range and cone apply to the sun
+            c[94 if s < 4 else 95][s if s < 4 else s - 4] = 1.0  # range/cone on sun
 
         def sun_as_a_position(c, s):
             c[80 + s][3] = 1.0                      # w = 1: the direction becomes position minus point
 
         pairs = [("terrain-layer-multi", "45243B758F9272AB", "C30A97D946FA2BE4", 1),
                  ("terrain-layer-multi", "578342593A37DD35", "FB68A7F2301210E1", 2),
+                 ("terrain-layer-multi", "E0996BF4D9539D38", "C30A97D946FA2BE4", 4),
+                 ("terrain-layer-multi", "0981301D645E2517", "FB68A7F2301210E1", 4),
+                 ("tree-trunk-multi", "7928BAA7A6691A5D", "475EC9F795E5EDBB", 4),
                  ("object-multi", "648B965C200A5113", "ECD66A10092E6562", 1),
                  ("object-multi", "789266C3E42D7E59", "ECD66A10092E6562", 2),
                  ("plant-multi", "E99F4ACC7A3C78B4", "8123C16DBF583F92", 1),
@@ -762,7 +767,7 @@ class MultiSun(unittest.TestCase):
             code = lc.main(["--multi-sun", "--trials", "4"])
         text = out.getvalue()
         self.assertEqual(code, 0)
-        self.assertEqual(text.count("(the game)"), 21)
+        self.assertEqual(text.count("(the game)"), 24)
         self.assertIn("tree-leaf-multi: ps 7CD57B81550F19E3 vs D7DD31B9BF194DE8 (2 lights), sun in slot 1 (the game): 4/4 agree", text)
         self.assertIn("tree-leaf-multi: ps 7CD57B81550F19E3 vs 2D40B53C926109BE (4 lights), sun in slot 2 (the game): 4/4 agree", text)
         self.assertIn("plant-multi: ps E99F4ACC7A3C78B4 vs 8123C16DBF583F92 (2 lights), sun in slot 1 (the game): 4/4 agree", text)
@@ -773,8 +778,8 @@ class MultiSun(unittest.TestCase):
         # slot, the line counts them and the exit code says so.
         real = lc._sun_in_slot
 
-        def sun_as_a_position(rng, c, slot):
-            out_ = real(rng, c, slot)
+        def sun_as_a_position(rng, c, slot, **kwargs):
+            out_ = real(rng, c, slot, **kwargs)
             c[80 + slot][3] = 1.0
             return out_
 
@@ -782,7 +787,7 @@ class MultiSun(unittest.TestCase):
         with mock.patch.object(lc, "_sun_in_slot", sun_as_a_position), contextlib.redirect_stdout(out):
             code = lc.main(["--multi-sun", "--trials", "8"])
         self.assertEqual(code, 1)
-        self.assertIn("21 pairs disagree at the slot the game puts the sun in", out.getvalue())
+        self.assertIn("24 pairs disagree at the slot the game puts the sun in", out.getvalue())
         self.assertIn("first disagreement, trial ", out.getvalue())
 
 
@@ -799,10 +804,11 @@ class RealDumps(unittest.TestCase):
                     self.assertTrue(res.ok, f"{res.agree}/{res.trials} worst {res.worst:.3g} {res.first_bad}")
                     self.assertEqual(res.trials, self.TRIALS)
 
-    def test_the_eight_terrain_shaders_are_listed(self):
+    def test_the_ten_terrain_shaders_are_listed(self):
         terrain = {ps for fam in ("terrain-layer", "terrain-layer-multi", "terrain-far") for ps, _ in lc.FAMILIES[fam]}
         self.assertEqual(terrain, {"9C2144E42E95A76F", "4755A2E4A05BA678", "45243B758F9272AB", "AF1E16EE57E4BB06",
-                                   "04F23292B2F44077", "578342593A37DD35", "7DDAD5C29B3F56EE", "2F8A0341E8C09698"})
+                                   "04F23292B2F44077", "578342593A37DD35", "7DDAD5C29B3F56EE", "2F8A0341E8C09698",
+                                   "E0996BF4D9539D38", "0981301D645E2517"})
 
     def test_wrong_formulas_fail_on_the_real_terrain_dumps(self):
         for ps, vs in lc.FAMILIES["terrain-layer"] + lc.FAMILIES["terrain-layer-multi"]:
@@ -1752,6 +1758,60 @@ class MaskPinnedForTheRenderer(unittest.TestCase):
             self.assertEqual((near > 0.5, far > 0.5), (near_lit, far_lit), n)
             self.assertEqual((0.25 < n, 0.25 <= n), (near_lit, far_lit), n)
 
+
+
+@unittest.skipUnless(DUMPS.is_dir(), NO_DUMPS)
+class CampfireTrunkSevenLights(unittest.TestCase):
+    def test_trunk_seven_light_pair_and_alpha(self):
+        ps, vs = "7928BAA7A6691A5D", "475EC9F795E5EDBB"
+        self.assertIn((ps, vs), lc.FAMILIES["tree-trunk-multi"])
+        self.assertEqual(lc.light_count(ps, vs), 7)
+        self.assertIn(ps, lc._UNPREMULTIPLY)
+        text, make_case = lc._object_driver(ps, vs, DUMPS, multi=True, sun_slot=4)
+        rng = random.Random(7928)
+        for _ in range(24):
+            case = make_case(rng)
+            machine = lc.ue.Machine(text, case.consts, case.sampler, regs=case.regs, bools=case.bools)
+            got = machine.run()["oC0"]
+            alpha = case.sampler(0, (0, 0), {})[3] * case.consts[26][3] * case.consts[15][3]
+            self.assertAlmostEqual(got[3], alpha)
+        self.assertTrue(lc.check_pair("tree-trunk-multi", ps, vs, trials=24).ok)
+        self.assertTrue(lc.check_multi_sun("tree-trunk-multi", ps, vs, 4, trials=24).ok)
+
+
+class CampfireSevenLights(unittest.TestCase):
+    PAIRS = (("E0996BF4D9539D38", "C30A97D946FA2BE4"),
+             ("0981301D645E2517", "FB68A7F2301210E1"))
+
+    def test_seven_light_pairs_have_the_captured_sun_slot(self):
+        for ps, vs in self.PAIRS:
+            self.assertEqual(lc.light_count(ps, vs), 7)
+            self.assertEqual(lc.family_of(ps, vs), "terrain-layer-multi")
+        self.assertEqual(lc.GAME_SUN_SLOT[7], 4)
+
+    def test_second_bank_sun_and_first_bank_sun_are_isolated(self):
+        for slot in (1, 4, 5, 6):
+            c = lc._light_block(random.Random(763))
+            lc._extra_lights(random.Random(764), c, lights=7)
+            direction, colour = lc._sun_in_slot(random.Random(765), c, slot, lights=7)
+            self.assertEqual(c[80 + slot], list(direction) + [0.0])
+            self.assertEqual(c[87 + slot][:3], colour)
+            for other in range(7):
+                bank, component = (112, other) if other < 4 else (113, other - 4)
+                self.assertEqual(c[bank][component], float(other == slot))
+                if other != slot:
+                    self.assertEqual(c[87 + other], [0.0] * 4)
+                    self.assertEqual(c[80 + other][3], 1.0)
+
+    @unittest.skipUnless(DUMPS.is_dir(), NO_DUMPS)
+    def test_game_sun_matches_microcode_and_needs_shadow_mask(self):
+        for ps, vs in self.PAIRS:
+            good = lc.check_multi_sun("terrain-layer-multi", ps, vs, 4, trials=24)
+            self.assertTrue(good.ok, good.first_bad)
+            single = lf.sun_gate_single
+            with mock.patch.object(lf, "sun_gate_single", lambda mask=1.0, facing=1.0: single(1.0, facing)):
+                wrong = lc.check_multi_sun("terrain-layer-multi", ps, vs, 4, trials=24)
+            self.assertFalse(wrong.ok)
 
 if __name__ == "__main__":
     unittest.main()

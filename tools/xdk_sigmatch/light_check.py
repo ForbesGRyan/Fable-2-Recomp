@@ -61,7 +61,8 @@ NAN = float("nan")
 FAMILIES = {
     "terrain-layer": [("9C2144E42E95A76F", "C30A97D946FA2BE4"), ("4755A2E4A05BA678", "FB68A7F2301210E1")],
     "terrain-layer-multi": [("45243B758F9272AB", "C30A97D946FA2BE4"), ("04F23292B2F44077", "C30A97D946FA2BE4"),
-                            ("AF1E16EE57E4BB06", "FB68A7F2301210E1"), ("578342593A37DD35", "FB68A7F2301210E1")],
+                            ("AF1E16EE57E4BB06", "FB68A7F2301210E1"), ("578342593A37DD35", "FB68A7F2301210E1"),
+                            ("E0996BF4D9539D38", "C30A97D946FA2BE4"), ("0981301D645E2517", "FB68A7F2301210E1")],
     "terrain-far": [("7DDAD5C29B3F56EE", "5003700B7C9B1C16"), ("2F8A0341E8C09698", "5003700B7C9B1C16")],
 }
 
@@ -78,6 +79,9 @@ PS_LITERALS = {
     "4755A2E4A05BA678": {254: [2, 0, -1, 1], 255: [8, 0, 0, 0]},
     "AF1E16EE57E4BB06": {254: [0, 1, -1, 8], 255: [2, 0, 0, 0]},
     "578342593A37DD35": {254: [0, 1, -1, 2], 255: [8, 0, 0, 0]},
+    # Campfire paired captures, run 763: every row carries these ps_lit values.
+    "E0996BF4D9539D38": {254: [2, 0.99609375, 8, 0], 255: [0, 1, -1, 0.0001]},
+    "0981301D645E2517": {254: [0, 1, -1, 8], 255: [2, 0, 0, 0]},
     "7DDAD5C29B3F56EE": {255: [1, 0, 0, 0]},
     "2F8A0341E8C09698": {255: [1, 0, 0, 0]},
 }
@@ -189,8 +193,8 @@ def _light_block(rng):
     }
 
 
-def _extra_lights(rng, c):
-    """The constants of the two- and four-light variants: light 0 random, colours 1 to 3 zero."""
+def _extra_lights(rng, c, lights=4):
+    """The constants of two-, four- and seven-light variants: light 0 random, other colours zero."""
     c[80] = [rng.uniform(-40, 40) for _ in range(3)] + [rng.choice([0.0, rng.uniform(0.2, 1.0)])]
     for k in (81, 82, 83):
         c[k] = [rng.uniform(-40, 40) for _ in range(3)] + [rng.uniform(0.0, 1.0)]
@@ -203,13 +207,28 @@ def _extra_lights(rng, c):
     c[105] = [rng.uniform(-0.5, 0.5) for _ in range(4)]
     c[107] = [rng.uniform(0.5, 3.0) for _ in range(4)]
     c[112] = [rng.random() for _ in range(4)]
+    if lights == 7:
+        # The additional three slots have their own range/cone/mask bank.
+        for k in (84, 85, 86):
+            c[k] = [rng.uniform(-40, 40) for _ in range(3)] + [rng.uniform(0.0, 1.0)]
+        for k in (91, 92, 93):
+            c[k] = [0.0] * 4
+        c[95] = [rng.choice([0.0, 1.0, rng.random()]) for _ in range(3)] + [0.0]
+        c[97] = [rng.uniform(0.0, 0.02) for _ in range(3)] + [0.0]
+        for k in (102, 103, 104):
+            c[k] = unit(rng) + [0.0]
+        c[106] = [rng.uniform(-0.5, 0.5) for _ in range(3)] + [0.0]
+        c[108] = [rng.uniform(0.5, 3.0) for _ in range(3)] + [0.0]
+        c[113] = [rng.random() for _ in range(3)] + [0.0]
+        c[115] = [0.0] * 4
 
 
-# The lights each two- or four-light pixel shader has: the registers c80.. / c87.. its dump reads.
+# The lights each multi-light pixel shader has: the registers c80.. / c87.. its dump reads.
 MULTI_LIGHTS = {
     "45243B758F9272AB": 2, "AF1E16EE57E4BB06": 2, "04F23292B2F44077": 4, "578342593A37DD35": 4,     # terrain layers
+    "E0996BF4D9539D38": 7, "0981301D645E2517": 7,                                               # campfire terrain
     "648B965C200A5113": 2, "789266C3E42D7E59": 4,                                                 # objects
-    "58D3FAAAA84A48AA": 2, "2FBE9B4EE822609A": 4,                                                 # tree trunks
+    "58D3FAAAA84A48AA": 2, "2FBE9B4EE822609A": 4, "7928BAA7A6691A5D": 7,                         # tree trunks
     "E99F4ACC7A3C78B4": 2, "F525E023E08AC9BB": 2,                                                 # plants
 }
 # The tree leaves' lights are their VERTEX shader's: the pixel shader 7CD5... reads no light register and
@@ -218,19 +237,20 @@ MULTI_LIGHTS_VS = {"D7DD31B9BF194DE8": 2, "2D40B53C926109BE": 4}
 
 
 def light_count(ps, vs):
-    """The lights of a two- or four-light pair: the vertex shader's where it has them (the leaves), else
+    """The lights of a multi-light pair: the vertex shader's where it has them (the leaves), else
     the pixel shader's."""
     return MULTI_LIGHTS_VS.get(vs) or MULTI_LIGHTS[ps]
 
 
-def _sun_in_slot(rng, c, slot):
+def _sun_in_slot(rng, c, slot, lights=4):
     """The light set of a two- or four-light draw as the game loads it, with the sun in `slot` (1 to 3)
     and the lanterns without their light (spec ruling 5; frame-map section 14, "Pixel constants": the
     sun is c(80 + i) with w = 0 where c112 is one-hot at i, c109.xyz is its direction, c94 is 0 at the
     sun's slot and 1 at a lantern's; a lantern is a position with w = 1). Every other light keeps its
-    random position, cone and range and gets colour zero. Returns the sun's (direction, colour)."""
+    random position, cone and range and gets colour zero. Seven-light slots 4..6 use c95/c113
+    for the cone blend and shadow strength. Returns the sun's (direction, colour)."""
     sun_dir, sun_col = unit(rng), [rng.uniform(0.2, 2.0) for _ in range(3)]
-    for j in range(4):
+    for j in range(7 if lights == 7 else 4):
         if j == slot:
             c[80 + j] = list(sun_dir) + [0.0]
             c[87 + j] = list(sun_col) + [0.0]
@@ -239,6 +259,9 @@ def _sun_in_slot(rng, c, slot):
             c[87 + j] = [0.0] * 4
     c[94] = [0.0 if j == slot else 1.0 for j in range(4)]
     c[112] = [1.0 if j == slot else 0.0 for j in range(4)]
+    if lights == 7:
+        c[95] = [0.0 if j + 4 == slot else 1.0 for j in range(3)] + [0.0]
+        c[113] = [1.0 if j + 4 == slot else 0.0 for j in range(3)] + [0.0]
     c[109] = list(sun_dir) + [0.0]
     return sun_dir, sun_col
 
@@ -259,12 +282,13 @@ _LAYER_VS = {
     "C30A97D946FA2BE4": dict(side0=0, side1=1, detail=2, normal=3, world=4, base=5),      # the axis: o8
     "FB68A7F2301210E1": dict(detail=0, normal=1, world=2, base=3),                        # the axis: o6
 }
-# The steep-ground block of the three shaders paired with C30A: (threshold literal, small literal).
+# The steep-ground block of the four shaders paired with C30A: (threshold literal, small literal).
 _STEEP = {"9C2144E42E95A76F": ((254, 1), (255, 3)), "45243B758F9272AB": ((254, 2), (255, 3)),
-          "04F23292B2F44077": ((254, 1), (255, 3))}
+          "04F23292B2F44077": ((254, 1), (255, 3)), "E0996BF4D9539D38": ((254, 1), (255, 3))}
 # The pixel shader's literal 8 of sat(8 * (N . c109)).
 _FACING = {"9C2144E42E95A76F": (254, 2), "4755A2E4A05BA678": (255, 0), "45243B758F9272AB": (254, 0),
-           "AF1E16EE57E4BB06": (254, 3), "04F23292B2F44077": (254, 2), "578342593A37DD35": (255, 0)}
+           "AF1E16EE57E4BB06": (254, 3), "04F23292B2F44077": (254, 2), "578342593A37DD35": (255, 0),
+           "E0996BF4D9539D38": (254, 2), "0981301D645E2517": (254, 3)}
 
 
 def _layer_vertex(vs, text, rng):
@@ -310,9 +334,9 @@ def _terrain_layer_driver(ps, vs, dumps, multi, sun_slot=None):
         c.update({k: list(v) for k, v in PS_LITERALS[ps].items()})
         sun = 80
         if multi:
-            _extra_lights(rng, c)
+            _extra_lights(rng, c, lights=light_count(ps, vs))
             if sun_slot is not None:
-                _sun_in_slot(rng, c, sun_slot)
+                _sun_in_slot(rng, c, sun_slot, lights=light_count(ps, vs))
                 sun = 80 + sun_slot
         mask = rng.random()
         albedo = [x * x for x in tex(0, tuple(regs[slots["detail"]][:2]))[:3]]
@@ -446,7 +470,7 @@ _OBJECT_VS = {
         [0.04, 0.025, 0.0, 1.0], [0.23, 0.11, -math.pi, 0.0], [0.3849, 0.3, 0.019245, 0.1])))),
 }
 # Pixel shaders that divide the colour by its alpha squared without asking bool b128.
-_UNPREMULTIPLY = ("00E09D1BC5295D52", "58D3FAAAA84A48AA", "2FBE9B4EE822609A")
+_UNPREMULTIPLY = ("00E09D1BC5295D52", "58D3FAAAA84A48AA", "2FBE9B4EE822609A", "7928BAA7A6691A5D")
 # Mesh pixel shader literals, read from the idioms (no capture row holds them). Only the registers a
 # trial can reach are given: the cube block's 1.5 is not.
 PS_LITERALS.update({
@@ -457,6 +481,7 @@ PS_LITERALS.update({
     "00E09D1BC5295D52": {254: [1, 0, -1, NAN], 255: [2, NAN, NAN, NAN]},
     "58D3FAAAA84A48AA": {254: [1, 0, -1, NAN], 255: [2, NAN, NAN, NAN]},
     "2FBE9B4EE822609A": {254: [1, 0, -1, NAN], 255: [2, NAN, NAN, NAN]},
+    "7928BAA7A6691A5D": {254: [1, 0, -1, 0.5], 255: [2, 0, 0, 0]},  # run 764 ps_lit
 })
 
 
@@ -527,9 +552,9 @@ def _object_driver(ps, vs, dumps, multi, sun_slot=None):
         c.update({k: list(v) for k, v in PS_LITERALS[ps].items()})
         sun = 80
         if multi:
-            _extra_lights(rng, c)
+            _extra_lights(rng, c, lights=light_count(ps, vs))
             if sun_slot is not None:
-                _sun_in_slot(rng, c, sun_slot)
+                _sun_in_slot(rng, c, sun_slot, lights=light_count(ps, vs))
                 sun = 80 + sun_slot
         mask = rng.random()
         texel = [rng.uniform(0.05, 1.0) for _ in range(4)]         # tf0: colour and alpha
@@ -685,7 +710,8 @@ def _leaf_driver(ps, vs, dumps, sun_slot=None):
 
 FAMILIES.update({
     "tree-trunk": [("00E09D1BC5295D52", "475EC9F795E5EDBB")],
-    "tree-trunk-multi": [("58D3FAAAA84A48AA", "475EC9F795E5EDBB"), ("2FBE9B4EE822609A", "475EC9F795E5EDBB")],
+    "tree-trunk-multi": [("58D3FAAAA84A48AA", "475EC9F795E5EDBB"), ("2FBE9B4EE822609A", "475EC9F795E5EDBB"),
+                         ("7928BAA7A6691A5D", "475EC9F795E5EDBB")],
     "tree-leaf": [("7CD57B81550F19E3", "A5846836C90E1192")],
     # (plan Task 8c; the light count is the vertex shader's: MULTI_LIGHTS_VS)
     "tree-leaf-multi": [("7CD57B81550F19E3", "D7DD31B9BF194DE8"), ("7CD57B81550F19E3", "2D40B53C926109BE")],
@@ -940,7 +966,8 @@ def check_pair(family, ps, vs, trials=200, seed=1, formula=None, dumps=DUMPS, to
 # c90 = 1) in every slot before it (out/native-evidence/lighting/task8c/leaf_rows_check.txt).
 MULTI_SUN_FAMILIES = ("terrain-layer-multi", "object-multi", "tree-trunk-multi", "plant-multi", "plant-lit-multi",
                       "tree-leaf-multi")
-GAME_SUN_SLOT = {2: 1, 4: 2}
+# Run 763 campfire captures: c84/c91 equals the frame sun; c113 = (1,0,0,0).
+GAME_SUN_SLOT = {2: 1, 4: 2, 7: 4}
 _SUN_DRIVERS = {
     "terrain-layer-multi": _terrain_layer_driver,
     "object-multi": _object_driver,
@@ -952,7 +979,7 @@ _SUN_DRIVERS = {
 
 
 def check_multi_sun(family, ps, vs, slot, trials=200, seed=1, dumps=DUMPS, tol=TOLERANCE):
-    """Whether a two- or four-light pair, drawn as the game draws it with the sun in light slot `slot`
+    """Whether a multi-light pair, drawn as the game draws it with the sun in light slot `slot`
     and its lanterns dark, is its family's ONE-light function of that sun: the microcode with the light
     set of _sun_in_slot against the family's formula fed the sun's direction as it is, the one-light
     gate (mask, and for the layers the facing factor of c109) and the sun's colour. Everything else of a

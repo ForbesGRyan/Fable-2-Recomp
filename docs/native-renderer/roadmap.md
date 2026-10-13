@@ -300,3 +300,8 @@ Limits and follow-ups named here are described in `frame-map.md`, section 17, "L
   and pools miss, motion/near branch/other regions unseen; user checks101–106 first).
 - SDK B2 copy interface and further monitor experiments remain separate user decisions.
 - User checks 40 to 106 in `user-checks.md`.
+
+
+## Post-closure campfire follow-ups (2026-10-12)
+
+User verification found missing ground texture, then a colour mismatch and an untextured large trunk near the campfire. Three previously unsupported seven-light material variants are now registered with checked shader pairs: two terrain shaders and one bark shader. Offline proofs, affected tests and release build passed. Runs 766/767 confirm bark and ground colour with user feedback, original split screenshots, valid light inputs and full discovery audits. Both follow-up plans are complete. Reports: [ground](campfire-ground-fix.md), [tree](campfire-tree-fix.md). The water project's historical WITH_CONCERNS closure and pending water checks remain as recorded; these follow-ups address the reported campfire material/lighting defects. Changes are local and uncommitted.

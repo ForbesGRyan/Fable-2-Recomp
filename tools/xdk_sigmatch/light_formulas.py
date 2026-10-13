@@ -786,7 +786,7 @@ FogShader = collections.namedtuple("FogShader", "hash family world form")
 FOG_SHADERS = (
     FogShader("014F8A02DB7B19CA", None, 1, "plain"),
     FogShader("04F23292B2F44077", "terrain-layer-multi", 4, "plain"),
-    FogShader("0981301D645E2517", None, 2, "plain"),
+    FogShader("0981301D645E2517", "terrain-layer-multi", 2, "plain"),
     FogShader("09CB69BD265B58D1", None, 2, "plain"),
     FogShader("14217F5C1118D00F", None, 2, "plain"),
     FogShader("165EDCD2CB963868", "plant-lit", 2, "plain"),
@@ -816,7 +816,7 @@ FOG_SHADERS = (
     FogShader("AF1E16EE57E4BB06", "terrain-layer-multi", 2, "plain"),
     FogShader("C0108405DECA669F", None, 2, "alpha"),
     FogShader("C0715ED52CE7ECF2", None, 2, "plain"),
-    FogShader("E0996BF4D9539D38", None, 4, "plain"),
+    FogShader("E0996BF4D9539D38", "terrain-layer-multi", 4, "plain"),
     FogShader("E99F4ACC7A3C78B4", "plant-multi", 2, "plain"),
     FogShader("F2F103F16764043B", None, 2, "alpha"),
     FogShader("F525E023E08AC9BB", "plant-lit-multi", 2, "plain"),

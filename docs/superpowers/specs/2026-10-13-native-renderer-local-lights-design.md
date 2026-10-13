@@ -2,7 +2,8 @@
 
 Date: 2026-10-13. Branch `native-renderer-lanterns` (worktree `.claude/worktrees/lanterns`,
 based on `00d0d29`, the water closing). Post-closure follow-up of the lighting sub-project
-(sub-project 7; `docs/superpowers/specs/2026-10-07-native-renderer-lighting-design.md`),
+(sub-project 7; `docs/superpowers/specs/2026-10-07-native-renderer-lighting-design.md`), rebased on
+`3c84229` (the campfire seven-light pairs and the water ripple fix, committed by the presentation session on 2026-10-13),
 raised by the user on 2026-10-13: "it seems that the lanterns and torches aren't illuminating
 nearby areas".
 
@@ -35,8 +36,8 @@ From `docs/native-renderer/frame-map.md` section 14 ("Pixel constants", "The lig
   `c91..c93`, `c95`, `c97`, `c102..c104`, `c106`, `c108`, `c113`. The vertex side carries the
   same set four registers lower (`c76..c107`) for the leaf shaders.
 - The two-light shaders are drawn with one lantern in slot 0 and the sun in slot 1; the
-  four-light ones with two lanterns and the sun in slot 2; the seven-light ones (campfire,
-  on the other session's uncommitted branch) with the sun in slot 4. In all 1,520 + 944 captured
+  four-light ones with two lanterns and the sun in slot 2; the seven-light ones (the campfire's
+  terrain and bark, 2f1001b) with the sun in slot 4. In all 1,520 + 944 captured
   `-multi` rows, the slots before the sun are lanterns and the slots after it are unused.
 - At the bridge by day the two lanterns are at (93.75, 161.32, 42.38) and (115.88, 158.23,
   41.46), colour about (1.6, 0.75, 0.09), range term 0.25 (the light reaches four units) and
@@ -88,11 +89,6 @@ In:
    `roadmap.md`, the lighting spec's ruling 5 marked superseded.
 
 Out (each with where it goes):
-- The seven-light variants' table entries and checker support: they live on the other
-  session's uncommitted work (campfire follow-ups). The set reader, the buffer and the shaders
-  are built for seven slots; the three pairs are run through item 1 and entered after that
-  work is committed (a task of this plan that waits on the commit; if it is not there by the
-  closing, a follow-up in the roadmap).
 - Specular per light, the per-light shadow map, `b135`: as before (lighting ruling 4, shadows).
 - Lanterns in the water's reflection draws: the reflection pass draws with the sun alone
   (the plane constant shares the draw word; see ruling 6).
@@ -150,14 +146,17 @@ struct LightSet {
 };
 ```
 
-`MakeLightSet(reg, have, const LightBlock& frame)` (pure, tested): refuses as a whole (`valid`
-false, counted by reason) when `c112` is not one-hot, when the slot it names does not hold the
-frame's sun (direction bit-equal to the block's `sun_dir`, w = 0, `c94` zero there), when a
-register of a lantern slot was not read, or when any value of a lantern slot is not a number
+`MakeLightSet(reg, have, light_set_this_scene)` (pure, tested): refuses as a whole (`valid`
+false, counted by reason) when the set was not loaded this scene, when `c112` / `c113` is not
+one-hot, when the slot it names is not a sun (w = 0, `c94` zero there), when a register of a
+lantern slot was not read, or when any value of a lantern slot is not a number
 of usable size (`LightValueUsable` for the colours and terms, `LightPositionUsable` for the
 positions: the bounds the leaves' translation already uses). A lantern is every slot before
 the sun's; a lantern whose colour is zero in all three channels is dropped (an unused slot),
-the rest packed in order. Slots after the sun are not read (ruling 3).
+the rest packed in order. Slots after the sun are not read (ruling 3). The set carries the
+sun's direction; whether it is the frame's sun is judged in the pass, where the frame's block is
+known (`MakeLanternBuffer`, ruling 4): at capture time the frame's block may not have been read
+yet (it comes from a one-light draw, which may follow the multi-light ones).
 
 `capture.cpp`: at a draw of a multi-light family (`PsLightSpec::multi`), or of the leaf family
 (its pixel shader is one program for one, two and four lights and the table holds no light
@@ -190,17 +189,20 @@ read it). The mirror text's plane height and the terrain's `world` are untouched
 
 ### 4. The pass and the shaders
 
-- **Buffer.** The frame's lanterns in one `StructuredBuffer<float4>` at `t13` (four float4 a
-  lantern: `(pos, w)`, `(col, blend)`, `(range, cone_cos, cone_scale, shadow)`, `(axis, 0)`),
-  filled per frame from `light_sets` in order (`FrameScene` index `i` -> first lantern
-  `first[i]`), through the pool the light buffers use, bound at every draw (something that
-  covers index 0 when the frame has none, as the light registers are covered).
-- **Draw word.** `ClayConstants` grows by one float4: `uint32_t lantern_first, lantern_count;
-  uint32_t pad3[2]` (160 bytes; the static_asserts, `kClay*Slot*` and the test's field string
-  follow). `light_mode` bit 11 (`kLightModeLanterns` = 2048) says the draw has lanterns; it is
-  set only with bit 2 (lit), from `LightSetOf(scene, record)` with `count > 0`, and never for a
-  reflection draw. The light-mode tests enumerate it (the [branch] rule: the buffer is read
-  inside the lantern branch only).
+- **Buffer.** The clay root signature has no binding parameter left (12 of 12, 56 of 64
+  words), so the frame's lanterns go into the frame constant buffer (cbuffer `Frame`, b2) as a
+  tail after the fog tables: `float4 f_lanterns[256]`, four float4 a lantern (`(pos, w)`,
+  `(col, blend)`, `(range, cone_cos, cone_scale, shadow)`, `(axis, 0)`), at most 64 lanterns a
+  frame, filled per frame from `light_sets` in order (`MakeLanternBuffer`: set `i` -> `first[i]`,
+  `count[i]`; a set whose sun is not the frame's, or past the room, is refused and counted). The
+  buffer grows from 5,344 to 9,440 bytes (37 small slots); the vertex shader declares the tail
+  after a pad across the fog's (the leaf path reads it), the lit pixel programs after the fog.
+- **Draw word.** `ClayConstants` does not grow (root words). `light_mode` bit 11
+  (`kLightModeLanterns` = 2048) says the draw has lanterns, bits 16 to 21 hold the first lantern's
+  index and bits 22 to 24 the count (`LightModeLanterns(first, count)`: 0 for an empty range or
+  one past the buffer). Set only with bit 2 (lit), from `LightSetOf(scene, inputs)` and the
+  frame's plan, never for a reflection draw and not in the depth pre-pass's word. The shader reads
+  the tail inside the lantern branch only; a test compiles the programs over the lantern bits.
 - **Pixel paths.** `LocalLights(P, N, mask, facing, first, count)` in the light HLSL: a loop
   of at most seven over the lanterns, `local_light` statement for statement. The terrain layer
   adds it to its sun term with the layer's facing factor; the object, trunk and both plant forms
@@ -235,7 +237,7 @@ read it). The mirror text's plane height and the terrain's `world` are untouched
 4. Cost: the frame time at the bridge, switch on against off, within the usual bound
    (+0.5 ms; the loop runs on one draw in five at most, over at most two lanterns there).
 5. User checks (user-checks.md, "Pending"): a street lamp at night, a torch indoors, the
-   campfire (seven lights: after the merge), and checks 32a, 38, 59 re-read with the new
+   campfire (seven lights), and checks 32a, 38, 59 re-read with the new
    behaviour.
 
 ## Success criteria
@@ -249,7 +251,7 @@ read it). The mirror text's plane height and the terrain's `world` are untouched
    pass.
 4. Frame cost at the bridge, on against off: within +0.5 ms, or stated.
 5. The documents name what is drawn, what is not (reflections, the swayed position, specular,
-   seven-light pairs pending), and the user checks.
+   the crowd pairs pending), and the user checks.
 
 ## Rulings (made by the controller on the user's standing instruction; correct them where they are wrong)
 
@@ -268,9 +270,10 @@ read it). The mirror text's plane height and the terrain's `world` are untouched
    cost if wrong: a lantern after the sun (unobserved) is missed, or a shader drawn under a set
    with more lights than it reads shows a lantern the game does not (unobserved); both counted
    as `sun_slot` statistics in the `Light inputs:` line.
-4. **The set is refused as a whole unless its sun is the frame's** (bit-equal direction at the
-   `c112` slot) — why: the draw is lit by the frame's sun today and the lantern terms are
-   defined relative to that set; a set whose sun differs would mix two frames' light — cost if
+4. **A set is drawn only when its sun is the frame's** (bit-equal direction at the `c112`
+   slot), judged in the pass (`MakeLanternBuffer`), not at capture — why: the draw is lit by the
+   frame's sun today and the lantern terms belong to the same set; a set whose sun differs would
+   mix two frames' light; at capture time the frame's block may not be read yet — cost if
    wrong: at a draw whose set holds another sun (unobserved: one sun value per frame in 60 + 60
    frames) the lanterns are missing, counted.
 5. **The leaves take the pixel set for their vertex-side lights** — why: lighting ruling 15:
@@ -286,10 +289,11 @@ read it). The mirror text's plane height and the terrain's `world` are untouched
    the form is proven offline before it is drawn, and the sun's path is untouched; the cost is
    bounded (one draw in five, a loop of at most seven) — cost if wrong: a visible change at the
    user's next build without their say; `off` is one switch away.
-8. **`ClayConstants` grows by 16 bytes** rather than packing the lantern index into `pad2` —
-   why: `pad2` already carries two meanings (slope bias, in-scatter scale) and the mirror's
-   plane height; a third would be a trap — cost if wrong: every static_assert and the test's
-   field string move (mechanical).
+8. **The lantern range is packed into `light_mode`'s upper bits and the lanterns into the frame
+   constant buffer's tail** — why: the root signature is at 12 of 12 binding parameters and
+   56 of 64 words (`clay_pass.cpp`): no buffer binding and no root constant is free; the wind
+   bits set the precedent for packing; `pad2` already carries three meanings — cost if wrong:
+   a frame with more than 64 lanterns (sixteen sets of four) drops whole sets, counted.
 9. **Lanterns are not drawn in the water's reflection, the swayed position is not used, and no
    specular**: carried as limits, not built — why: out of this follow-up's purpose — cost if
    wrong: none beyond what the documents state.
@@ -301,9 +305,9 @@ read it). The mirror text's plane height and the terrain's `world` are untouched
 - The bridge lanterns are lit by day with range 4 units: the pool may be faint against daylight
   and the measure's disc may show a small move. Then the measure is reported as it is and the
   user's night checks decide.
-- The other session's uncommitted campfire work (seven-light pairs, crowd pairs) lands after
-  this branch: the merge touches `light_check.py`, `clay_logic.h` and the tables; the seven-light
-  reader is built here without those entries and the pairs are proven after the merge.
+- The presentation session's crowd and building pairs (four- and seven-light object shaders,
+  Murgo) are still uncommitted in the main tree: they get lanterns only after that work lands
+  and `--multi-lanterns` is run on them (a line in the roadmap's follow-ups).
 - Capture cost: at most eight set reads a frame of at most 31 registers each; the load model
   lookups are the cost the frame block already pays. Measured by the capture thread's time
   line as before.

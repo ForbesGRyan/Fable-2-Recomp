@@ -9386,6 +9386,44 @@ Evidence: `t18_timing.json`/`.txt`, `t18_timing_manifest.json`,
 - User checks101–106: motion/glint, shoreline, reflection objects, beams, other
   water/time and the exact off control. Water default remains off.
 
+## 21. Texture filtering (sub-project 15)
+
+Sub-project 15 (spec `docs/superpowers/specs/2026-10-13-native-renderer-aniso-design.md`, plan `docs/superpowers/plans/2026-10-13-native-renderer-aniso.md`, report `docs/native-renderer/aniso-filtering.md`). The native world passes sampled textures with plain linear samplers while the emulated path applies the SDK's `anisotropic_override`; the ground at a grazing angle was softer in the native half. Only the water surface followed the override (sub-project 13's ripple fix, `docs/native-renderer/water-ripple-fix.md`).
+
+### The SDK's rule
+
+`anisotropic_override` (default 3, which is 4x; 0 forces anisotropy off, 1..5 mean 1x, 2x, 4x, 8x, 16x, -1 means no override) makes a texture fetch anisotropic when the texture has more than one level, the fetch constant's mip filter is not "base map", the mag and min filters are linear and the mip filter is point or linear; the SDK then forces trilinear. Counted in run 774's world capture (`native_discovery_20261012_195726.jsonl`, `out/native-evidence/aniso/fetch_filters.json`): 309 unique textures, of which 156 are mipped with linear mag, min and mip filters (38 of them ask for anisotropy 2 or 3 in their own fetch constant), 45 are single-level linear, 34 are base-map (2 linear, 32 point), 66 are mipped point/point/linear (their point mag filter selects the point samplers, so they are unaffected) and 0 have mag linear with min point.
+
+### The native rule
+
+- One filter mode per frame. `ClayPass::Render` reads the cvar once through `rex::cvar::GetFlagByName` and parses it as the water step does (`ParseFilterSetting`, `FilterMode`: -1, 0 and out of range give mode 0, linear; 1..5 give 1x..16x). The helpers were the water's `kWaterFilterModes` etc. and are now `kFilterModes`, `FilterMode`, `FilterAnisotropy` in `clay_logic.h`.
+- The main clay layout exists once per mode (six, created lazily and cached, `layouts_[kFilterModes]`) through `ConfigureClaySamplers(desc, mode)` in `src/native/render/clay_samplers.h`, which the water step uses too: mode 0 keeps today's four static samplers (s0 point/wrap, s1 linear/wrap, s2 point/clamp, s3 linear/clamp); in modes 1..5 s1 and s3 become `Filter::kAnisotropic` with `max_anisotropy` 1/2/4/8/16, s0 and s2 stay point. That layout serves the colour pass (terrain, objects, plants, leaves, trunks), the depth pre-pass, the shadow casters, the sun layer's tree occluders and the reflection terrain.
+- A mode change rebuilds the pass's objects (`DestroyObjects()`, then `Ensure(dev)` with the new mode, the path a device change takes); the six layouts and the texture cache survive, so repeated toggles allocate nothing new.
+- The sampler word gains bit 2, "level 0 only" (`kSamplerLevel0 = 4`, `SamplerBits(t, levels)`; the register is still `index & 3`). It is set from the bound texture's level count (`Entry::levels`, from the upload plan: `plan.levels > 1` is false with `base_only`) for a single-level texture, a base-only upload or a base-map mip filter (`TextureFetch` now decodes `min_linear` and `mip_filter`, fc[3] bits 21..22 and 23..24). Five shader sites honour it with `SampleLevel(s, uv, 0)` instead of `Sample`/`SampleGrad`: the object albedo (`FABLE2_CLAY_TEXTURED_HLSL`), the shadow caster's alpha (`kClayShadowPs`) and the terrain's colour, side and base maps (`kClayTerrainLayerPs`, `kClayTerrainFarPs`). A single-level texture therefore reads as the SDK reads it (bilinear, level 0, no anisotropy), and a base-map texture as the SDK's MaxLOD = MinLOD.
+- Water keeps `SamplerIndex` (no bit 2). The historical shader hashes of programs this change touched are kept in `test_native_shaders.cpp` through the `SamplerSelectBefore` text transform (the text before the change is rebuilt and hashed), so the "program of before" pins still hold.
+- Unchanged: `sky_layout_` (its fetches are `SampleLevel(0)`), `post_layout_`, `quad_layout_`, `impostor_layout_`, `water_sky_layout_`, `water_blur_layout_`; the weights, the shadow mask, the sky, the reflection picture and the post chain fetches.
+- The clay ready line names the filtering ("texture filtering linear" or "texture filtering 4x anisotropic, anisotropic_override mode 3"); a rebuild logs one line; `ClayStats::filter_mode` carries the mode.
+
+### Validation (15)
+
+- Native suite, Python suite (1851 tests at f3ed453; the six errors from a non-ASCII comment were fixed in fdf7d25 and their three modules re-run) and the release build pass; shader tests pin the five sites register by register (case 56).
+- Bounded WARP/D3D debug run `aniso_warp` (100 s, exe SHA-256 `0889B3EC...58B4`, `RUN UNCHECKED`): 0 D3D12 error lines, warning 1328 four times only, ready line "texture filtering 4x anisotropic, anisotropic_override mode 3" (`out/native-evidence/aniso/warp_result.json`).
+- Paired hardware captures at the bridge (Hero000, split view, 100 s, discovery at 45 s and 70 s, `-UserPresent`, all `RUN UNCHECKED`; before exe `E3D1DEF1...2C45` from 3c84229, after and control exe `0889B3EC...58B4`; the same eye in all six captures). Judged box: the dirt path left of the deck at a grazing angle, rows 392..426, cols 106..168 (2108 px) of the 1120 x 720 plane. High-pass luminance RMS, native / game: before 0.492 and 0.626 (45 s, 70 s); after 0.923 and 0.946; control with `--anisotropic_override=0` 0.894 and 0.942 (the game's own detail falls to 0.073 and 0.091 and native follows). The all-colour measure is met on all four after and control samples (RGB mean ratios 0.96..0.99, hue 0.29..0.43 degrees). The three acceptances (detail, control, colour) are met (`results.json`, `_verdicts`). The bridge deck box (rows 418..462, cols 240..500) is a secondary sample only: 1.05 and 1.07 before, 1.13 and 1.16 after, 1.16 and 1.18 control, dominated by aliased plank-gap edges.
+
+### Limits (15)
+
+- Impostor, furniture-quad, cloud and sun-quad layouts stay linear (ruling 1).
+- With `anisotropic_override=-1` the SDK honours a fetch's own anisotropy field; native keeps linear (ruling 11). The shader instruction's own filter override is not read, only the fetch constant's.
+- A mipped texture with mag linear and min point would be approximated (anisotropic where the SDK differs); none was seen in 309.
+- A mode change rebuilds the pass: a one-frame hitch and a texture re-upload; a failed rebuild turns the renderer off until F6, as a failed device change does today. The cvar is looked up by name once per frame, plus once in the water block.
+- The judged box is small (2108 px) and one texture type (dirt); the deck box was not judged.
+
+### Follow-ups (15)
+
+- Anisotropic layouts for the impostor, furniture-quad, cloud and sun-quad draws if a far wood or sky difference shows at an angle (ruling 1).
+- The deck's aliased plank gaps (native steps harder than the game's) are an edge/AA difference, not filtering; MSAA or supersampling stays the later sub-project.
+- User check 112.
+
 ## Pending
 
 1. **Pitch ablation** (done 2026-10-01, results in section 4; kept for re-runs). One run per significant pitch `<p>` (1120, 1040, 320, 1280, 560, 280):

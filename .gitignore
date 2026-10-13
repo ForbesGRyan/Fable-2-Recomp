@@ -18,6 +18,7 @@ fable2_func_trace.log
 fable2_func_trace_prev.log
 fable2_func_summary.log
 fable2_func_summary_prev.log
+fable2_attack_probe.log
 fps_probe.log
 
 # --- SDK / runtime artifacts ------------------------------------------------

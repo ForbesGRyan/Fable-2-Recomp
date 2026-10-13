@@ -5751,8 +5751,10 @@ uint32_t RecordDraw(uint32_t id, const LastArgs& a, uint32_t device, const uint3
   // A terrain draw's inputs, a lit draw's light inputs and a swaying draw's wind inputs go to the
   // frame's side arrays, not into the record. The light set first, into the frame's sets, and
   // only into the frame it was read in: one that straddled the frame's end is dropped (the record
-  // itself is the builder's open scene's, whatever frame that is).
-  if (have_light_set && light_reason == LightReason::kNone &&
+  // itself is the builder's open scene's, whatever frame that is). A valid set without lanterns (the
+  // leaves' one-light set: the sun in slot 0) is not offered, so the frame's sets are the ones with
+  // lanterns (MakeLanternBuffer skips such a set uncounted); an invalid set is, for its reason's tally.
+  if (have_light_set && (!light_set.valid || light_set.count > 0) && light_reason == LightReason::kNone &&
       light_set_frame == g_light_tries_frame.load(std::memory_order_relaxed)) {
     light.light_set = g_builder.AddLightSet(light_set);
   }

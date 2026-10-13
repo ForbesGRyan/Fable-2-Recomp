@@ -501,8 +501,9 @@ struct LightSet {
   uint8_t pad[2] = {};
 };
 static_assert(sizeof(LightSet) == 6 * 64 + 4 + 4 + 12 + 1 + 1 + 2);
-// The usable magnitudes, as the pass's rules (clay_logic.h LightValueUsable, LightPositionUsable):
-// a value at most 1,024, a position at most 65,536.
+// The capture's own usable magnitudes for a set's values and lantern positions: a value at most 1,024
+// (as the pass's LightValueUsable), a lantern position at most 65,536. This is not the pass's position
+// rule: clay_logic.h LightPositionUsable bounds an object's translation at 1,048,576 (kLightPositionMax).
 inline constexpr float kLightSetValueMax = 1024.0f, kLightSetPositionMax = 65536.0f;
 inline bool LightSetValueUsable(float v) { return std::fabs(v) <= kLightSetValueMax; }
 inline bool LightSetPositionUsable(float v) { return std::fabs(v) <= kLightSetPositionMax; }

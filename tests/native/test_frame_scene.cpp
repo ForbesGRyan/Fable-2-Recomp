@@ -359,6 +359,15 @@ static int LightAndPoolTests(const capture::DrawRecord& r) {
         render::LightSetOf(*f8, *LightOf(*f8, f8->draws[0])) || f7->light_sets.size() != capture::kMaxFrameLightSets) {
       return 159;
     }
+    // A valid set without lanterns (the leaves' one-light set: the sun in slot 0, count 0) is still
+    // stored and numbered by the builder; the capture does not offer one (capture.cpp, where the set is
+    // handed to AddLightSet), so that the light line's `sets` counts only sets with lanterns.
+    capture::LightSet empty{};
+    empty.valid = true; empty.count = 0; empty.sun_slot = 0;
+    lb.Open();
+    if (lb.AddLightSet(empty) != 0) return 159;
+    auto f9 = lb.Finish(9);
+    if (f9->light_sets.size() != 1 || f9->light_sets[0].count != 0) return 159;
   }
 
   // --- the frame's light block: the first valid one offered inside the scene ---

@@ -2020,11 +2020,12 @@ int main() {
           strstr(rot, "o.world = float3(dot(o_rot0.xyz, p.xyz), dot(o_rot1.xyz, p.xyz), dot(o_rot2.xyz, p.xyz)) * o_leaf.y +");
       const char* after_rows = strstr(v, "[branch] if ((light_mode & 82) == 18 && has_light) {");
       const char* leaf_test = strstr(v, "[branch] if ((light_mode & 90) == 74 && has_light) {");
+      if (!object_world || !after_rows || !leaf_test) return 82;  // (before the loop reads after_rows)
       for (const char* row : {"o_rot0.xyz", "o_rot1.xyz", "o_rot2.xyz"}) {
         const char* again = strstr(after_rows, row);
-        if (!leaf_test || !again || again < leaf_test) return 82;
+        if (!again || again < leaf_test) return 82;
       }
-      if (!object_world || !after_rows || !(rot < object_world && object_world < after_rows && object_world < word)) return 82;
+      if (!(rot < object_world && object_world < after_rows && object_world < word)) return 82;
       if (strstr(v, "if ((light_mode & 2) && has_light)") || strstr(v, "if ((light_mode & 18) == 2 && has_light)") ||
           strstr(v, "if ((light_mode & 18) == 18 && has_light)")) return 82;
       // The instanced plant (plan Task 8b), after the object's block and under its own test: the

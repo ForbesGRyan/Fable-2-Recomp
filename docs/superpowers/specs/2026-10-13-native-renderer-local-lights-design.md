@@ -111,9 +111,9 @@ place of the scalar pair and `sun_col`; the one-light caller passes `sun_col * f
 
 `light_check.py --multi-lanterns [--trials N]`: for every pair of `MULTI_SUN_FAMILIES`, the
 light set as `_sun_in_slot` makes it at the game's slot, and every slot before the sun a random
-lantern: position in the world near the vertex (so that the range term is not always zero:
-`|V|` from 0 to 2 / c96), w = 1, colour in [0.2, 2], `c94` = 1 (and in a third of the trials a
-random blend in (0, 1), to hold the general form), `c96` in [0, 2], a random cone axis, `c105` in
+lantern: position in the world within 8 of the vertex on each axis (so that the range term is
+not always zero: `|V|` from 0 to about 14), w = 1, colour in [0.2, 2], `c94` = 1 (and in a third of the trials a
+random blend in (0, 1), to hold the general form), `c96` in [0, 0.5], a random cone axis, `c105` in
 [-1, 0.5], `c107` in [0.5, 3], `c112` = 0 at the lanterns (and in a third of the trials a random
 strength, to hold the shadow form). The formula is the family's one-light function with the sun
 plus `local_lights` over the lanterns. Pass: 400 of 400 at the family's tolerance for every
@@ -356,6 +356,11 @@ documents). The record of what was built is frame-map section 14, "Native light"
   a new `float3 back : TEXCOORD7`; the vertex block forms each lantern's distance, range and cone itself rather than
   through `LocalLight` (it needs `spot` for `LeafLight`, not the term), so those statements are repeated there (a
   deferred minor: a shared `LanternSpot` helper).
+- **The checker's lanterns.** `c96` is drawn in [0, 0.5], not the [0, 2] this section first said (corrected above and
+  in lighting-formulas.md), and since the whole-branch review the leaves' driver places its lanterns about the leaf
+  vertex's own world position (a first vertex-shader run gives `o0`, the lanterns are placed about it, and a second run,
+  the one checked, follows) rather than about the origin; in the leaf trials a lantern's range term lies strictly
+  between 0 and 1 for 31% of the lanterns, as it did before (the leaf positions lie within a few units of the origin).
 - **The programs' bytes with the switch off** are not those of before (criterion 3): the vertex shader hands on world
   positions unconditionally and every program that declares the fog's tail declares the lanterns after it. Ledger
   ruling 4 replaces the byte pin.

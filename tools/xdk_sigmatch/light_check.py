@@ -268,10 +268,11 @@ def _sun_in_slot(rng, c, slot, lights=4):
     return sun_dir, sun_col
 
 
-def _lanterns_in_slots(rng, c, sun_slot, world, lights=4):
+def _lanterns_in_slots(rng, c, sun_slot, world):
     """After _sun_in_slot: every slot before the sun's a lit lantern (the game's sets list lanterns first).
-    A position near the vertex (|V| from 0 to about 2 / c96 so that the range term is not always 0 or 1),
-    w = 1, a colour in [0.2, 2], c94 = 1 (one trial in three a blend in (0, 1): the general form), c96 in
+    A position within 8 of `world` (the vertex's world position) on each axis, so |V| runs from 0 to about
+    14 and, with c96 in [0, 0.5], the range term sat(1 - |V| * c96) is 1, 0 or between in a share of the
+    trials each, w = 1, a colour in [0.2, 2], c94 = 1 (one trial in three a blend in (0, 1): the general form), c96 in
     [0, 0.5], a random cone axis, c105 in [-1, 0.5], c107 in [0.5, 3], c112 = 0 (one trial in three a random
     strength: the shadow form). Returns the lanterns as local_light's keyword dicts, in slot order."""
     out = []
@@ -369,7 +370,7 @@ def _terrain_layer_driver(ps, vs, dumps, multi, sun_slot=None, lanterns=False):
             _extra_lights(rng, c, lights=light_count(ps, vs))
             if sun_slot is not None:
                 _sun_in_slot(rng, c, sun_slot, lights=light_count(ps, vs))
-                lantern_list = _lanterns_in_slots(rng, c, sun_slot, world, lights=light_count(ps, vs)) if lanterns else []
+                lantern_list = _lanterns_in_slots(rng, c, sun_slot, world) if lanterns else []
                 sun = 80 + sun_slot
         mask = rng.random()
         albedo = [x * x for x in tex(0, tuple(regs[slots["detail"]][:2]))[:3]]
@@ -589,7 +590,7 @@ def _object_driver(ps, vs, dumps, multi, sun_slot=None, lanterns=False):
             _extra_lights(rng, c, lights=light_count(ps, vs))
             if sun_slot is not None:
                 _sun_in_slot(rng, c, sun_slot, lights=light_count(ps, vs))
-                lantern_list = _lanterns_in_slots(rng, c, sun_slot, regs[2][:3], lights=light_count(ps, vs)) if lanterns else []
+                lantern_list = _lanterns_in_slots(rng, c, sun_slot, regs[2][:3]) if lanterns else []
                 sun = 80 + sun_slot
         mask = rng.random()
         texel = [rng.uniform(0.05, 1.0) for _ in range(4)]         # tf0: colour and alpha
@@ -697,15 +698,22 @@ def _leaf_driver(ps, vs, dumps, sun_slot=None, lanterns=False):
             for j in range(4):
                 vc[76 + j], vc[83 + j] = game[80 + j], game[87 + j]
             vc[90] = game[94]
-            if lanterns:
-                lantern_list = _lanterns_in_slots(rng, game, sun_slot, [0.0, 0.0, 0.0])
-                for j in range(sun_slot):
-                    vc[76 + j], vc[83 + j], vc[94 + j] = game[80 + j], game[87 + j], game[98 + j]
-                vc[90], vc[92], vc[101], vc[103] = game[94], game[96], game[105], game[107]
             sun = sun_slot
         vc.update(info["literals"])
         vertex = Vertex(rng)
-        regs, _, _ = run_vs(vs_text, vc, regs={0: [float(rng.randrange(1000)), 0, 0, 0]}, vfetch=vertex)
+        index = float(rng.randrange(1000))
+        regs, _, _ = run_vs(vs_text, {k: list(v) for k, v in vc.items()}, regs={0: [index, 0, 0, 0]}, vfetch=vertex)
+        if lanterns:
+            # The lanterns about the vertex's own world position: a first run (the position reads no light
+            # constant; Vertex keeps each fetched element, so the second run fetches the same vertex) gives
+            # o0, the lanterns are placed about it, and the second run is the one checked.
+            placed = regs[0][:3]
+            _lanterns_in_slots(rng, game, sun_slot, placed)
+            for j in range(sun_slot):
+                vc[76 + j], vc[83 + j], vc[94 + j] = game[80 + j], game[87 + j], game[98 + j]
+            vc[90], vc[92], vc[101], vc[103] = game[94], game[96], game[105], game[107]
+            regs, _, _ = run_vs(vs_text, vc, regs={0: [index, 0, 0, 0]}, vfetch=vertex)
+            assert regs[0][:3] == placed, "the leaf position moved between the two runs"
         e = vertex.elements
         world = regs[0][:3]                                     # o0: the swayed world position
         normal = [lf.dot(vc[r][:3], e[(0, 2)][:3]) * vc[7][3] for r in (4, 5, 6)]
@@ -861,7 +869,7 @@ def _plant_driver(ps, vs, dumps, multi, lit, sun_slot=None, lanterns=False):
             _extra_lights(rng, c)
             if sun_slot is not None:
                 _sun_in_slot(rng, c, sun_slot)
-                lantern_list = _lanterns_in_slots(rng, c, sun_slot, regs[2][:3], lights=light_count(ps, vs)) if lanterns else []
+                lantern_list = _lanterns_in_slots(rng, c, sun_slot, regs[2][:3]) if lanterns else []
                 sun = 80 + sun_slot
         mask = rng.random()
         texel = [rng.uniform(0.05, 1.0) for _ in range(4)]

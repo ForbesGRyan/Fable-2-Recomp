@@ -284,7 +284,12 @@ bound at 23 fps either way), the native pause menu 75 fps.
 movie and the opening dialogue play on the native half. Expected: continuous movie
 motion, then town, subtitles and the black fade, with the guest picture retained
 only during the opening's distortion composite (a known, disclosed fallback). Report
-any stale movie frame, missing subtitle, or a flash at the fade.
+any stale movie frame, missing subtitle, or a flash at the fade. Since the
+character materials were registered (2026-10-13 evening, run 870 user-present): Rose
+and the hero are textured and lit on the native half at the town dialogue (readback
+1361, `presentation_cutscene-skip_20261013_220308`); watch their clothing, skin and
+hair through the camera cuts and the walk to Murgo (the cascade shadows on them are the
+native pass's mask, not the game's 25-tap filter) and report a flat or white character.
 
 ## Done
 - **Check 27, the validation runs of the materials sub-project at its last commit (2026-10-07).** The check asked you to leave the machine alone or to start five runs yourself with `-UserPresent`. You said "run it anyways. i'm fine with it", and the controlling agent started them in your session between 12:29 and 12:44 with `tools\drive_game.ps1 -UserPresent` (six runs; verdict of each `RUN UNCHECKED: -UserPresent given, no idle gate and no watch`; `drive_game_runs.log` reads `gate=USER PRESENT OVERRIDE (gate and watch skipped)`). Result (frame-map section 13, "Validation"): the first run never left the main menu: the game's loading phase ended 1.7 s after the plan's first press, which was lost. The four runs with a native view were then started with the plan 6 s later, and the renderer-off run with the default plan as it is (its press came 0.02 s before the end of the loading phase and was taken; in the gated runs it comes 0.09 to 0.26 s after it, and where in between a press starts to be lost is not known). One of the shifted runs froze and is not used; F6 presses reached the game in two (the view was back where the plan expects it before anything was measured). The rock faces of commit `4d74e0e` are there on the steep ground in view, the flat ground is unchanged, every ground draw has its material, 98 to 99% of the drawn draws are textured and every window without a capture reads 30.0 fps. Not done: a split and an overlay shot of the third spot, and gated runs of that commit.

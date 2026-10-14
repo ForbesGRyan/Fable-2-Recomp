@@ -274,7 +274,17 @@
     "manual": true,
     "evidence": "native_discovery_20261002_194918.jsonl: 454 draws, score 4.5, thumbnail out/albedo_thumbs_bowerstone/401A01FD4E5F8757_tf0.png: DXT4_5 256x512 atlas of feathers, fur and small props with alpha; shader squares tf0 (instr 81) into the diffuse term like PS 8D900846800943C8, tf1 (DXT1) squared is the specular colour",
     "alpha_manual": true,
-    "alpha_evidence": "Dump shader_401A01FD4E5F8757.ucode.frag: tfetch2D r7.wxyz, r7.yx, tf0 (instr 60) puts the texture's w in r7.x (instr 81 rewrites r7.yzw only); oC0.w = c26.w * r7.x (227, scalar mulsc) in the unconditional exece after label L40; no kill. shader_trace.py --alpha: fetch slot 0, the albedo slot, component w, scale [c26.w]. No colour division: the rgb is squared (81) and used as it is (153, 197); the shader has no cexec b128 block and no rcp of the alpha. Captures (out/native-evidence/materials): native_discovery_20261006_211654.jsonl (bridge) / native_discovery_20261006_211843.jsonl (by the trees), main-scene rows, 24 frames each, every draw. State, in 308 of 308 / 546 of 546 rows: alpha test greater with reference 254/255, depth write on, in 154 / 261; blend one, inverse source alpha (0x07010701) with depth write off and no test in 154 / 261 (the same meshes drawn a second time for their soft edges: inference from the equal counts and textures); blend constant colour (0x0D0C0D0C) in 0 / 24, which the RHI cannot express: those stay left out as blend-unknown. Constants: c26.w 1 in all. Thumbnails task7/tex_bridge and task7/tex_walk (<fetch dword 1>.png colour, _alpha.png alpha), statistics task7/texalpha_*.txt, constants task7/pconst_*.txt; a texture is named by its address in the capture it is quoted for, and the two runs place some small textures at different addresses. Textures: 15210054 DXT4_5 256x512 feathers, fur and small props (alpha 0 in 13.1% of its texels, 255 in 40.2%, between in 46.7%), 186A0054 DXT4_5 1024x1024 (15.3%, 50.8%, 33.9%), 13AD0054 DXT4_5 128x64 (38.5%, 0%, 61.5%), 16500053 DXT2_3 512x512 hair strands (8.9%, 40.5%, 50.6%). Transparent texels are black in all four (at most 0.2% are transparent and brighter than 16 of 255), so the blend with source factor one adds nothing around the shapes. Native-view screenshot against the emulated frame (gated runs of 2026-10-07; frame-map section 13, Alpha and missing shaders, 'Entries of this task', and Validation): seen coarsely in game session 1: the hero's hair and the dog are drawn with soft outlines and no rectangle, and the blended rows are drawn; at 720 lines the hair is about 20 pixels wide, so rims at single-pixel level were not judged."
+    "alpha_evidence": "Dump shader_401A01FD4E5F8757.ucode.frag: tfetch2D r7.wxyz, r7.yx, tf0 (instr 60) puts the texture's w in r7.x (instr 81 rewrites r7.yzw only); oC0.w = c26.w * r7.x (227, scalar mulsc) in the unconditional exece after label L40; no kill. shader_trace.py --alpha: fetch slot 0, the albedo slot, component w, scale [c26.w]. No colour division: the rgb is squared (81) and used as it is (153, 197); the shader has no cexec b128 block and no rcp of the alpha. Captures (out/native-evidence/materials): native_discovery_20261006_211654.jsonl (bridge) / native_discovery_20261006_211843.jsonl (by the trees), main-scene rows, 24 frames each, every draw. State, in 308 of 308 / 546 of 546 rows: alpha test greater with reference 254/255, depth write on, in 154 / 261; blend one, inverse source alpha (0x07010701) with depth write off and no test in 154 / 261 (the same meshes drawn a second time for their soft edges: inference from the equal counts and textures); blend constant colour (0x0D0C0D0C) in 0 / 24, which the RHI cannot express: those stay left out as blend-unknown. Constants: c26.w 1 in all. Thumbnails task7/tex_bridge and task7/tex_walk (<fetch dword 1>.png colour, _alpha.png alpha), statistics task7/texalpha_*.txt, constants task7/pconst_*.txt; a texture is named by its address in the capture it is quoted for, and the two runs place some small textures at different addresses. Textures: 15210054 DXT4_5 256x512 feathers, fur and small props (alpha 0 in 13.1% of its texels, 255 in 40.2%, between in 46.7%), 186A0054 DXT4_5 1024x1024 (15.3%, 50.8%, 33.9%), 13AD0054 DXT4_5 128x64 (38.5%, 0%, 61.5%), 16500053 DXT2_3 512x512 hair strands (8.9%, 40.5%, 50.6%). Transparent texels are black in all four (at most 0.2% are transparent and brighter than 16 of 255), so the blend with source factor one adds nothing around the shapes. Native-view screenshot against the emulated frame (gated runs of 2026-10-07; frame-map section 13, Alpha and missing shaders, 'Entries of this task', and Validation): seen coarsely in game session 1: the hero's hair and the dog are drawn with soft outlines and no rectangle, and the blended rows are drawn; at 720 lines the hair is about 20 pixels wide, so rims at single-pixel level were not judged.",
+    "light": {
+      "family": "object-multi",
+      "vertex": [
+        "0xD4D558DA6A82BDC8",
+        "0xECD66A10092E6562",
+        "0x79EAC49585797037",
+        "0xA1F7E9885EC466DF"
+      ],
+      "evidence": "light_check.py --family object-multi --shader 401A01FD4E5F8757 --trials 100 (2026-10-13, worktree of 16db251): 4 of 4 pairs agree with lit_object in every trial, worst relative difference below 1e-15, through the cascade-direct special case of F2F103F1 (CASCADE_DIRECT: uniform depth maps at both shadow endpoints, so the PCF filtering of tf6/tf7 is not proved natively). One light (c80/c87) in the multi-light form (c94, c96, c98, c105, c107, c112, c114 read): MULTI_LIGHTS 1, GAME_SUN_SLOT 0. Literals: run 837 ps_lit (presentation_dialogue-play_20261013_101703). Opening dialogue pfull: the sun in slot 0 (c112 = (1,0,0,0), c94 = 0), no lantern."
+    }
   },
   "0xA17D8AEC3A817D45": {
     "no_albedo": "only traced fetch tf1 writes a single component (mask .w) of a k_8 (format 2) texture (12 textures, 64x64/32x32/8x16: a mask, not colour; thumbnail tool does not decode format 2); colour-format fetches tf13/tf14 (8_8_8_8 256x256) are predicated (shader_trace Unsupported) and read all-zero guest memory at first use (thumbnails A17D8AEC3A817D45_tf13/tf14.png blank). Added 2026-10-06 (materials Task 7; native_discovery_20261006_211654.jsonl bridge / _211843.jsonl by the trees, out/native-evidence/materials): tf13 / tf14 (8_8_8_8 256x256) still read all zero in every dump of both captures and tf1 is still k_8, so no colour texture can be named. Alpha, by hand (shader_trace.py --alpha refuses: 'predicated write in the alpha chain'): r0.w = the tf1 sample (instr 10: tfetch2D r0.___x, r3.xy, tf1), r0.w = c255.z - r0.w (11, scalar), r0.w = saturate(c141.x - r0.w * c141.y) (12), r4.w = c255.z - r0.w (13, scalar), oC0 = r4 (89; r4.xyz = r2.xyz * c20.w at 88): a saturated affine function of a k_8 mask sample, not a texture component times constants. The shader also discards by that value: r2.w = (r4.w == c255.z) (14), p0 = (r2.w != 0) (15, scalar setp_ne), (p0) kill_gt (16). Neither the function nor the kill fits the alpha schema (source, component, up to two constants). State: alpha test greater with reference 15/255, blend source alpha, inverse source alpha (0x07060706), depth greater with write, in 288 of 288 / 72 of 72 rows. Rule: a blended draw whose colour is unknown is left out, counted blend-unknown (12 draws per frame on the bridge)",
@@ -394,9 +404,10 @@
       "vertex": [
         "0xECD66A10092E6562",
         "0xD4D558DA6A82BDC8",
-        "0xA1F7E9885EC466DF"
+        "0xA1F7E9885EC466DF",
+        "0x79EAC49585797037"
       ],
-      "evidence": "light_check.py --all --trials 400 (out/native-evidence/lighting/task4_light_check_all.txt): the microcode's colour equals lit_object (docs/native-renderer/lighting-formulas.md, \"Objects\") with vertex shader ECD66A10092E6562 400 of 400 trials (largest relative difference 1.10e-15). The two- and four-light form: light 0 through sun_gate_multi with the other lights' colours zero; it is the one-light form only with c80.w = 0, c94.x = 0 and c112.x = 1 (\"The sun\"). With the bone-skinned vertex shaders (plan Task 8a; light_check.py --family object-multi --trials 400, out/native-evidence/lighting/task8a/light_check_object_multi.txt): D4D558DA6A82BDC8 400 of 400 trials (largest relative difference 8.88e-16), A1F7E9885EC466DF 400 of 400 trials (largest relative difference 7.81e-16); and with the sun in slot 2 behind two dark lanterns, as the game draws a four-light shader (and in slots 1 and 3), each is the one-light function in 400 of 400 trials (light_check.py --multi-sun, out/native-evidence/lighting/task8a/light_check_multi_sun.txt). Neither pair is in a capture so far: entered on the microcode's evidence."
+      "evidence": "light_check.py --all --trials 400 (out/native-evidence/lighting/task4_light_check_all.txt): the microcode's colour equals lit_object (docs/native-renderer/lighting-formulas.md, \"Objects\") with vertex shader ECD66A10092E6562 400 of 400 trials (largest relative difference 1.10e-15). The two- and four-light form: light 0 through sun_gate_multi with the other lights' colours zero; it is the one-light form only with c80.w = 0, c94.x = 0 and c112.x = 1 (\"The sun\"). With the bone-skinned vertex shaders (plan Task 8a; light_check.py --family object-multi --trials 400, out/native-evidence/lighting/task8a/light_check_object_multi.txt): D4D558DA6A82BDC8 400 of 400 trials (largest relative difference 8.88e-16), A1F7E9885EC466DF 400 of 400 trials (largest relative difference 7.81e-16); and with the sun in slot 2 behind two dark lanterns, as the game draws a four-light shader (and in slots 1 and 3), each is the one-light function in 400 of 400 trials (light_check.py --multi-sun, out/native-evidence/lighting/task8a/light_check_multi_sun.txt). Neither pair is in a capture so far: entered on the microcode's evidence. 79EAC49585797037 added 2026-10-13 (opening dialogue run 837: 270 draws of that pairing counted light-unknown as pair-not-checked): light_check.py --shader 789266C3E42D7E59 --trials 100, 4 of 4 pairs agree."
     }
   },
   "0x26052DEFBA688AF2": {
@@ -664,7 +675,17 @@
     "manual": true,
     "evidence": "native_discovery_20261007_045335.jsonl (by the trees, game session 1; out/native-evidence/materials/session1_trees_capture): 20 main-scene draw rows, 10 each in frames 7 and 8 of 8 and none before (the object comes into view during the capture), vertex shaders 0xA1F7E9885EC466DF (skin, \"uv\"; 18 rows) and 0xD4D558DA6A82BDC8 (skin, \"uv\"; 2 rows); not in the bridge capture of that session. Scripts and outputs: out/native-evidence/materials/task7c (ps_rows.py, ps44B5_rows_trees.txt). albedo_finder.py: slot 0, score 4.5 (task7c/finder/albedo_proposals_trees.json). Dump shader_44B567635EB10620.ucode.frag: r7.xy from instr 29 (mad r7.xy__, r0.yxxx, c8.yxxx, c8.wzzz), tfetch2D r7.wxyz, r7.yx, tf0 (77); shader_trace.py: u = r0.x * c8.x + c8.z, v = r0.y * c8.y + c8.w. tf0's rgb squared (104) is the diffuse colour (156, 212), as in PS 401A01FD4E5F8757; tf1 squared (78, 153) multiplies the specular and environment terms (211, 228); tf2 is a two-channel fetch (52), tf6 twenty-five taps around one coordinate (27, 53 to 76) and tf7 four (80 to 83), tf9 four point taps under cexec b135, tf13 under b133, tf14 a cube map under b134, tf4 / tf5 1D lookups. Textures of slot 0 (thumbnails task7c/tex_44B5, <fetch dword 1>.png colour and _alpha.png alpha; sheet task7c/sheet_44B5_textures.png, looked at; statistics task7c/tex_44B5/texalpha.txt): 15210054 DXT4_5 256x512, the atlas of feathers, fur and small props that PS 401A01FD4E5F8757 draws from (4 rows); 183E0054 DXT4_5 1024x1024, cobwebs, hair, moustaches and beards (4 rows); 17570052, 17830052 and 178E0052, DXT1 1024x1024 atlases of faces, skin and clothing (4, 4 and 2 rows); 17E60052 DXT1 1024x1024 (2 rows): a villager (inference from the face and clothing cells). c8 selects one cell per draw (for example (0.0625, 0.0312, 0.375, 0.25) on 183E0054). UV replay on the dumped vertices (task7 uvcheck.py; task7c/uvcheck_44B5_trees.txt, overlays task7c/uv_44B5 and task7c/uv_44B5_sheet.png, looked at): every coordinate inside its cell; on 183E0054 61.0% of the triangles' area lies on opaque texels against 33.5% with u and v exchanged and 39.3% with v mirrored (u mirrored 60.1%: the shape is symmetric), and the outlines follow a moustache and a beard; on the other five textures the cells are opaque and the shares say nothing (97.1% to 100% for the entry and the controls alike); there the outlines lie on a face, on skin and on clothing pieces. Native-view screenshot against the emulated frame: not seen. In the trees run of Task 7c (out/native-evidence/materials: task7c_trees_fable_2_260.log, capture task7c_trees_capture/native_discovery_20261007_054543.jsonl, where the shader again has 10 rows in each of frames 7 and 8) the object's origin projects to (164, 533) of the 1120 x 720 frame at 25 units, behind the fern field, and neither the emulated shot at 110 s nor the native shots at 107, 114 and 120 s show it (task7c_trees_crop_npc_44B5_x4_native107_emulated110_native114_native120.png, looked at). The log shows the entry reaching the draws: at frames 3000 and 3300 the capture line has textured 410 and ps-unknown 1 where session 1 had 406 and 5 with this shader's 4 draws listed untextured, and the shader is in no untextured or alpha-unknown list; the clay line at 118 s counts blended 12 against 10 in the windows around it and 8 of its draws blend-unknown, the constant-colour rows. Pending a view in which the object is visible.",
     "alpha_manual": true,
-    "alpha_evidence": "Dump shader_44B567635EB10620.ucode.frag: tfetch2D r7.wxyz, r7.yx, tf0 (instr 77) puts the texture's w in r7.x (instr 127, 131, 132, 148 and 151 rewrite r7.yzw only); oC0.w = c26.w * r7.x (242, scalar mulsc) in the unconditional exece after label L42; no kill. shader_trace.py --alpha: fetch slot 0, the albedo slot, component w, scale [c26.w]. No colour division: the rgb is squared (104) and used as it is (156, 212); the shader has no cexec b128 block and no rcp of the alpha (r7.x is read at 235, a scalar product in the fog block, and at 242). The form of PS 401A01FD4E5F8757. Capture native_discovery_20261007_045335.jsonl (by the trees, game session 1; out/native-evidence/materials/session1_trees_capture), 20 main-scene rows in frames 7 and 8. State: blending on in 20 of 20 rows, the alpha test in 4. In 16 rows the blend is constant colour / inverse constant colour (0x0D0C0D0C) with depth write on, 4 of them with alpha test greater and reference 254/255; the RHI cannot express those factors, so these rows stay left out as blend-unknown with or without this entry. In 4 rows it is one / inverse source alpha (0x07010701) with depth write off and no test: the two tested meshes (1,194 and 198 indices, on 15210054 and 183E0054) drawn a second time for their soft edges, the pattern of PS 401A01FD4E5F8757. Constants: c26.w is 1 in the 16 rows and 0.1873 (frame 7) and 0.5395 (frame 8) in the 4 blended ones, and the blend constant (RB_BLEND_RED to ALPHA) is 0.1843 and 0.5373 in those frames: the object is fading in while the capture runs (inference from the rising values). Later in the same run (session1_trees_fable_2_258.log) the capture lines of frames 3000 and 3300 list 4 draws of this shader as untextured and the clay line at 114 s counts 2 of them alpha-unknown (tested, not blended) and 2 blend-unknown (blended, colour unknown): the rows this recipe applies to once the fade is over (inference). pbool 0x00000100 in all rows. Textures with alpha (task7c/tex_44B5/texalpha.txt): 15210054 alpha 0 in 13.1% of its texels, 255 in 40.2%, between in 46.7%; 183E0054 33.5%, 27.8%, 38.7%; the four DXT1 atlases have alpha 0 or 255 only (0.0% to 2.3% transparent). Native-view screenshot against the emulated frame: not seen (the object is hidden behind ferns in the run of Task 7c; see the albedo evidence of this entry)."
+    "alpha_evidence": "Dump shader_44B567635EB10620.ucode.frag: tfetch2D r7.wxyz, r7.yx, tf0 (instr 77) puts the texture's w in r7.x (instr 127, 131, 132, 148 and 151 rewrite r7.yzw only); oC0.w = c26.w * r7.x (242, scalar mulsc) in the unconditional exece after label L42; no kill. shader_trace.py --alpha: fetch slot 0, the albedo slot, component w, scale [c26.w]. No colour division: the rgb is squared (104) and used as it is (156, 212); the shader has no cexec b128 block and no rcp of the alpha (r7.x is read at 235, a scalar product in the fog block, and at 242). The form of PS 401A01FD4E5F8757. Capture native_discovery_20261007_045335.jsonl (by the trees, game session 1; out/native-evidence/materials/session1_trees_capture), 20 main-scene rows in frames 7 and 8. State: blending on in 20 of 20 rows, the alpha test in 4. In 16 rows the blend is constant colour / inverse constant colour (0x0D0C0D0C) with depth write on, 4 of them with alpha test greater and reference 254/255; the RHI cannot express those factors, so these rows stay left out as blend-unknown with or without this entry. In 4 rows it is one / inverse source alpha (0x07010701) with depth write off and no test: the two tested meshes (1,194 and 198 indices, on 15210054 and 183E0054) drawn a second time for their soft edges, the pattern of PS 401A01FD4E5F8757. Constants: c26.w is 1 in the 16 rows and 0.1873 (frame 7) and 0.5395 (frame 8) in the 4 blended ones, and the blend constant (RB_BLEND_RED to ALPHA) is 0.1843 and 0.5373 in those frames: the object is fading in while the capture runs (inference from the rising values). Later in the same run (session1_trees_fable_2_258.log) the capture lines of frames 3000 and 3300 list 4 draws of this shader as untextured and the clay line at 114 s counts 2 of them alpha-unknown (tested, not blended) and 2 blend-unknown (blended, colour unknown): the rows this recipe applies to once the fade is over (inference). pbool 0x00000100 in all rows. Textures with alpha (task7c/tex_44B5/texalpha.txt): 15210054 alpha 0 in 13.1% of its texels, 255 in 40.2%, between in 46.7%; 183E0054 33.5%, 27.8%, 38.7%; the four DXT1 atlases have alpha 0 or 255 only (0.0% to 2.3% transparent). Native-view screenshot against the emulated frame: not seen (the object is hidden behind ferns in the run of Task 7c; see the albedo evidence of this entry).",
+    "light": {
+      "family": "object-multi",
+      "vertex": [
+        "0xD4D558DA6A82BDC8",
+        "0x79EAC49585797037",
+        "0xA1F7E9885EC466DF",
+        "0xECD66A10092E6562"
+      ],
+      "evidence": "light_check.py --family object-multi --shader 44B567635EB10620 --trials 100 (2026-10-13, worktree of 16db251): 4 of 4 pairs agree with lit_object in every trial, worst relative difference below 1e-15, through the cascade-direct special case of F2F103F1 (CASCADE_DIRECT: uniform depth maps at both shadow endpoints, so the PCF filtering of tf6/tf7 is not proved natively). Two lights (c80/c81, c87/c88). Literals: run 837 ps_lit (presentation_dialogue-play_20261013_101703). Opening dialogue pfull: the sun in slot 1 behind one lantern (c112 = (0,1,0,0), c94.x = 1), the game's two-light convention."
+    }
   },
   "0x9C2144E42E95A76F": {
     "kind": "terrain-layer",
@@ -908,9 +929,11 @@
     "light": {
       "family": "object-multi",
       "vertex": [
-        "0xECD66A10092E6562"
+        "0xECD66A10092E6562",
+        "0x79EAC49585797037",
+        "0xD4D558DA6A82BDC8"
       ],
-      "evidence": "light_check.py: 400 first-light trials and 400 sun-slot-4 trials agree with lit_object, worst relative error below 2e-15. 7 lights; captured literals. Native sun/ambient limits remain unchanged."
+      "evidence": "light_check.py: 400 first-light trials and 400 sun-slot-4 trials agree with lit_object, worst relative error below 2e-15. 7 lights; captured literals. Native sun/ambient limits remain unchanged. 79EAC49585797037 and D4D558DA6A82BDC8 added 2026-10-13 (run 837: 126 and 36 draws, pair-not-checked): light_check.py --shader FC0922A3A8D8DA7A --trials 100, 3 of 3 pairs agree."
     }
   },
   "0xF96A4494958BFA12": {
@@ -986,9 +1009,10 @@
       "vertex": [
         "0xD4D558DA6A82BDC8",
         "0xA1F7E9885EC466DF",
-        "0xECD66A10092E6562"
+        "0xECD66A10092E6562",
+        "0x79EAC49585797037"
       ],
-      "evidence": "light_check.py: 400 independent trials per pair, plus 400 trials at each sun slot 1..3. F2F103 trials cover uniform near/far maps at binary shadow endpoints; intermediate direct PCF filtering is not proved or newly implemented."
+      "evidence": "light_check.py: 400 independent trials per pair, plus 400 trials at each sun slot 1..3. F2F103 trials cover uniform near/far maps at binary shadow endpoints; intermediate direct PCF filtering is not proved or newly implemented. 79EAC49585797037 added 2026-10-13 (run 837: 42 draws, pair-not-checked): light_check.py --shader F2F103F16764043B --trials 100, 4 of 4 pairs agree."
     }
   },
   "0xA22982E86122DA41": {
@@ -1027,6 +1051,44 @@
         "0x79EAC49585797037"
       ],
       "evidence": "light_check.py: 400 independent trials per pair, plus 400 trials at each sun slot 1..3. F2F103 trials cover uniform near/far maps at binary shadow endpoints; intermediate direct PCF filtering is not proved or newly implemented."
+    }
+  },
+  "0x20055F971BB9E749": {
+    "slot": 0,
+    "u": {
+      "input": "r0.x",
+      "stages": [
+        {
+          "scale": "c8.x",
+          "offset": "c8.z"
+        }
+      ]
+    },
+    "v": {
+      "input": "r0.y",
+      "stages": [
+        {
+          "scale": "c8.y",
+          "offset": "c8.w"
+        }
+      ]
+    },
+    "alpha": {
+      "source": "albedo",
+      "component": "w",
+      "scale": "c26.w",
+      "divide_by_alpha": false
+    },
+    "manual": true,
+    "alpha_manual": true,
+    "evidence": "Run 837 native_discovery_20261013_102434.jsonl (presentation_dialogue-play_20261013_101703): 12 main-scene draws, pair D4D558DA6A82BDC8/20055F971BB9E749, the opening dialogue's seven-light clothing variant. shader_trace.py: tf0 at instr 95 (tfetch2D r8.wxyz, r12.yx, tf0), u = r0.x * c8.x + c8.z, v = r0.y * c8.y + c8.w (the existing vertex UV entry); the sampled rgb is squared into the diffuse term as in 44B567635EB10620.",
+    "alpha_evidence": "shader_trace.py --alpha: fetch slot 0, component w, scale [c26.w], no kills; no cexec b128 block (bools 133, 134, 135 only), so no colour division. ps_lit c252 = (0,0,0,0), c253 = (-1,1.5,-2,0), c254 = (0.375,0.125,0.5,0.1), c255 = (1,2,3,0).",
+    "light": {
+      "family": "object-multi",
+      "vertex": [
+        "0xD4D558DA6A82BDC8"
+      ],
+      "evidence": "light_check.py --family object-multi --shader 20055F971BB9E749 --trials 100 (2026-10-13, worktree of 16db251): 1 of 1 pairs agree with lit_object in every trial, worst relative difference below 1e-15, through the cascade-direct special case of F2F103F1 (CASCADE_DIRECT: uniform depth maps at both shadow endpoints, so the PCF filtering of tf6/tf7 is not proved natively). Seven lights (c80..c86, c87..c93, c95/c97/c106/c108/c113 for slots 4..6). Literals: run 837 ps_lit (presentation_dialogue-play_20261013_101703). Opening dialogue pfull: five lanterns before the sun (c80..c84 w = 1, c94 = (1,1,1,1), c95.x = 1) and the sun in slot 5 (c113 = (0,1,0,0)); the capture reads the slot per draw."
     }
   }
 }

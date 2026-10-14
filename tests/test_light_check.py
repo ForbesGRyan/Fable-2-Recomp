@@ -721,7 +721,10 @@ class MultiSun(unittest.TestCase):
                         checked += 1
         # Thirty pairs since sub-project 14 registered the town building (FC0922A3, seven lights), the
         # iris variants (F96A4494, A22982E8) and the crowd hair (F2F103F1): 72 sun slots behind light 0.
-        self.assertEqual(checked, 72)
+        # Forty-three since the opening characters (44B56763 x4 two lights, 20055F97 seven, 401A01FD x4
+        # one light: no slot behind light 0) and the 79EAC495/D4D558DA pairings of 789266C3, FC0922A3
+        # and F2F103F1: 100 slots.
+        self.assertEqual(checked, 100)
 
     def test_the_families_and_light_counts_cover_the_table(self):
         # Every -multi pair of every family is checked (the plants' since plan Task 8b), and has a light count.
@@ -730,12 +733,12 @@ class MultiSun(unittest.TestCase):
                 self.assertIn(family, lc.MULTI_SUN_FAMILIES)
             if family.endswith("-multi"):
                 for ps, vs in pairs:
-                    self.assertIn(lc.light_count(ps, vs), (2, 4, 7))
+                    self.assertIn(lc.light_count(ps, vs), (1, 2, 4, 7))   # 1: the fur props 401A01FD, the multi form with one light
         # The light count is the registers the dump reads: c82 / c89 only in the four-light shaders.
         for ps, lights in lc.MULTI_LIGHTS.items():
             text = lc.ue.load(DUMPS, ps, "frag")
             self.assertEqual("c89" in text and "c82" in text, lights >= 4, ps)
-            self.assertIn("c88", text)
+            self.assertEqual("c88" in text and "c81" in text, lights >= 2, ps)
             self.assertEqual("c86" in text and "c93" in text, lights == 7, ps)
         # The leaves' lights are the VERTEX shader's (plan Task 8c: their pixel shader 7CD5... reads no light
         # register at all): c84 / c77 from two lights on, c85 / c78 only with four.
@@ -751,7 +754,7 @@ class MultiSun(unittest.TestCase):
         self.assertEqual(lc.light_count("7CD57B81550F19E3", "D7DD31B9BF194DE8"), 2)
         self.assertEqual(lc.light_count("7CD57B81550F19E3", "2D40B53C926109BE"), 4)
         self.assertEqual(lc.light_count("648B965C200A5113", "ECD66A10092E6562"), 2)
-        self.assertEqual(lc.GAME_SUN_SLOT, {2: 1, 4: 2, 7: 4})
+        self.assertEqual(lc.GAME_SUN_SLOT, {1: 0, 2: 1, 4: 2, 7: 4})   # 1: the one-light multi form (401A01FD): the sun in slot 0
 
     def test_a_slot_the_shader_does_not_have_is_refused(self):
         with self.assertRaises(ValueError):
@@ -838,7 +841,7 @@ class MultiSun(unittest.TestCase):
             code = lc.main(["--multi-sun", "--trials", "4"])
         text = out.getvalue()
         self.assertEqual(code, 0)
-        self.assertEqual(text.count("(the game)"), 30)
+        self.assertEqual(text.count("(the game)"), 39)   # the 43 multi pairs less the four one-light ones (no slot behind light 0)
         self.assertIn("tree-leaf-multi: ps 7CD57B81550F19E3 vs D7DD31B9BF194DE8 (2 lights), sun in slot 1 (the game): 4/4 agree", text)
         self.assertIn("tree-leaf-multi: ps 7CD57B81550F19E3 vs 2D40B53C926109BE (4 lights), sun in slot 2 (the game): 4/4 agree", text)
         self.assertIn("plant-multi: ps E99F4ACC7A3C78B4 vs 8123C16DBF583F92 (2 lights), sun in slot 1 (the game): 4/4 agree", text)
@@ -858,7 +861,7 @@ class MultiSun(unittest.TestCase):
         with mock.patch.object(lc, "_sun_in_slot", sun_as_a_position), contextlib.redirect_stdout(out):
             code = lc.main(["--multi-sun", "--trials", "8"])
         self.assertEqual(code, 1)
-        self.assertIn("30 pairs disagree at the slot the game puts the sun in", out.getvalue())
+        self.assertIn("39 pairs disagree at the slot the game puts the sun in", out.getvalue())   # the 43 less the four one-light pairs
         self.assertIn("first disagreement, trial ", out.getvalue())
 
 
@@ -878,7 +881,7 @@ class MultiLanterns(unittest.TestCase):
                     self.assertTrue(res.ok, f"{res.agree}/{res.trials} worst {res.worst:.3g} {res.first_bad}")
                     self.assertEqual(res.trials, self.TRIALS)
                     checked += 1
-        self.assertEqual(checked, 30)   # 24 before sub-project 14 (21 two/four-light, 3 seven-light); + FC0922A3, F96A4494, A22982E8, F2F103F1 x3
+        self.assertEqual(checked, 43)   # 24 before sub-project 14; 30 with FC0922A3, F96A4494, A22982E8, F2F103F1 x3; 43 with the opening characters and pairings
 
     def test_a_lantern_term_dropped_or_moved_fails(self):
         family, (ps, vs) = "object-multi", lc.FAMILIES["object-multi"][0]
@@ -1082,8 +1085,8 @@ class TrialInputs(unittest.TestCase):
                     for reg, value in case.consts.items():
                         if reg >= 240 or not any(value):
                             continue        # literals; a register that is zero on purpose (lights 1 to 3)
-                        if reg in (12, 13) and ps == "F2F103F16764043B":
-                            continue        # its driver pins the cascade depth endpoints uniformly on purpose
+                        if reg in (12, 13) and ps in lc.CASCADE_DIRECT:
+                            continue        # their driver pins the cascade depth endpoints uniformly on purpose
                         self.assertGreater(len(set(value)), 1, f"{family} {ps}: c{reg} = {value}")
                         if reg == 11:       # the review's case: c11.x read as .y or .w must not pass
                             self.assertEqual(len(set(value)), 4, f"{family} {ps}: c11 = {value}")

@@ -104,14 +104,44 @@ with or without it, 28.8 ms busy for 5,500 draws); the native pause menu runs
 at 75 fps. Criterion 9's cost bound holds; its 30 fps floor is the scene's
 own baseline on this branch, not a presentation effect.
 
-Open: criterion 9's away-gated measurement (user check 116:
-`out/native-evidence/presentation/timing_ab.ps1`); the opening dialogue's
-clothing/skin material 44B567635EB10620 is a further lighting family (its
-microcode reads c36) and stays clay natively; F51's native DOF is proven but
+Away-gated (run 869, 20:36, unattended, RUN CLEAN): native UI on at the
+market holds 30.1 fps in every window, frame 33.31 ms, guest work 6.58 ms,
+present 4.45 ms; the user-present 23 fps above came from sharing the machine
+(present 13 ms there). The UI-off half waits for the next idle window
+(`timing_when_idle.ps1 -Only ui-off`).
+
+Open: criterion 9's UI-off half (user check 116:
+`out/native-evidence/presentation/timing_ab.ps1`); F51's native DOF is proven but
 no exercised route executes it; half-resolution effects and the distortion
 producers remain unimplemented (guest retained). `fable2_native_ui` defaults off.
 
+The opening dialogue's characters (ledger 149 called 44B567635EB10620 "a
+further lighting family") are lit_object after all: 44B56763 (two lights),
+401A01FD (one light in the multi form, sun in slot 0) and 20055F97 (seven
+lights, five lanterns before the sun in the opening) sample the two cascade
+maps directly, as the Murgo hair F2F103F1 does, and light_check's cascade-direct
+special case proves all of them (400 trials per pair, every sun slot behind
+light 0, lanterns before the sun: `characters_light_check_20261013.txt`). The
+same pass registered the 79EAC495 pairing of 789266C3 and F2F103F1 and the
+79EAC495/D4D558DA pairings of FC0922A3, which the capture had counted
+light-unknown as pair-not-checked (270, 42, 162 draws of run 837). Run 870
+(cutscene-skip, user-present): no light-unknown draw of those shaders at the
+town (frames 1500-1800: 5 unknown of 884 lit, fur shells and F6D98C7B), and the
+readback at frame 1361 shows Rose and the hero textured and lit on the native
+half (`presentation_cutscene-skip_20261013_220308/native_ui_20261013_220356.native.png`
+against `.guest.png`; the 17/255 mean over the frame is the world's sky, snow
+and ground, not the characters). Still clay: the fur shells A17D8AEC/014F8A02
+(no colour texture) and the flat-ambient variants 8C512607 (one light, no
+tint/floor registers) and F98433EC (two), whose vertex shader 65834A84 has no
+light entry.
+
 ## Findings of the closing session (builds 56-73)
+
+- The "further lighting family" of ledger 149 was lit_object with the cascade
+  maps sampled directly (c36..c43, tf6/tf7, splits c12, texel sizes c13); the
+  one-light form exists (401A01FD reads c112/c94 with one light, sun in slot 0:
+  `GAME_SUN_SLOT[1] = 0`), and the seven-light opening draws put the sun in
+  slot 5 behind five lanterns, so the sun slot is per draw, not per light count.
 
 - Builds 52-55 never observed the mask bin reset: the 822A6318 override lived
   only in `fps_probe.h`, which `fable_2_app.h` does not include, and the hook

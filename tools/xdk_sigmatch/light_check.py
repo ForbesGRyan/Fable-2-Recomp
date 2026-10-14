@@ -227,12 +227,18 @@ def _extra_lights(rng, c, lights=4):
 
 
 # The lights each multi-light pixel shader has: the registers c80.. / c87.. its dump reads.
+# The object shaders that sample the two cascade maps themselves (tf6 and tf7 under the rows
+# c36..c43, the splits c12 and the texel sizes c13) instead of reading the screen mask (tf8): the
+# character materials. _object_driver isolates their light arithmetic with uniform depth maps.
+CASCADE_DIRECT = ("F2F103F16764043B", "44B567635EB10620", "401A01FD4E5F8757", "20055F971BB9E749")
+
 MULTI_LIGHTS = {
     "45243B758F9272AB": 2, "AF1E16EE57E4BB06": 2, "04F23292B2F44077": 4, "578342593A37DD35": 4,     # terrain layers
     "E0996BF4D9539D38": 7, "0981301D645E2517": 7,                                               # campfire terrain
     "648B965C200A5113": 2, "789266C3E42D7E59": 4,                                                 # objects
     "FC0922A3A8D8DA7A": 7, "F96A4494958BFA12": 2,                                               # childhood town
     "F2F103F16764043B": 4, "A22982E86122DA41": 4,                                               # Murgo crowd
+    "44B567635EB10620": 2, "401A01FD4E5F8757": 1, "20055F971BB9E749": 7, "F98433EC8C4A4740": 2,  # opening characters
     "58D3FAAAA84A48AA": 2, "2FBE9B4EE822609A": 4, "7928BAA7A6691A5D": 7,                         # tree trunks
     "E99F4ACC7A3C78B4": 2, "F525E023E08AC9BB": 2,                                                 # plants
 }
@@ -248,7 +254,7 @@ def light_count(ps, vs):
 
 
 def _sun_in_slot(rng, c, slot, lights=4):
-    """The light set of a two- or four-light draw as the game loads it, with the sun in `slot` (1 to 3)
+    """The light set of a two- or four-light draw as the game loads it, with the sun in `slot` (1 to 3; 0 for the one-light form)
     and the lanterns without their light (spec ruling 5; frame-map section 14, "Pixel constants": the
     sun is c(80 + i) with w = 0 where c112 is one-hot at i, c109.xyz is its direction, c94 is 0 at the
     sun's slot and 1 at a lantern's; a lantern is a position with w = 1). Every other light keeps its
@@ -525,6 +531,14 @@ PS_LITERALS.update({
     "A22982E86122DA41": {254: [0, 1, -1, 1.5], 255: [2, 0, 0, 0]},  # run 829 ps_lit
     "F2F103F16764043B": {252: [0, 1, 1.5, -1], 253: [.125, .5, .375, .1],
                          254: [1, 2, 3, .5], 255: [-2, 0, 0, 0]},  # run 829 ps_lit
+    # Run 837 ps_lit (presentation_dialogue-play_20261013_101703): the opening's clothing/skin
+    # (two lights), the fur/feather props (one light) and the seven-light clothing variant.
+    "44B567635EB10620": {252: [0, 1, 1.5, -1], 253: [.125, .5, .375, .1],
+                         254: [1, 2, 3, .5], 255: [-2, 0, 0, 0]},
+    "401A01FD4E5F8757": {252: [-1, 1.5, -2, 0], 253: [.125, .5, .375, .1],
+                         254: [.5, .375, 0, 1], 255: [1, 2, 3, .5]},
+    "20055F971BB9E749": {252: [0, 0, 0, 0], 253: [-1, 1.5, -2, 0],
+                         254: [.375, .125, .5, .1], 255: [1, 2, 3, 0]},
 })
 
 
@@ -602,8 +616,8 @@ def _object_driver(ps, vs, dumps, multi, sun_slot=None, lanterns=False):
                 sun = 80 + sun_slot
         mask = rng.random()
         cascade_depth = None
-        if ps == "F2F103F16764043B":
-            # This variant fetches its near/far cascade maps directly. Isolate
+        if ps in CASCADE_DIRECT:
+            # These variants fetch their near/far cascade maps directly. Isolate
             # material/light arithmetic with uniform depth maps at both binary
             # shadow endpoints. Intermediate PCF filtering is not proved here.
             cascade_depth = rng.choice([0.0, 1.0])
@@ -655,13 +669,19 @@ FAMILIES.update({
     "object-multi": [("648B965C200A5113", "ECD66A10092E6562"), ("648B965C200A5113", "79EAC49585797037"),
                      ("648B965C200A5113", "D4D558DA6A82BDC8"), ("648B965C200A5113", "A1F7E9885EC466DF"),
                      ("789266C3E42D7E59", "ECD66A10092E6562"), ("789266C3E42D7E59", "D4D558DA6A82BDC8"),
-                     ("789266C3E42D7E59", "A1F7E9885EC466DF"),
-                     ("FC0922A3A8D8DA7A", "ECD66A10092E6562"),
+                     ("789266C3E42D7E59", "A1F7E9885EC466DF"), ("789266C3E42D7E59", "79EAC49585797037"),
+                     ("FC0922A3A8D8DA7A", "ECD66A10092E6562"), ("FC0922A3A8D8DA7A", "79EAC49585797037"),
+                     ("FC0922A3A8D8DA7A", "D4D558DA6A82BDC8"),
                      ("F96A4494958BFA12", "79EAC49585797037"),
                      ("A22982E86122DA41", "79EAC49585797037"),
                      ("F2F103F16764043B", "D4D558DA6A82BDC8"),
                      ("F2F103F16764043B", "A1F7E9885EC466DF"),
-                     ("F2F103F16764043B", "ECD66A10092E6562")],
+                     ("F2F103F16764043B", "ECD66A10092E6562"), ("F2F103F16764043B", "79EAC49585797037"),
+                     ("44B567635EB10620", "D4D558DA6A82BDC8"), ("44B567635EB10620", "79EAC49585797037"),
+                     ("44B567635EB10620", "A1F7E9885EC466DF"), ("44B567635EB10620", "ECD66A10092E6562"),
+                     ("20055F971BB9E749", "D4D558DA6A82BDC8"),
+                     ("401A01FD4E5F8757", "D4D558DA6A82BDC8"), ("401A01FD4E5F8757", "ECD66A10092E6562"),
+                     ("401A01FD4E5F8757", "79EAC49585797037"), ("401A01FD4E5F8757", "A1F7E9885EC466DF")],
 })
 
 
@@ -1059,7 +1079,10 @@ def check_pair(family, ps, vs, trials=200, seed=1, formula=None, dumps=DUMPS, to
 MULTI_SUN_FAMILIES = ("terrain-layer-multi", "object-multi", "tree-trunk-multi", "plant-multi", "plant-lit-multi",
                       "tree-leaf-multi")
 # Run 763 campfire captures: c84/c91 equals the frame sun; c113 = (1,0,0,0).
-GAME_SUN_SLOT = {2: 1, 4: 2, 7: 4}
+# Opening dialogue (run 837 pfull): the one-light 401A01FD has its sun in slot 0 (c112 = (1,0,0,0), c94 = 0, no
+# lantern); the seven-light 20055F97 there has five lanterns before its sun (c113 = (0,1,0,0): slot 5), so the
+# seven-light slot below is the campfire's, one of the slots the game uses; the capture reads each draw's own.
+GAME_SUN_SLOT = {1: 0, 2: 1, 4: 2, 7: 4}
 _SUN_DRIVERS = {
     "terrain-layer-multi": _terrain_layer_driver,
     "object-multi": _object_driver,

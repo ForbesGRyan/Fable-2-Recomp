@@ -10598,8 +10598,9 @@ int main() {
         const DrawFog lit = RecordDrawFog(true, true, false, true, e.ps_hash, nullptr);
         CHECK(597, lit == (fogged || tree ? DrawFog::kLit : DrawFog::kLitNoFog));
       }
-      // The two newly proved crowd materials join the fogged object family.
-      CHECK(597, entries == 28 && in_table == 22 && trees == 5 && bare == 1 && bare_hash == 0x26052DEFBA688AF2ull);
+      // The two newly proved crowd materials join the fogged object family; the opening characters
+      // (44B56763, 401A01FD, 20055F97: 2026-10-13) three more, all three in the fog table.
+      CHECK(597, entries == 31 && in_table == 25 && trees == 5 && bare == 1 && bare_hash == 0x26052DEFBA688AF2ull);
       CHECK(597, capture::PsLightFamily(0) == LightFamily::kNone && capture::PsLightFamily(0xF6D98C7B4D98438Bull) == LightFamily::kNone &&
                      capture::PsLightFamily(0x7CD57B81550F19E3ull) == LightFamily::kTreeLeaf &&
                      capture::PsLightFamily(0x26052DEFBA688AF2ull) == LightFamily::kPlant);

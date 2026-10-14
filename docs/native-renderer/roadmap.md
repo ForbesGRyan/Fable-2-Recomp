@@ -159,9 +159,15 @@ Limits and follow-ups named here are described in `frame-map.md`, section 17, "L
      99.9%. Transitions compose natively; the skip and the opening's 577CB/15675
      distortion frames retain the guest picture explicitly. Full suite and the WARP
      debug-layer run pass. User-present market profiling: +0.15 ms/frame, menu at 75 fps,
-     scene itself 23 fps (emulation bound). Open: the away-gated timing run (user check 116),
-     the opening clothing material 44B56763 (a further lighting family, clay natively),
-     half-resolution effects and distortion producers (guest retained). `fable2_native_ui`
+     scene itself 23 fps (emulation bound); away-gated, native UI on holds 30.0 fps in every
+     window at the market (run 869, 2026-10-13 20:36). The opening characters' materials
+     (44B56763 two lights, 401A01FD one, 20055F97 seven: lit_object with the cascade maps
+     sampled directly) and the 79EAC495/D4D558DA pairings of 789266C3, FC0922A3 and F2F103F1
+     are object-multi since the same evening (light_check 400 trials each, sun-slot and lantern
+     checks; run 870: Rose and the hero textured and lit at the town dialogue). Open: the
+     away-gated UI-off half of the timing (user check 116), half-resolution effects and
+     distortion producers (guest retained), the fur shells A17D8AEC/014F8A02 and the flat-ambient
+     variants 8C512607/F98433EC (their vertex shaders have no light entry). `fable2_native_ui`
      defaults off; details in the plan's "Current status" and "Findings".
    - [Plan](../superpowers/plans/2026-10-12-native-renderer-presentation.md);
      research `.superpowers/sdd/presentation-research.md`;

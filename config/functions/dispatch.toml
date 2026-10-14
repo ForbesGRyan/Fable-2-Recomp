@@ -1,0 +1,2035 @@
+# dispatch functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+[functions."0x8217F250"]
+name = "SwitchDispatch_8217F250"
+size = 0x00F0
+
+
+# A triple-vcall gate: makes THREE virtual calls in sequence and returns 1 only
+# if all three succeed (nonzero), else 0. Args: obj (r3), arg (r5). Reads the
+# vtable at *(obj->0) and, in order: (1) calls vtable slot 6 (offset 24);
+# if it returns 0, bail with 0. (2) calls vtable slot 8 (offset 32) passing the
+# arg; if it returns 0, bail with 0. (3) calls vtable slot 7 (offset 28); the
+# low byte of its result is the return value (1 = all three succeeded, 0 = some
+# step failed). 40 callers, all in the 0x82C0-0x82C4 region (sub_82C033D8,
+# sub_82C49680, sub_82C2D040, ...). The three interface methods (slots 6/8/7)
+# aren't resolvable without the vtable, so the name states the mechanism: a
+# three-step all-or-nothing virtual sequence.
+[functions."0x82C011E8"]
+name = "VcallTriple_AllSuccess_82C011E8"
+
+
+# A position-advancing write via vtable slot 3 (a member of the same slot-3
+# interface as SubObject_VcallSlot3_Bool_82C01E78 and 
+# SubObject_VcallSlot3_GatedStore32_82C842C8, but over a +8 sub-object). Args:
+# obj (r3), arg (r4), count (r5). Guards (else return): count > 0 and obj->8 !=
+# 0. Loads the sub-object at obj->8 and calls sub_obj->vtable[3](sub_obj, 
+# &{arg, 0}, sign_extend(obj->12), count) (vtable slot at offset 12 / index 3),
+# then advances the position counter obj->12 += count. Returns void. Single
+# caller: sub_829FCBE0. The slot-3 interface method isn't resolvable without
+# the vtable, so the name states the mechanism: a slot-3 write that advances a
+# position by the count.
+[functions."0x82C62EB0"]
+name = "VcallSlot3_AdvancePosition_82C62EB0"
+
+
+# A vtable method (0 direct callers, reached only via virtual dispatch) that
+# computes a 32-bit product and writes it via vtable slot 3. Args: arg (r3),
+# factor a (r4), factor b (r5), and a pointer-to-object (r6). Computes
+# product = (int32)a * (int32)b, dereferences r6 to get the object, and calls
+# object->vtable[3](r6, arg, product, 0) (vtable slot at offset 12 / index 3 --
+# the same slot-3 interface as the other SubObject_VcallSlot3_* wrappers, but
+# here the object is a dereferenced pointer and the product is passed in). 
+# Returns the product. A "unit x count, write it" shape (cf.
+# StoreUnitTimesCount_82CE32B0). The slot-3 method isn't resolvable without the
+# vtable, so the name states the mechanism: a slot-3 write carrying a product.
+[functions."0x82305270"]
+name = "VcallSlot3_WithProduct_82305270"
+
+
+# A vtable method (0 direct callers) -- the fifth known member of the recurring
+# vtable-slot-3 interface, this one over the +16 sub-object (same sub-object
+# offset and 0x82C01E region as SubObject_VcallSlot3_Bool_82C01E78). Args:
+# wrapper (r3), arg (r4). Loads the sub-object at wrapper->16 and calls
+# sub_obj->vtable[3](sub_obj, &{arg, 0}, 1) (vtable slot at offset 12 / index
+# 3). From the returned value it derives a boolean through a
+# clz/clz/rotate/xor-1 bit idiom and returns 0 or 1 (a negated/derived bit of
+# the slot-3 result). The slot-3 method isn't resolvable without the vtable, so
+# the name states the mechanism: a slot-3 vcall that returns a derived bool.
+[functions."0x82C01E20"]
+name = "VcallSlot3_Bool_82C01E20"
+
+
+# A pure vtable thunk (a vtable_x forwarder, Section G). Args: wrapper (r3).
+# Dereferences r3 to get the object, loads vtable slot 14 (offset 56 / 4), and
+# `bctrl`s straight into it, passing the args through unmodified. Single caller:
+# sub_82C14F38 (as the middle step of that all-success chain). Named per the
+# Section G convention: VtableSlotX<index>.
+[functions."0x82C01090"]
+name = "VtableSlotX14_82C01090"
+
+
+# A chained all-success vcall gate -- a sibling of VcallTriple_AllSuccess_82C011E8
+# (same "run a sequence of virtual calls, short-circuit on the first failure, 
+# return 1 only if every step succeeds" pattern). Args: wrapper (r3), arg (r5).
+# (1) vcall (*wrapper)->vtable[6] (offset 24); if it returns 0, return 0. (2)
+# Otherwise call VtableSlotX14_82C01090(wrapper, arg); if it returns 0, return
+# 0. (3) Otherwise vcall (*wrapper)->vtable[7] (offset 28); return 1 if nonzero,
+# else 0. So it returns 1 iff all three virtual steps succeed. 5 callers, all in
+# the 0x82C1-0x82C3 region. Named for the mechanism: an all-success vcall chain.
+[functions."0x82C14F38"]
+name = "VcallChain_AllSuccess_82C14F38"
+
+
+# A pure vtable thunk (a vtable_x forwarder, Section G) -- the offset-52 sibling
+# of VtableSlotX14_82C01090.
+
+# Arg: wrapper (r3). Dereferences r3 to get the object, loads vtable slot 13
+# (offset 52 / 4), and `bctr`s straight into it, passing the args through
+# unmodified. 2 callers (sub_82C15068, sub_82C4A410). Named per the Section G
+# convention: VtableSlotX<index>.
+[functions."0x82C010B0"]
+name = "VtableSlotX13_82C010B0"
+
+
+# A chained all-success vcall gate -- a sibling of VcallChain_AllSuccess_82C14F38
+# (same "run a sequence of virtual calls, short-circuit on the first failure, 
+# return 1 only if every step succeeds" pattern; only the middle thunk differs).
+
+# Args: wrapper (r3), arg (r5). (1) vcall `(*wrapper)->vtable[6]` (offset 24);
+# if it returns 0, return 0. (2) Otherwise call VtableSlotX13_82C010B0(wrapper,
+# arg) (vtable slot 13 / offset 52); if it returns 0, return 0. (3) Otherwise
+# vcall `(*wrapper)->vtable[7]` (offset 28); return 1 if nonzero, else 0. So it
+# returns 1 iff all three virtual steps succeed. 16 callers, all in the
+# 0x82C1-0x82C4 region. Named parallel to its 0x82C14F38 sibling (which uses
+# VtableSlotX14 in the middle instead of VtableSlotX13).
+[functions."0x82C15068"]
+name = "VcallChain_AllSuccess_82C15068"
+
+
+# A vtable-slot-3 caller with a loop/single mode, selected by a flag bit in
+# obj->5 -- a member of the recurring slot-3 interface (over the *obj->0
+# sub-object).
+
+# Args: obj (r3), value (r4), count (r5). A bit test on obj->5 (via
+# clz/rotate/xor) selects the mode. MODE A (loop): if count != 0, loop `count`
+# times -- each iteration vcall `(*obj->0)->vtable[3](obj->0, &{value++, 0}, 1)`
+# (vtable slot at offset 12 / index 3), incrementing value each pass -- then
+# return 1. MODE B (single): one vcall `(*obj->0)->vtable[3](obj->0, &{value, 0},
+# count)`, returning a bit derived from the result (clz/rotate/xor). So it calls
+# the slot-3 method either `count` times or once, depending on the obj->5 flag.
+# 1 caller: sub_82C669C0. The slot-3 method isn't resolvable without the vtable,
+# so the name states the mechanism: a slot-3 vcall in loop or single mode.
+[functions."0x82C66330"]
+name = "VcallSlot3_LoopOrSingle_82C66330"
+
+
+# A 5-way state dispatch (state-machine switch) on the byte obj->16->21
+# (values 0-4) -- a switch/jump-table dispatcher.
+
+# Arg: obj (r3). Reads the state byte at obj->16->21. If it is > 4, jump to a
+# default path. Otherwise switch on it via a function-pointer table:
+#   case 0: sub_82BCB7E8(obj), return 0
+#   case 1: (obj->16->36 related path)
+#   case 2/3/4: other 0x82BC handler paths
+# (each case calls a distinct handler -- sub_82BC9860, sub_82BCB0A8, 
+# sub_82BCB610, sub_82BCB6E0, sub_82BCB8D0, sub_82BCD698, sub_8227BB58, ...).
+# 2 callers (sub_82BC62B8, sub_8227B8B8). The individual states/handlers aren't
+# resolvable, so the name states the mechanism: a 5-way dispatch on a state byte.
+[functions."0x82BCBB40"]
+name = "StateDispatch_82BCBB40"
+
+
+# A 7-way state dispatch (state-machine switch) on the byte (obj->4 - 4) (values
+# 0-6) -- a switch/jump-table dispatcher, a sibling of StateDispatch_82BCBB40.
+
+# Args: obj (r3), state obj (r4, whose ->4 is the switch key and ->5 a status byte).
+# Clears the low 2 bits of obj->5 (stb obj->5 = obj->5 & 0xFFFFFFFC), computes the
+# key = obj->4 - 4, and (if key is in 0..6) switches on it via a function-pointer
+# table; each case (0-6) performs inline register operations (no external sub-calls --
+# the case bodies manipulate obj's fields directly). 17 callers (sub_822DF280, 
+# sub_82BCC6F0, sub_82BD3A90, sub_82BC56F8, sub_82BCB7E8, ...). The individual states
+# and their effects aren't resolvable, so the name states the mechanism: a 7-way
+# dispatch on a state byte.
+[functions."0x82BCA7D8"]
+name = "StateDispatch_82BCA7D8"
+
+
+# A vtable-slot-12 call wrapper: deref obj, load vtable offset 48 (slot 12), and call
+# it with obj as the sole argument, returning the result.
+
+# Arg: obj (r3, whose ->0 is a vtable). Loads *(obj->0) = the vtable, then vtable[48]
+# (slot 12, 48/4), and calls it with obj (bctr). Returns the callee's result. 1 caller:
+# sub_82C14E08. The method (slot 12) isn't resolvable without the vtable, so the name
+# states the mechanism: call the object's vtable slot 12.
+[functions."0x82C010D0"]
+name = "VcallSlot12_82C010D0"
+
+
+# A 3-step vcall chain (slots 6 -> 12 -> 7), each step gated on the previous result's
+# low byte being nonzero -- a sibling of VcallTriple_AllSuccess (6,8,7) and
+# VcallChain_AllSuccess (6,14,7).
+
+# Args: obj (r3, whose ->0 is a vtable), (r4), value (r5). Step 1: vcall
+# obj->vtable[6] (offset 24); if the result's low byte == 0, return 0. Step 2: vcall
+# slot 12 via VcallSlot12_82C010D0(obj, value); if the result's low byte == 0, return
+# 0. Step 3: vcall obj->vtable[7] (offset 28); return (result's low byte != 0). So it's
+# an all-or-nothing chain of three virtual calls (6, 12, 7), returning 1 only if all
+# three report success (nonzero byte). 2 callers (sub_82C1E360, sub_82C15100). The
+# methods (slots 6/12/7) aren't resolvable without the vtable, so the name states the
+# mechanism: a 3-step vcall chain, slots 6 -> 12 -> 7, all-or-nothing.
+[functions."0x82C14E08"]
+name = "VcallChain_6_12_7_82C14E08"
+
+
+# A vtable-slot-0 call with a null check and a flag of 1 -- the classic virtual
+# destructor-call shape (obj->vtable[0](obj, 1)).
+
+# Arg: obj (r3). If obj == null, return (no-op). Otherwise load *(obj->0) = the vtable
+# and call vtable[0] (offset 0 / slot 0) with obj and r4 = 1 (bctr). Returns the
+# callee's result. 0 direct callers, so it is most likely invoked VIRTUALLY (a
+# destructor/dispose entry) -- vtable slot 0 is typically the destructor in the Itanium
+# C++ ABI, and the r4 = 1 is plausibly a "deleting"/"full" flag. The exact class and
+# whether slot 0 is the destructor aren't resolvable here, so the name states the
+# mechanism: null-check, then call the object's vtable slot 0 with a flag of 1.
+[functions."0x829681C0"]
+name = "VcallSlot0_Flag1_829681C0"
+
+
+# A vtable-slot-3 call on the sub-object obj->0 (offset 12 / slot 3) that passes a
+# value pointer and returns a BIT derived from the result -- a member of the recurring
+# slot-3 interface.
+
+# Args: obj (r3, whose ->0 is the sub-object and ->5 a flag byte), value (r4). A bit
+# test on obj->5 (via clz/rotate/xor) selects which stack slot holds the value pointer
+# (a 2-element struct {value, 0}). Then vcall `(*obj->0)->vtable[3](obj->0, &{value, 0},
+# 1)` (vtable slot at offset 12). Finally it returns a single bit derived from the
+# result (clz of the result, then rotate-right-27 and mask 1). 8 callers (sub_8236D3C8,
+# sub_82C85538, sub_82C84838, sub_82A4AF78, sub_82C680F8, sub_82B483D0, sub_82C85758,
+# sub_82365458). The slot-3 method isn't resolvable without the vtable, so the name
+# states the mechanism: a slot-3 vcall that returns a bit.
+[functions."0x82372268"]
+name = "VcallSlot3_ReturnBit_82372268"
+
+
+# A vtable-slot-3 call on the sub-object obj->0 (offset 12 / slot 3) with a flag of 4
+# (r5 = 4) -- a member of the recurring slot-3 interface, a sibling of
+# VcallSlot3_ReturnBit_82372268 (which uses r5 = 1).
+
+# Args: obj (r3, ->0 = the sub-object, ->4 = a gate byte, ->5 = a flag byte), value
+# (r4). If obj->4 == 0, take an alternate path. Otherwise a bit test on obj->5 (via
+# clz/rotate/xor) selects which stack slot holds the value pointer (a 2-element struct
+# {value, 0}), then vcall `(*obj->0)->vtable[3](obj->0, &{value, 0}, 4)` (vtable slot at
+# offset 12, with the 3rd arg = 4 instead of the sibling's 1). 2 callers (sub_82372108,
+# sub_823715E8). The slot-3 method isn't resolvable without the vtable, so the name
+# states the mechanism: a slot-3 vcall on the sub-object with a flag of 4.
+[functions."0x82372070"]
+name = "VcallSlot3_Flag4_82372070"
+
+
+# A vtable-slot-5 call wrapper: deref obj, load vtable offset 20 (slot 5), and call it
+# with obj as the sole argument, returning the result.
+
+# Arg: obj (r3, whose ->0 is a vtable). Loads *(obj->0) = the vtable, then vtable[20]
+# (slot 5, 20/4), and calls it with obj (bctr). Returns the callee's result. 0 direct
+# callers, so it is most likely a VIRTUAL method (a wrapper that forwards to the
+# object's own vtable slot 5 -- a delegating thunk). The method (slot 5) isn't
+# resolvable without the vtable, so the name states the mechanism: call the object's
+# vtable slot 5.
+[functions."0x82C1DC40"]
+name = "VcallSlot5_82C1DC40"
+
+
+# A vtable-slot-8 call wrapper: deref obj, load vtable offset 32 (slot 8), and call it
+# with obj as the sole argument, returning the result.
+
+# Arg: obj (r3, whose ->0 is a vtable). Loads *(obj->0) = the vtable, then vtable[32]
+# (slot 8, 32/4), and calls it with obj (bctr). Returns the callee's result. A sibling
+# of VcallSlot5_82C1DC40 (same wrapper shape, different slot). 1 caller:
+# sub_82C4A410. The method (slot 8) isn't resolvable without the vtable, so the name
+# states the mechanism: call the object's vtable slot 8.
+[functions."0x82C1DC70"]
+name = "VcallSlot8_82C1DC70"
+
+
+# A vtable-slot-1 call on an embedded sub-object: deref obj->4, treat (obj->4 + 12) as
+# `this`, and call its vtable slot 1.
+
+# Arg: obj (r3, ->4 = a container). Sets this = obj->4 + 12 (an embedded object at
+# offset 12 within the container). Loads the vtable at (obj->4 + 12)->0, then vtable[4]
+# (slot 1), and calls it with this (bctr). Returns the callee's result. 0 direct
+# callers, so it is most likely a VIRTUAL method (a delegating thunk on the embedded
+# sub-object). The method (slot 1) and the container class aren't resolvable, so the
+# name states the mechanism: call slot 1 on the sub-object embedded at obj->4 + 12.
+[functions."0x82C14D40"]
+name = "VcallSlot1_SubObj12_82C14D40"
+
+
+# A vtable-slot-10 call wrapper: deref obj, load vtable offset 40 (slot 10), and call it
+# with obj as the sole argument, returning the result.
+
+# Arg: obj (r3, whose ->0 is a vtable). Loads *(obj->0) = the vtable, then vtable[40]
+# (slot 10, 40/4), and calls it with obj (bctr). Returns the callee's result. A sibling
+# of VcallSlot12_82C010D0 (0x30 bytes away, slot 12) in the 0x82C010 vcall-wrapper family.
+# 3 callers (sub_82C14EA0 -- also in the TODO -- plus sub_82EE42B8, sub_82EE3F70). The
+# method (slot 10) isn't resolvable without the vtable, so the name states the mechanism:
+# call the object's vtable slot 10.
+[functions."0x82C010A0"]
+name = "VcallSlot10_82C010A0"
+
+
+# A vtable-slot-3 call on the sub-object at obj->16 (offset 12 / slot 3) with a flag of
+# 2 (r5 = 2), returning a boolean derived from the result's sign -- a member of the
+# recurring slot-3 interface.
+
+# Args: obj (r3, ->16 = the sub-object), value (r4). Builds a 2-element struct {value, 0}
+# on the stack, then vcall `(*obj->16)->vtable[3](obj->16, &{value, 0}, 2)` (vtable slot
+# at offset 12, with the 3rd arg = 2). Takes the result, does a clz-based sign test, and
+# returns (sign ^ 1) -- a 0/1 boolean. 0 direct callers, so it is most likely a VIRTUAL
+# method. A slot-3 sibling (compare VcallSlot3_Bool_82C01E78 / _Bool_82C01E20,
+# VcallSlot3_Flag4_82372070). The slot-3 method isn't resolvable without the vtable, so
+# the name states the mechanism: a slot-3 vcall on obj->16 that returns a boolean.
+[functions."0x82C01DC8"]
+name = "VcallSlot3_Bool_82C01DC8"
+
+
+# A multi-step vcall chain on obj: slot 6, then (if the result is nonzero) slot 10 via
+# VcallSlot10_82C010A0, then (if that result is nonzero) slot 7 -- each step gated on the
+# previous result's byte 3.
+
+# Args: obj (r3, ->0 = a vtable), (r4), value (r5). Makes a vcall on obj (vtable slot 6,
+# offset 24); if the result's top byte is nonzero, calls VcallSlot10_82C010A0 (sub_82C010A0,
+# slot 10) with obj and value; if that result's top byte is nonzero, makes another vcall
+# on obj (vtable slot 7, offset 28). Returns void. 86 lines. 1 caller: sub_82C15100 (a
+# sibling, also in the TODO). A gated vcall chain (slots 6, 10, 7); a sibling of
+# VcallChain_6_12_7_82C14E08 and VcallChain_AllSuccess. The slots aren't resolvable
+# without the vtable, so the name states the mechanism: a gated slot-6 -> 10 -> 7 vcall
+# chain.
+[functions."0x82C14EA0"]
+name = "VcallChain_6_10_7_82C14EA0"
+
+
+# A complex vcall dispatcher (271 lines): make an initial vcall on the source, then
+# orchestrate a sequence of vcall chains (VcallTriple_AllSuccess, VcallChain_AllSuccess,
+# VcallChain_6_12_7, VcallChain_6_10_7, ...) based on each result.
+
+# Args: obj (r3, a tree/object container), src (r4, a wrapper, ->0 = a vtable object),
+# value (r5). Makes a vcall on src (vtable slot 5, offset 20); depending on the result it
+# branches into a sequence of higher-level operations: VcallTriple_AllSuccess_82C011E8,
+# VcallChain_AllSuccess_82C14F38, VcallChain_6_12_7_82C14E08, VcallChain_6_10_7_82C14EA0,
+# plus DestructRefCounted_82214F08, sub_821F7798, sub_8228A4C0, and sub_82C14D70. So it's
+# the top-level dispatcher that drives the object's virtual operation sequence. 271 lines.
+# 1 caller: sub_82C168E0 (a sibling, also in the TODO). The object class and the exact
+# semantics of each vcall chain aren't resolvable, so the name states the mechanism: a
+# dispatcher that runs a gated sequence of vcall chains.
+[functions."0x82C15100"]
+name = "Dispatch_VcallSequence_82C15100"
+
+
+# A multi-step vcall chain on obj: slot 6, then (if the result is nonzero)
+# Dispatch_VcallSequence_82C15100, then (if that result is nonzero) slot 7 -- each step
+# gated on the previous result's byte 3. Structurally like VcallChain_6_10_7_82C14EA0, but
+# the middle step is the full dispatcher.
+
+# Args: obj (r3, ->0 = a vtable), (r4), value (r5). Makes a vcall on obj (vtable slot 6,
+# offset 24); if the result's top byte is nonzero, calls Dispatch_VcallSequence_82C15100
+# (sub_82C15100) with value and obj; if that result's top byte is nonzero, makes another
+# vcall on obj (vtable slot 7, offset 28). Returns void. 86 lines. 1 caller:
+# sub_82C17E48 (a higher-level function). A gated vcall chain (slot 6 -> dispatch -> slot
+# 7); a sibling of VcallChain_6_10_7_82C14EA0. The slots aren't resolvable without the
+# vtable, so the name states the mechanism: a gated slot-6 -> dispatcher -> slot-7 vcall
+# chain.
+[functions."0x82C168E0"]
+name = "VcallChain_6_Dispatch_7_82C168E0"
+
+
+# A 5-way switch dispatch (a state/command dispatcher in the 0x82BCB region): set a flag
+# bit, index a function-pointer table by (obj->36->4 - 5), and dispatch to one of five
+# handlers.
+
+# Arg: obj (r3, ->36 = a sub-object). Sets bit 2 of (obj->36)->5 (a flag). Computes an
+# index = (obj->36)->4 - 5; if the index > 4, take the default path. Otherwise it loads a
+# function pointer from a global table (indexed by the index) and calls it (bctr), then
+# switches on the index (cases 0-4, each calling one of sub_82BCAA58 / sub_82BCAC98 /
+# sub_82BCAE28 / sub_82BCAF40). So it's a state/command dispatcher keyed on the
+# sub-object's byte-4 state. 271 lines. 2 callers (StateDispatch_82BCBB40 -- a state
+# dispatcher in the same region -- plus sub_82BCB2A0). The states/commands aren't
+# resolvable, so the name states the mechanism: a 5-way state dispatch (sibling of
+# StateDispatch_82BCBB40 / StateDispatch_82BCA7D8).
+[functions."0x82BCB0A8"]
+name = "StateDispatch_82BCB0A8"
+
+
+# A gated vcall sequence: call VcallTriple_AllSuccess_82C011E8 on the source, and (if the
+# result's top byte is nonzero) call it again with obj+4 as the 3rd argument.
+
+# Args: obj (r3), src (r4). Calls VcallTriple_AllSuccess_82C011E8 (sub_82C011E8) with src,
+# a global (a 3rd-arg constant ~0x82C0F0C0), and obj; if the result's top byte is nonzero,
+# calls VcallTriple_AllSuccess_82C011E8 again with src, a second global, and (obj + 4). So
+# it's a gated two-step vcall sequence driving the source object. Returns the final result
+# byte. 75 lines. 1 caller: sub_82C16AA8 (a sibling, also in the TODO). The vcall-triple
+# slots aren't resolvable, so the name states the mechanism: a gated sequence of two
+# VcallTriple_AllSuccess calls.
+[functions."0x82C15358"]
+name = "VcallTriple_Sequence_82C15358"
+
+
+# A multi-step vcall chain on obj: slot 6, then (if the result is nonzero)
+# VcallTriple_Sequence_82C15358, then (if that result is nonzero) slot 7 -- each step
+# gated on the previous result's byte 3. Same shape as VcallChain_6_10_7_82C14EA0 and
+# VcallChain_6_Dispatch_7_82C168E0, but the middle step is the vcall-triple sequence.
+
+# Args: obj (r3, ->0 = a vtable), (r4), value (r5). Makes a vcall on obj (vtable slot 6,
+# offset 24); if the result's top byte is nonzero, calls VcallTriple_Sequence_82C15358
+# (sub_82C15358) with value and obj; if that result's top byte is nonzero, makes another
+# vcall on obj (vtable slot 7, offset 28). Returns void. 86 lines. 1 caller:
+# sub_82C188A8. A gated vcall chain (slot 6 -> vcall-triple sequence -> slot 7); a sibling
+# of the other 6-?-7 chains in the 0x82C15/0x82C16 dispatcher cluster. The slots aren't
+# resolvable without the vtable, so the name states the mechanism.
+[functions."0x82C16AA8"]
+name = "VcallChain_6_Triple_7_82C16AA8"
+
+
+# A large (408-line) complex vcall dispatcher: make an initial pair of vcalls on the
+# source (slots 5 and 0), then orchestrate a long gated sequence of vcall chains
+# (VcallTriple_AllSuccess, VcallChain_AllSuccess x2, VcallChain_6_12_7, ...) -- the bigger
+# sibling of Dispatch_VcallSequence_82C15100.
+
+# Args: obj (r3, a tree/object container), src (r4, a wrapper, ->0 = a vtable object),
+# value (r5). Makes a vcall on src (vtable slot 5, offset 20), then another vcall on src
+# (vtable slot 0, offset 0), then VcallTriple_AllSuccess_82C011E8; depending on the results
+# it branches through VcallChain_AllSuccess_82C14F38, VcallChain_AllSuccess_82C15068,
+# VcallChain_6_12_7_82C14E08, plus DestructRefCounted_82214F08, sub_821F7798, sub_82BFD780,
+# and sub_82C14D70. So it's the top-level dispatcher that drives a long virtual-operation
+# sequence on the source object. 408 lines. 1 caller: sub_82C1EAF8 (a sibling, also in the
+# TODO). The object class and the exact semantics of each vcall chain aren't resolvable, so
+# the name states the mechanism: a dispatcher that runs a long gated sequence of vcall
+# chains (the "2" distinguishes it from Dispatch_VcallSequence_82C15100).
+[functions."0x82C1E360"]
+name = "Dispatch_VcallSequence2_82C1E360"
+
+
+# A multi-step vcall chain on obj: slot 6, then (if the result is nonzero)
+# Dispatch_VcallSequence2_82C1E360, then (if that result is nonzero) slot 7 -- each step
+# gated on the previous result's byte 3. Same shape as VcallChain_6_Dispatch_7_82C168E0,
+# but the middle step is the second (larger) dispatcher.
+
+# Args: obj (r3, ->0 = a vtable), (r4), value (r5). Makes a vcall on obj (vtable slot 6,
+# offset 24); if the result's top byte is nonzero, calls Dispatch_VcallSequence2_82C1E360
+# (sub_82C1E360) with value and obj; if that result's top byte is nonzero, makes another
+# vcall on obj (vtable slot 7, offset 28). Returns void. 86 lines. 1 caller: sub_82C1EBE8.
+# A gated vcall chain (slot 6 -> dispatcher2 -> slot 7); a sibling of
+# VcallChain_6_Dispatch_7_82C168E0 / VcallChain_6_Triple_7_82C16AA8. The slots aren't
+# resolvable without the vtable, so the name states the mechanism.
+[functions."0x82C1EAF8"]
+name = "VcallChain_6_Dispatch2_7_82C1EAF8"
+
+
+# A vcall + direct array index: make a vtable-slot-1 call on the source, then index a
+# 4-byte-stride array (src->4) at the given index and return the pointed-to element.
+
+# Args: (r3), src (r4, ->0 = a vtable object, ->4 = an array base), index (r5). Makes a
+# vcall on src (vtable slot 1, offset 4) passing src and a global (~0x82C24C60) as the 2nd
+# arg. Then computes slot = index * 4, loads the element pointer from src->4[slot], and
+# returns *element. So it's a "call slot 1, then fetch array[index]" accessor. 50 lines,
+# 0 external callees (the vcall + array index are inline). 0 direct callers, so it is most
+# likely a VIRTUAL method (or currently dead). Part of the 0x82C1E lookup cluster (a
+# sibling of LookupByVcall_82C1E760, but with a direct index instead of a binary search).
+# The slot-1 method and array element class aren't resolvable, so the name states the
+# mechanism.
+[functions."0x82C1EB90"]
+name = "VcallAndIndexArray_82C1EB90"
+
+
+# A state handler (one of the five cases dispatched by StateDispatch_82BCB0A8): conditionally
+# dispatch via StateDispatch_82BCA7D8, then loop over a sub-array checking elements.
+
+# Args: obj (r3), state (r4, ->12 = a sub-object with a ->5 flag byte, ->6 and ->7 = gate
+# bytes, ->20 = a sub-array). If (state->12->5) & 0x3 != 0, calls StateDispatch_82BCA7D8
+# (sub_82BCA7D8). If state->6 != 0 and state->7 != 0, it loops over the sub-array at
+# (state + 20) checking each element (element->4 == 4) and processing it. So it's a specific
+# state/command handler in the 0x82BCA state cluster. 157 lines. 1 caller:
+# StateDispatch_82BCB0A8 (a state dispatcher, also in this batch). The state semantics aren't
+# resolvable, so the name states the mechanism: a state handler (one of the dispatcher's
+# cases).
+[functions."0x82BCAE28"]
+name = "StateHandler_82BCAE28"
+
+
+# A virtual-method dispatch + position adjust: call a vtable method on a sub-object, conditionally
+# insert (sub_82BCCB88), then adjust a position field (obj->16->68 += delta - pos).
+
+# Args: obj (r3, ->16 = a sub-object), (r4), pos (r5), delta (r6). Reads the sub-object (obj->16) and
+# calls one of its virtual methods (loading obj->16->12 as the method address and bctrl'ing, with
+# obj->16->16 as a first arg). If the method returns non-zero and delta is non-zero, it inserts (sub
+# _82BCCB88, an insert, passing obj and the constant 4). Then it adjusts a position field:
+# obj->16->68 = obj->16->68 - pos + delta (a position shift). So it's a "dispatch a virtual method and
+# adjust the position" routine (part of the 0x82BC state-dispatch / position subsystem). 60 lines, 1
+# callee (sub_82BCCB88). Many callers, all in the state-dispatch cluster: StateDispatch_82BCBB40 (sub
+# _82BCBB40), sub_82BDE878, sub_82BCD7B0, sub_82BC9FD0, ... The sub-object's class (->12 = a vtable
+# method, ->16 = an arg, ->68 = a position) and the dispatch's meaning aren't resolvable, so the name
+# states the mechanism: dispatch and adjust the position.
+[functions."0x8227BB58"]
+name = "DispatchAndAdjustPos_8227BB58"
+
+
+# A virtual-method dispatch thunk: call the method at offset 36 of the sub-object (obj->0->36), passing
+# (obj, arg).
+
+# Args: obj (r3, ->0 = a sub-object), arg (r4). Reads the sub-object (*obj), loads its method pointer
+# (sub-object->36, a vtable slot at offset 36), and indirect-calls it (bctrl) with (obj, arg), returning
+# the result. So it's a "dispatch to the sub-object's slot-36 virtual method" thunk. 13 lines, no direct
+# callees (the target is an indirect vcall). 1 caller: sub_82C14FD0. The sub-object's class (->36 = the
+# vtable slot) and the method's behavior (it depends on the concrete object's vtable) aren't resolvable
+# from this thunk alone, so the name states the mechanism: dispatch to slot 36 of the sub-object.
+[functions."0x82C010C0"]
+name = "DispatchSlot36_82C010C0"
+
+
+# A virtual-method dispatch triple: call the sub-object's slot-24 method; if non-zero, call slot 36
+# (DispatchSlot36_82C010C0); if still non-zero, call slot 28.
+
+# Args: obj (r3, ->0 = a sub-object), (r4), arg (r5). Reads the sub-object (*obj) and calls its slot-24
+# virtual method (obj->0->24, bctrl) with (obj, arg), checking the result (a byte). If non-zero, it calls
+# DispatchSlot36_82C010C0 (sub_82C010C0, the slot-36 dispatch) with (obj, arg), checking that result too.
+# If still non-zero, it calls another sub-object virtual method (obj->0->28, bctrl). So it's a "dispatch a
+# triple of virtual methods (slots 24, 36, 28), each gated on the previous non-zero result" routine (a
+# virtual callback chain on the sub-object). 86 lines, 1 callee (DispatchSlot36_82C010C0). 3 callers
+# (sub_82C29550, sub_82C161D8, sub_82C1F380). The sub-object's class (->24, ->28, ->36 = vtable slots) and
+# the methods' behavior (concrete-vtable-dependent) aren't resolvable, so the name states the mechanism:
+# dispatch a triple of vcalls. Sibling of Dispatch_VcallSequence_82BCB6E0 / Dispatch_VcallSequence2_82BCCF50
+# (vcall-sequence dispatchers); the "Triple" marks this 3-slot variant.
+[functions."0x82C14FD0"]
+name = "DispatchVcallTriple_82C14FD0"
+
+
+# A virtual-method dispatch sequence: call the source sub-object's slot-20 and slot-0 methods, then run
+# a sequence of vcall-chain / vcall-triple dispatches.
+
+# Args: obj (r3, ->4), src (r4, ->0 = a sub-object), (more). Reads the source sub-object (*src) and calls
+# its slot-20 virtual method (src->0->20, bctrl, with src), then its slot-0 method (src->0->0, bctrl, with
+# src). It then runs a sequence of vcall dispatches, calling VcallTriple_AllSuccess_82C011E8 (sub_82C011E8)
+# with (src, a global, obj->4, ...), and (later in the body) VcallChain_AllSuccess_82C14F38, VcallChain
+# _AllSuccess_82C15068, DispatchVcallTriple_82C14FD0 (sub_82C14FD0), DestructRefCounted_82214F08 (sub
+# _82214F08), plus sub_821F7798, sub_82BFD780, sub_82C14D70. So it's a "dispatch a long sequence of virtual
+# methods (a vcall chain) on the source sub-object" routine (a virtual callback / visitor chain). 467 lines.
+# 1 caller: sub_82C1FBD0. The sub-object's class (->0, ->20 = vtable slots) and the methods' behavior
+# (concrete-vtable-dependent) aren't resolvable, so the name states the mechanism: dispatch a sequence of
+# vcalls. Sibling of Dispatch_VcallSequence_82BCB6E0 / Dispatch_VcallSequence2_82BCCF50 (vcall-sequence
+# dispatchers); the "3" marks this variant.
+[functions."0x82C1F380"]
+name = "DispatchVcallSequence3_82C1F380"
+
+
+# A virtual-method dispatch sequence: call the sub-object's slot-24 method; if non-zero, dispatch the
+# vcall sequence (DispatchVcallSequence3_82C1F380); if still non-zero, call slot 28.
+
+# Args: obj (r3, ->0 = a sub-object), (r4), arg (r5). Reads the sub-object (*obj) and calls its slot-24
+# virtual method (obj->0->24, bctrl) with (obj, arg), checking the result (a byte). If non-zero, it calls
+# DispatchVcallSequence3_82C1F380 (sub_82C1F380, the long vcall-sequence dispatcher) with (obj, arg),
+# checking that result too. If still non-zero, it calls another sub-object virtual method (obj->0->28,
+# bctrl). So it's a "dispatch slot 24, then the vcall sequence, then slot 28 (each gated on the previous
+# non-zero result)" routine (a virtual callback chain on the sub-object). 86 lines, 1 callee
+# (DispatchVcallSequence3_82C1F380). 1 caller: sub_82C1FF48. A structural sibling of
+# DispatchVcallTriple_82C14FD0 (sub_82C14FD0, same shape but calling slot 36 in the middle instead of the
+# vcall sequence). The sub-object's class (->24, ->28 = vtable slots) and the methods' behavior (concrete-
+# vtable-dependent) aren't resolvable, so the name states the mechanism: dispatch a sequence of vcalls.
+[functions."0x82C1FBD0"]
+name = "DispatchVcallSequence4_82C1FBD0"
+
+
+# A virtual-method dispatch + array lookup: call the sub-object's slot-4 method, then read an element
+# from an indexed array (obj->4[index]->4).
+
+# Args: (r3), obj (r4, ->0 = a sub-object, ->4 = an indexed array), index (r5). Reads the sub-object
+# (*obj) and calls its slot-4 virtual method (obj->0->4, bctrl, with obj and a global). It then does an
+# indexed array lookup: r8 = obj->4 (the array base), r7 = index * 4, r6 = *(r8 + r7) (the array
+# element), and returns *(r6 + 4) (the element's ->4 field). So it's a "dispatch a vcall, then read the
+# ->4 of the array element at the given index" routine. 50 lines, no direct callees (the vcall target is
+# indirect). 0 direct callers (reached via a dispatch). The sub-object's class (->4 = a vtable slot) and
+# the array's element class (->4 = a field) aren't resolvable, so the name states the mechanism: dispatch
+# and index the array.
+[functions."0x82C1FEF0"]
+name = "DispatchAndIndex_82C1FEF0"
+
+
+# A virtual-method dispatch sequence: call VcallTriple_AllSuccess_82C011E8 repeatedly (with a different
+# global base each time), gated on a non-zero result.
+
+# Args: obj (r3, ->4), arg (r4). Calls VcallTriple_AllSuccess_82C011E8 (sub_82C011E8, the 3-slot vcall
+# dispatcher) with (arg, a global base, obj), checking the result (a byte). If non-zero, it calls it again
+# (with a different global base and obj->4), checking the result too, and continues the sequence (the body
+# repeats this pattern with several different global bases). So it's a "dispatch a sequence of vcall
+# triples (each with a different global base), gated on the previous non-zero result" routine (a virtual
+# callback / visitor chain on the argument). 92 lines, 1 callee (VcallTriple_AllSuccess_82C011E8). 1 caller:
+# sub_82C26AF0. The argument's class and the vcall targets' behavior (concrete-vtable-dependent) aren't
+# resolvable, so the name states the mechanism: dispatch a sequence of vcalls. Sibling of
+# Dispatch_VcallSequence_82BCB6E0, Dispatch_VcallSequence2_82BCCF50, DispatchVcallSequence3_82C1F380, and
+# DispatchVcallSequence4_82C1FBD0; the "5" marks this variant.
+[functions."0x82C269E8"]
+name = "DispatchVcallSequence5_82C269E8"
+
+
+# A virtual-method dispatch sequence: call the sub-object's slot-24 method; if non-zero, dispatch the vcall
+# sequence (DispatchVcallSequence5_82C269E8); if still non-zero, call slot 28.
+
+# Args: obj (r3, ->0 = a sub-object), (r4), arg (r5). Reads the sub-object (*obj) and calls its slot-24
+# virtual method (obj->0->24, bctrl) with (obj, arg), checking the result (a byte). If non-zero, it calls
+# DispatchVcallSequence5_82C269E8 (sub_82C269E8, the repeated VcallTriple_AllSuccess dispatcher) with (obj,
+# arg), checking that result too. If still non-zero, it calls another sub-object virtual method (obj->0->28,
+# bctrl). So it's a "dispatch slot 24, then the vcall sequence, then slot 28 (each gated on the previous
+# non-zero result)" routine (a virtual callback chain on the sub-object). 86 lines, 1 callee
+# (DispatchVcallSequence5_82C269E8). 1 caller: sub_82C26CA0. A structural sibling of DispatchVcallTriple
+# _82C14FD0 and DispatchVcallSequence4_82C1FBD0 (same shape: slot 24, a middle dispatcher, slot 28). The
+# sub-object's class (->24, ->28 = vtable slots) and the methods' behavior (concrete-vtable-dependent)
+# aren't resolvable, so the name states the mechanism: dispatch a sequence of vcalls. The "6" marks this
+# variant in the DispatchVcallSequence family.
+[functions."0x82C26AF0"]
+name = "DispatchVcallSequence6_82C26AF0"
+
+
+# A value-type dispatch: dispatch on the value's type field (obj->4) and handle the different value types
+# (integers, floats, hash-table lookups, switch dispatches).
+
+# Args: (r3), obj (r4, ->0 = a value, ->4 = a type), (more). Dispatches on the value's type (obj->4):
+# - 0: a default / null path
+# - 3: a float -- it converts obj->0 (a float) to an integer (fctiwz, the float-to-int conversion) and uses
+#   it
+# - 4: a keyed lookup -- it calls HashTable_Find3_821CF1D0 (sub_821CF1D0) with the value
+# - otherwise: another path (calling SwitchDispatch_82BC8260, sub_82BC8260, SwitchDispatch_82BC9B28, sub
+#   _82BC9B28, and sub_821E1498 in the various branches)
+
+# So it's a "dispatch on a value's type and process it" routine (a value handler for a heterogeneous value
+# type -- integers, floats, and keyed lookups). 139 lines, 4 callees (HashTable_Find3_821CF1D0, SwitchDispatch
+# _82BC8260, SwitchDispatch_82BC9B28, sub_821E1498). Many callers (sub_82BD0A78, sub_82BC6F70, sub_82BB9C50,
+# ...). The value's class (->0 = the value, ->4 = the type, a tagged union) isn't resolvable, so the name
+# states the mechanism: dispatch on the value's type.
+[functions."0x821CF230"]
+name = "DispatchValue_821CF230"
+
+
+# A state dispatch: check a state object's flag bytes (ctx->8) and dispatch on its state (StateDispatch_82BCA7D8
+# and other handlers).
+
+# Args: obj (r3, ->172 = a field), ctx (r4, ->8 = a state object). Checks the state object (ctx->8): if it is
+# non-null and its byte at offset 5 has the low 2 bits set (a state / type flag), it calls StateDispatch_82BCA7
+# D8 (sub_82BCA7D8) to dispatch on that state. It then checks the state object's byte at offset 6 (a flag, bit
+# 3) and, if that flag is clear, continues processing (loading obj->172 and a constant, and calling sub_82BCD5E0
+# and sub_82CA3980 in the various branches). So it's a "check a state object's flags and dispatch on its
+# state" routine (a state-machine handler, part of the 0x82BCA cluster). 319 lines, 3 callees (StateDispatch
+# _82BCA7D8, sub_82BCD5E0, sub_82CA3980). 1 caller: StateDispatch_82BCB0A8 (sub_82BCB0A8). The state object's
+# class (->5, ->6 = flag bytes) and the state's meaning (a game / animation / physics state) aren't resolvable,
+# so the name states the mechanism: dispatch on the state. The "2" distinguishes it from StateDispatch_82BCB0A8
+# and StateDispatch_82BCA7D8.
+[functions."0x82BCAA58"]
+name = "StateDispatch2_82BCAA58"
+
+
+# A vcall-sequence dispatch (a sibling of the DispatchVcallSequence family): make a series of vcall calls
+# (via the object's vtable, at slots ->32, ->44, ->48, and others).
+
+# Args: obj (r3, ->4 = a sub-object), ctx (r4). Makes a series of vcall calls: it calls the vtable method at
+# obj->4->0->32 (passing obj->4), then the method at obj->4->0->44, then the method at obj->4->0->48, and more
+# (6 vcall dispatches total, all via the object's vtable). So it's a "dispatch a sequence of virtual calls"
+# routine (a vcall-sequence dispatcher, a sibling of DispatchVcallSequence_82B25628 and the DispatchVcall
+# Sequence2-6 family). 215 lines, 6 vcall dispatches, no direct callees (all vtable calls). 1 caller (sub_82BA
+# FCE0). The object's class (a sub-object at ->4, with a vtable at ->4->0) and the vcall slots' meanings (->32,
+# ->44, ->48 = particular virtual methods) aren't resolvable, so the name states the mechanism: dispatch a
+# sequence of virtual calls. The "7" distinguishes it from DispatchVcallSequence_82B25628, DispatchVcall
+# Sequence2_82284538, DispatchVcallSequence3_8243D0B8, DispatchVcallSequence4_82C25F18, DispatchVcallSequence5
+# _82B8D250, and DispatchVcallSequence6_82C26AF0.
+[functions."0x82BB0148"]
+name = "DispatchVcallSequence7_82BB0148"
+
+
+# A vcall + check: make a vcall (obj->0->4, passing the object and a value), check the result against flags,
+# and (in a path) process a float (FloatToIntProcess_82284810).
+
+# Args: obj (r3, ->0 = a sub-object with a vtable at ->0->4), src (r4, ->20 = a value), flag1 (r5), flag2 (r6).
+# Loads src->20 (a value). If it is 0, takes an early path. Otherwise it makes a vcall (obj->0->4, passing the
+# object and the value). It then checks the result (the low byte of the return) against the flags: if the result
+# is 0 and flag2 is 0, it takes one path; otherwise it continues (calling FloatToIntProcess_82284810, sub
+# _82284810, in a path). So it's a "dispatch a vcall and check the result (against flags)" routine (a gated vcall
+# dispatcher, part of the 0x82BAC cluster). 77 lines, 1 callee (FloatToIntProcess_82284810), 1 vcall dispatch.
+# 0 direct callers (reached via a dispatch / vcall). The object's class (a sub-object at ->0, with a vtable at
+# ->0->4) and the vcall slot's meaning (->4 = a particular virtual method) aren't resolvable, so the name states
+# the mechanism: dispatch a vcall and check the result.
+[functions."0x82BACCE0"]
+name = "DispatchAndCheck_82BACCE0"
+
+
+# A vcall + process: load a global value, make a vcall (via the value's vtable, at slot ->32), and process the
+# result.
+
+# Args: obj (r3), flag (r4), value (r5), (more). Loads a global value (from a fixed .data address, the ->56
+# field of a global struct). If the value argument is null, it calls sub_823FE8F8 (a sibling in the 0x823FE
+# cluster) to get a value. It then makes a vcall (via the value's vtable, at slot ->32, i.e. value->0->32,
+# passing the value) and processes the result (2 vcall dispatches total, in the various branches). So it's a
+# "dispatch a vcall (with a global / looked-up value) and process the result" routine (a vcall processor, part of
+# the 0x823F8 cluster). 102 lines, 1 callee (sub_823FE8F8), 2 vcall dispatches. Many callers (sub_823F9398, sub
+# _827CE468, sub_823F8F40, ...). The value's class (->0 = a vtable, ->32 = a particular virtual method) and the
+# global's meaning aren't resolvable, so the name states the mechanism: make a vcall and process the result.
+[functions."0x823F8D30"]
+name = "VcallProcess_823F8D30"
+
+
+# A vcall + struct-copy (with teardown): make a vcall (src->0->8, passing the source), then copy the source's
+# data (CopyStructData4_82A1BEA8), and process / tear it down (DestroyCircularList_82A0F5C0, Free_SizeBucketed
+# _Thunk_8221BE68).
+
+# Args: obj (r3), src (r4, ->0 = a vtable, ->4 = data, ->12 = a byte-array pointer, ->20 = a size), (more). Makes
+# a vcall (src->0->8, passing the source). If src->20 >= 4, it copies (src->20 - 4) bytes from src->12 (a byte-by-
+# byte loop to the stack, advancing src->12 by 4). It then processes / tears down the data: it calls CopyStructData4
+# _82A1BEA8 (sub_82A1BEA8, a struct copy), DestroyCircularList_82A0F5C0 (sub_82A0F5C0, a circular-list destroy),
+# Free_SizeBucketed_Thunk_8221BE68 (sub_8221BE68, a free), and several sub_82A0* siblings (sub_82A0ED98, sub_82A0EDF0,
+# sub_82A0F328, sub_82A0F800) and sub_82A1B480. So it's a "dispatch a vcall, copy the source's data, and process /
+# tear it down (a circular list and a free)" routine (a vcall + struct-copy + teardown, part of the 0x82A0E
+# cluster). 541 lines -- a large routine (the body has a long tail of processing beyond the initial vcall and copy).
+# 8 callees, 2 vcall dispatches. 1 caller (sub_83220548). The source's class (->0 = a vtable, a byte-array at ->12)
+# and the processed data's meaning (a circular list) aren't resolvable, so the name states the mechanism: dispatch a
+# vcall and copy the struct's data.
+[functions."0x82A0E470"]
+name = "DispatchAndCopy_82A0E470"
+
+
+# A virtual call: load a function pointer from a vtable (obj->8 -> ->24) and call it (bctr), passing the object
+# (r3 = obj->8, the vtable-derived this) and the other arguments.
+
+# Args: obj (r3, ->8 = a vtable), (r4), (more). Loads the vtable (obj->8), loads a function pointer from it (vtable->
+# 24), sets the count register (ctr = the function pointer), and calls it (bctr -- a virtual call). It passes the
+# object (r3 = obj->8, the vtable-derived this) and the other arguments (r4, ...). So it's a "virtual call (dispatch
+# via a vtable, calling a virtual method at vtable->24)" routine (a virtual-call thunk, part of the 0x826C0 cluster).
+# 4 lines (to the next function), no callees (a single indirect call). It is registered (in the function table, fable
+# _2_init.cpp / fable_2_register.cpp) but has no direct callers in the recompiled code (a registered-but-uncalled
+# virtual-call thunk, likely invoked only from code outside the traced region, or unused). The vtable's meaning (a
+# class, a method at vtable->24) isn't resolvable, so the name states the mechanism: a virtual call (dispatch via a
+# vtable). The address suffix distinguishes it from other VirtualCall* thunks.
+[functions."0x826C0388"]
+name = "VirtualCall_826C0388"
+
+
+# A double-virtual-call: load a vtable (obj->16), call two virtual methods (vtable->24 and vtable->28, via bctrl),
+# and return their difference.
+
+# Args: obj (r3, ->16 = a vtable), (more). Loads the vtable (obj->16). It then makes two virtual calls (via bctrl):
+# first, it calls the virtual method at vtable->24 (saving the result); second, it calls the virtual method at
+# vtable->28 (with the object as the this). It returns the difference (result1 - result2). So it's a "call two
+# virtual methods (vtable->24 and vtable->28) and return their difference" routine (a double-virtual-call, part of
+# the 0x82C01 cluster). 59 lines, no direct callees (two indirect calls via bctrl, which the callee scan does not
+# count). Many callers (sub_82C17AE8, sub_82C18550, sub_82C2B430, ... -- all in the 0x82C1/0x82C2 region). The
+# vtable's meaning (a class, two virtual methods at vtable->24 and vtable->28) and the difference's meaning (a
+# time / length / size difference) aren't resolvable, so the name states the mechanism: call two virtual methods
+# (and return their difference).
+[functions."0x82C01D60"]
+name = "VirtualCallPair_82C01D60"
+
+
+# A call-and-free: call sub_83232128 (with the object and a flag), and (if the flag's low bit is set) free a
+# resource (Free_SizeBucketed_Thunk_8221BE68).
+
+# Args: obj (r3), flag (r4), (more). Calls sub_83232128 (a sibling in the 0x83232 cluster, with the object and the
+# flag). If the flag's low bit is set (flag & 1), it frees a resource (Free_SizeBucketed_Thunk_8221BE68, sub_8221BE68,
+# a size-bucketed free). So it's a "call a function (sub_83232128, with the object and a flag) and (if the flag's low
+# bit is set) free a resource" routine (a call-and-free, part of the 0x82A13 cluster). 45 lines (to the next function
+# ), 2 callees (sub_83232128, Free_SizeBucketed_Thunk_8221BE68). It is registered (in the function table, fable
+# _2_init.cpp / fable_2_register.cpp) but has no direct callers in the recompiled code (a registered-but-uncalled
+# call-and-free, likely invoked only from code outside the traced region, or unused). The object's class and the
+# flag's meaning (a free-after-call flag) aren't resolvable, so the name states the mechanism: call a function (and
+# free a resource conditionally).
+[functions."0x82A13C50"]
+name = "CallAndFree_82A13C50"
+
+
+# A virtual call (the sibling of VirtualCall_826C0388): load a function pointer from a vtable (obj->20 -> ->20) and
+# call it (bctr), passing the object (r3 = obj->20, the vtable-derived this) and the other arguments.
+
+# Args: obj (r3, ->20 = a vtable), (more). Loads the vtable (obj->20), loads a function pointer from it (vtable->20),
+# sets the count register (ctr = the function pointer), and calls it (bctr -- a virtual call). It passes the object
+# (r3 = obj->20, the vtable-derived this) and the other arguments. So it's a "virtual call (dispatch via a vtable,
+# calling a virtual method at vtable->20)" routine (a virtual-call thunk, part of the 0x83231 cluster). 4 lines (to
+# the next function), no callees (a single indirect call). It is registered (in the function table, fable_2_init.cpp
+# / fable_2_register.cpp) but has no direct callers in the recompiled code (a registered-but-uncalled virtual-call
+# thunk, likely invoked only from code outside the traced region, or unused). The vtable's meaning (a class, a method
+# at vtable->20) isn't resolvable, so the name states the mechanism: a virtual call (dispatch via a vtable). The "2"
+# distinguishes it from VirtualCall_826C0388.
+[functions."0x83231E88"]
+name = "VirtualCall2_83231E88"
+
+
+# A state dispatch (the sibling of StateDispatch_82BCA7D8 / StateDispatch2_82BCAA58): call SwitchDispatch_82BC9B28
+# (a switch dispatch), and (depending on the result) process (a loop, decrementing value->20, with a mutual recursion
+# via ProcessDispatchValue_8229A488).
+
+# Args: obj (r3), value (r4, ->16, ->20), count (r5), (more). It calls SwitchDispatch_82BC9B28 (sub_82BC9B28, a switch
+# dispatch, with the value and the count). If the result's ->4 is 0 and the result matches a constant (a specific
+# value, at a fixed .data address), it takes one path. Otherwise, if value->20 > value->16 (a range check), it loops
+# (decrementing value->20 by 20, a 20-byte stride). It also calls sibling operations (sub_82BCA180, in the 0x82BCA
+# cluster) and has a mutual recursion with ProcessDispatchValue_8229A488 (sub_8229A488 -- they call each other). So
+# it's a "process (a switch dispatch, and (depending on the result) a loop (decrementing value->20) and sibling
+# operations)" routine (a state dispatch, part of the 0x82BCA cluster). 233 lines, 3 callees (SwitchDispatch_82BC9B28,
+# ProcessDispatchValue_8229A488, sub_82BCA180). 6 callers (sub_82BCCFF8, ProcessDispatchValue_8229A488, sub_82BCA588,
+# sub_822DF280, sub_82BC9FD0, sub_82BCA5F8). The object's class (->16, ->20 = a range, an object with a switch dispatch
+# and a range) and the value's meaning (a state / event) aren't resolvable, so the name states the mechanism: a state
+# dispatch (a switch dispatch, and a loop (decrementing value->20)). The "3" distinguishes it from StateDispatch_82
+# BCA7D8 and StateDispatch2_82BCAA58.
+[functions."0x82BCA3E8"]
+name = "StateDispatch3_82BCA3E8"
+
+
+# A virtual call (the sibling of VirtualCall_826C0388 / VirtualCall2_83231E88): load a function pointer from a vtable
+# (obj->0 -> ->60) and call it (bctr), passing the object (the vtable-derived this) and the other arguments.
+
+# Args: obj (r3, ->0 = a vtable), (more). Loads the vtable (obj->0), loads a function pointer from it (vtable->60),
+# sets the count register (ctr = the function pointer), and calls it (bctr -- a virtual call). It passes the object
+# (the vtable-derived this) and the other arguments. So it's a "virtual call (dispatch via a vtable, calling a virtual
+# method at vtable->60)" routine (a virtual-call thunk, part of the 0x82214 cluster). 4 lines (to the next function),
+# no direct callees (a single indirect call via bctr, which the callee scan does not count). 1 caller: sub_82C14D70.
+# The vtable's meaning (a class, a method at vtable->60) isn't resolvable, so the name states the mechanism: a virtual
+# call (dispatch via a vtable). The "3" distinguishes it from VirtualCall_826C0388 and VirtualCall2_83231E88.
+[functions."0x822142C0"]
+name = "VirtualCall3_822142C0"
+
+
+# A double virtual call (the sibling of VirtualCallPair_82C01D60): if value->0 is non-zero, do a virtual call (on
+# value->0->0->4, a vtable entry); and if obj->0 is non-zero, do another virtual call (on obj->0->0->8, a vtable
+# entry).
+
+# Args: obj (r3, ->0 = a node), value (r4, ->0 = a node), (more). If value->0 (a node) is non-zero, it does a virtual
+# call (a vtable dispatch: r3 = value->0, r11 = r3->0, r10 = r11->4, a vtable entry, mtctr r10, bctrl -- a virtual
+# call on value->0->0->4, vtable->4). If obj->0 (a node) is non-zero, it does another virtual call (a vtable dispatch:
+# r3 = obj->0, r11 = r3->0, r10 = r11->8, a vtable entry, mtctr r10, bctrl -- a virtual call on obj->0->0->8,
+# vtable->8). So it's a "double virtual call (if value->0 is non-zero, call a virtual method (vtable->4) on it; and if
+# obj->0 is non-zero, call another virtual method (vtable->8) on it)" routine (a double virtual call, part of the
+# 0x8260C cluster, a sibling of VirtualCallPair_82C01D60). 71 lines, no direct callees (pure virtual calls via
+# REX_CALL_INDIRECT_FUNC). Many callers (sub_82B5D3A0, sub_82B68128, sub_82C6DE30, sub_82B43E30, sub_822F7B70, sub
+# _8260B9E0, sub_82C630E0, sub_822F7870, sub_82C638C0, sub_82369958 -- many across the codebase). The node's class (a
+# node, ->0 = a node, ->4 and ->8 = vtable entries, an object with virtual methods) and the vtable's meaning (a
+# virtual method, a particular operation) aren't resolvable, so the name states the mechanism: a double virtual call
+# (call a virtual method on two nodes). The "4" distinguishes it from the other VirtualCall* variants (VirtualCall_
+# 826C0388, VirtualCall2_83231E88, VirtualCall3_822142C0).
+[functions."0x8260C130"]
+name = "VirtualCall4_8260C130"
+
+
+# A virtual call (a vtable dispatch, the sibling of VirtualCall4_8260C130 / VirtualCallPair_82C01D60): do a virtual
+# call (on obj->0->4, a vtable entry), then perform an indexed load (obj->4[index * 4]->0, a field of the
+# object's array, indexed by a count).
+
+# Args: (r3, a node), obj (r4, ->0 = a node, ->4 = an array), index (r5, a count), (more). It does a virtual call (a
+# vtable dispatch: r11 = obj->0, a node, r9 = r11->4, a vtable entry, mtctr r9, bctrl -- a virtual call on obj->0->
+# 4, vtable->4). It then performs an indexed load (r8 = r3->4, a node's array, r7 = index * 4, a scaled index, r6 =
+# r8[r7], an indexed load, r3 = r6->0, a field of the indexed element). So it's a "virtual call (call a virtual
+# method (vtable->4) on obj->0, and load a field from the object's array, indexed by a count)" routine (a virtual
+# call with an indexed load, part of the 0x82C26 cluster, a sibling of VirtualCall4_8260C130). 45 lines (to the next
+# function), no direct callees (a pure virtual call via REX_CALL_INDIRECT_FUNC, which the callee scan does not count
+# ). It is registered (in the function table, fable_2_init.cpp / fable_2_register.cpp) but has no direct callers in
+# the recompiled code (a registered-but-uncalled virtual call, likely invoked only from code outside the traced
+# region, or unused). The node's class (a node, ->0 = a node, ->4 = an array, an object with a virtual method and an
+# array) and the vtable's meaning (a virtual method, a particular operation) aren't resolvable, so the name states
+# the mechanism: a virtual call (call a virtual method on a node and load a field from the object's array). The "5"
+# distinguishes it from the other VirtualCall* variants (VirtualCall_826C0388, VirtualCall2_83231E88, VirtualCall3_
+# 822142C0, VirtualCall4_8260C130).
+[functions."0x82C26818"]
+name = "VirtualCall5_82C26818"
+
+
+# A process (a dispatch, with a type check, the caller of DispatchValue_821CF230 / HashTable_Find3_821CF1D0): (if a
+# flag, value->4, is 5, a type / a flag, a particular type) call a dispatch (DispatchValue_821CF230, on a value and
+# value->0, a particular dispatch), and (in paths) call a hash lookup (HashTable_Find3_821CF1D0, on a value, a
+# particular lookup) and sibling operations (sub_82BC9640, sub_82BC9860, sub_82BCBF50, sub_82BCD5E0 -- siblings in the
+# 0x82BC9/0x82BCB/0x82BCD clusters).
+
+# Args: obj (r3, r28, an object), value (r4, r29, ->0 = a value, ->4 = a type / a flag, a particular value), a (r5, r2
+# 6, a value), b (r6, r23, a value), (more). It checks a flag (value->4, a type / a flag, a particular type): if it is
+# 5 (a particular type, a particular value type), it calls a dispatch (DispatchValue_821CF230, sub_821CF230, a value
+# dispatch, on a value (r4, a, a particular argument) and the value (r3, value->0, a particular value), a particular
+# dispatch, storing the result to r30, a value). If the result's flag (r30->4, a flag, a particular state) is zero (a
+# particular state), it takes one path (a process, with value->0->8, a particular value). In paths it calls a hash
+# lookup (HashTable_Find3_821CF1D0, sub_821CF1D0, a hash table lookup, on a value, a particular lookup) and sibling
+# operations (sub_82BC9640, sub_82BC9860, sub_82BCBF50, sub_82BCD5E0 -- siblings in the 0x82BC9/0x82BCB/0x82BCD
+# clusters). So it's a "process (a dispatch: (if a flag is 5, a particular type) call a dispatch (DispatchValue
+# _821CF230, on a value and value->0), and (in paths) call a hash lookup (HashTable_Find3_821CF1D0, on a value) and
+# sibling operations)" routine (a dispatch process, part of the 0x821CF cluster, a caller of DispatchValue_821CF230 and
+# HashTable_Find3_821CF1D0). 202 lines, 6 callees (DispatchValue_821CF230, HashTable_Find3_821CF1D0, sub_82BC9640, sub
+# _82BC9860, sub_82BCBF50, sub_82BCD5E0). 4 callers: sub_82BDA2C8, sub_822DF280, sub_82BD3FD0, sub_821E1408 (siblings
+# in the 0x82BDA/0x822DF/0x82BD3/0x821E1 clusters). The object's class (obj, an object, a particular structure, a
+# dispatch / a value object) and the value's meaning (a value, a particular argument, a particular value) aren't
+# resolvable, so the name states the mechanism: a dispatch process ((if a flag is 5, a particular type) call a dispatch
+# (DispatchValue_821CF230, on a value and value->0), and (in paths) call a hash lookup (HashTable_Find3_821CF1D0, on a
+# value) and sibling operations). The "Process" suffix distinguishes it from ProcessDispatchValue_82BCD308 (a different
+# dispatch, in the 0x82BCD cluster).
+[functions."0x821CF320"]
+name = "DispatchValueProcess_821CF320"
+
+
+# A process (a state dispatch, with a switch, the sibling of StateDispatch3_82BCD9E8 / StateDispatch2_82BCD7B0):
+# initialize the object's fields (obj->0/->4 = 0, two zeros, a particular initialization), and (if a state is <= 9, a
+# particular range, a particular state) perform a state dispatch (a switch, over 0-9 states, a particular state
+# dispatch, a particular state / a particular transition), and (in paths) call sibling operations (sub_823BE9C0, sub
+# _82A0C2E0, sub_82A0C960, sub_82A0CFC8, sub_82A0D630, sub_832167D0, sub_832172A8, sub_83220478, sub_8323B270, sub
+# _8323BCC8, sub_8323E260, sub_8323F238 -- siblings in the 0x823BE/0x82A0C/0x82A0D/0x83216/0x83217/0x83220/0x8323B/0
+# x8323E/0x8323F clusters, a particular state / a particular transition).
+
+# Args: obj (r3, r31, ->0 = a field, a particular value, ->4 = a field, a particular value, a particular structure),
+# state (r4, r11, a state, a particular state / a particular value), a (r5, a value, a particular argument), (more). It
+# initializes the object's fields (obj->0 = 0, a field, a particular value, obj->4 = 0, a field, a particular value, two
+# zeros, a particular initialization). It checks a state (r4, r11, a state, a particular state / a particular value): if
+# it is <= 9 (a particular range, a particular state, a particular value), it performs a state dispatch (a switch, over
+# 0-9 states, a particular state dispatch, a particular state / a particular transition: case 0, a particular state, a
+# particular transition; case 1, a particular state, a particular transition; case 2, a particular state, a particular
+# transition; case 3, a particular state, a particular transition; case 4, a particular state, a particular transition;
+# case 5, a particular state, a particular transition; case 6, a particular state, a particular transition; case 7, a
+# particular state, a particular transition; case 8, a particular state, a particular transition; case 9, a particular
+# state, a particular transition). If the state is > 9 (a particular range, a particular state, a particular value), it
+# takes one path (a no-op / a return, a particular state). In paths it calls sibling operations (sub_823BE9C0, sub
+# _82A0C2E0, sub_82A0C960, sub_82A0CFC8, sub_82A0D630, sub_832167D0, sub_832172A8, sub_83220478, sub_8323B270, sub
+# _8323BCC8, sub_8323E260, sub_8323F238 -- siblings in the 0x823BE/0x82A0C/0x82A0D/0x83216/0x83217/0x83220/0x8323B/0
+# x8323E/0x8323F clusters, a particular state / a particular transition, a particular operation). So it's a "process (a
+# state dispatch: initialize the object's fields (obj->0/->4 = 0, two zeros, a particular initialization), and (if a
+# state is <= 9, a particular range, a particular state) perform a state dispatch (a switch, over 0-9 states, a
+# particular state dispatch, a particular state / a particular transition), and (in paths) call sibling operations)"
+# routine (a state dispatch process, part of the 0x83220 cluster, a sibling of StateDispatch3_82BCD9E8). 599 lines, 13
+# callees (Release_RefCounted_829FF648, sub_823BE9C0, sub_82A0C2E0, sub_82A0C960, sub_82A0CFC8, sub_82A0D630, sub
+# _832167D0, sub_832172A8, sub_83220478, sub_8323B270, sub_8323BCC8, sub_8323E260, sub_8323F238). 3 callers: sub
+# _83225760, sub_832256A0, sub_83225600 (siblings in the 0x83225 cluster). The object's class (obj, ->0 = a field, a
+# particular value, ->4 = a field, a particular value, a particular structure, a state / a value object) and the
+# state's meaning (a state, a particular state / a particular value) aren't resolvable, so the name states the
+# mechanism: a state dispatch process (initialize the object's fields (obj->0/->4 = 0, two zeros, a particular
+# initialization), and (if a state is <= 9, a particular range, a particular state) perform a state dispatch (a switch,
+# over 0-9 states, a particular state dispatch, a particular state / a particular transition), and (in paths) call
+# sibling operations). The "4" distinguishes it from StateDispatch3_82BCD9E8 and StateDispatch2_82BCD7B0.
+[functions."0x83220888"]
+name = "StateDispatch4_83220888"
+
+
+# A dispatch (a vcall, with a switch, the sibling of StateDispatch4_83220888 / StateDispatch3_82BCD9E8): (if a value,
+# obj->0, is non-zero, a particular value) perform a vcall (a method call, on a value, a particular vcall / a
+# particular operation), and (otherwise) perform a dispatch (a switch, over 6-7 states, a particular state dispatch, a
+# particular state / a particular transition, calling a vcall (a method call, on a value, a particular vcall / a
+# particular operation, based on a type (obj->10, a type, a particular value, a particular state))).
+
+# Args: a (r3, a value), obj (r4, ->0 = a value, ->4 = a value, ->10 = a type, a particular dispatch object, a
+# particular vcall object), (more). It checks a value (obj->0, a value, a particular value): if it is non-zero (a
+# particular value, a particular state), it performs a vcall (a method call, on a value (r3, obj->0, a value, a
+# particular value, a particular vcall object), a particular vcall / a particular operation: it loads a vtable (r11,
+# r3->0, a vtable, a particular vtable), and a method (r10, r11->12, a method, a particular method), and calls it
+# (bctrl, a vcall, a method call, a particular vcall / a particular operation, a particular value / a particular
+# operation)). If it is zero (a null state, a particular state), it performs a dispatch (a switch, over 6-7 states, a
+# particular state dispatch, a particular state / a particular transition: it checks a type (r11, obj->10, a type, a
+# particular value, a particular state): if it is 6 (a particular state, a particular value, a particular type), it
+# performs a vcall (a method call, on a value (r4, obj->4, a value, a particular value, a particular vcall object), a
+# particular vcall / a particular operation); if it is 7 (a particular state, a particular value, a particular type), it
+# performs another vcall (a method call, on a value, a particular vcall / a particular operation); otherwise it returns
+# (a no-op / a return, a particular state). So it's a "dispatch (a vcall, with a switch: (if a value, obj->0, is non
+# -zero, a particular value) perform a vcall (a method call, on a value, a particular vcall / a particular operation),
+# and (otherwise) perform a dispatch (a switch, over 6-7 states, a particular state dispatch, a particular state / a
+# particular transition, calling a vcall (a method call, on a value, a particular vcall / a particular operation, based
+# on a type (obj->10, a type, a particular value, a particular state))))" routine (a vcall dispatch, part of the
+# 0x82188 cluster, a sibling of StateDispatch4_83220888). 87 lines, no direct callees (pure vcall dispatch, using bctrl
+# ). No direct callers (it's called via a vtable / it is registered-but-uncalled, part of the game's subsystems). The
+# object's class (obj, r4, ->0 = a value, ->4 = a value, ->10 = a type, a particular dispatch object, a particular
+# vcall object, a particular structure) and the value's meaning (a, r3, a value, a particular argument) aren't
+# resolvable, so the name states the mechanism: a vcall dispatch ((if a value, obj->0, is non-zero, a particular value)
+# perform a vcall (a method call, on a value, a particular vcall / a particular operation), and (otherwise) perform a
+# dispatch (a switch, over 6-7 states, a particular state dispatch, a particular state / a particular transition,
+# calling a vcall (a method call, on a value, a particular vcall / a particular operation, based on a type (obj->10, a
+# type, a particular value, a particular state)))).
+[functions."0x82188680"]
+name = "DispatchVcallType_82188680"
+
+
+# Allocates virtual memory by calling the kernel's NtAllocateVirtualMemory. Takes the size in
+# r3 and a (pre-zeroed) address-out pointer in r4; on success returns the new base address,
+# and on failure (status < 0) reports the error via sub_82CC1C38 and returns 0.
+# Part of the 0x82CC0 memory/kernel cluster. 50 lines, callees: __imp__NtAllocateVirtualMemory,
+# sub_82CC1C38 (error path). 10 callers, incl. ProcessAllocate_8322FB30 and ComputeClamped2_83230D00
+# (the 0x8322F/0x83230 pool/heap cluster that sits on top of this allocator).
+[functions."0x82CC0CA0"]
+name = "VirtualAllocate_82CC0CA0"
+
+
+# Central element dispatcher for the 0x82BDD record family. It processes the current element
+# (obj->0) via ProcessElement76_82BCC888, writes the resulting pointer / tag into the caller's
+# result slot (obj->0->8, tag 9), then inspects obj->0's internal layout (obj->0->28 vs obj->0->8,
+# and the kind byte obj->0->44) to compute the next element's size and dispatch to the right handler
+# - the 2-D strided family (Process2DStrided_82BDD000 / Process2DStrided2_82BDD170 / Process2DStrided2_82BDD1E0),
+# the 4-byte / 8-byte strided element processors (ProcessStridedElement_82BDD258 / ProcessStridedElement2_82BDD518),
+# the validator (ProcessValidate_82BC8DD0), the pool path (sub_82BC9860), and the position adjuster
+# (DispatchAndAdjustPos_8227BB58). A 279-line hub that most element-processing in this cluster flows
+# through (it is also mutually reached by ProcessStridedElement_82BDD258).
+# Part of the 0x82BDD cluster. 279 lines, 12 callees. 2 callers: sub_82BDDB88, ProcessStridedElement_82BDD258.
+[functions."0x82BDD8A8"]
+name = "DispatchElement_82BDD8A8"
+
+
+# Dispatches on a 7-value type discriminator. It takes the kind from b->4 (minus 4, so valid kinds
+# are 4..10 -> 0..6) and does a jump-table indirect branch (bctr through a 7-entry table) to the
+# matching case. Each case processes the structure differently - reserving/advancing the container
+# position (DispatchAndAdjustPos_8227BB58) and fanning out to the 0x82BCC/0x82BC7 structure helpers
+# (sub_82BC7BB8 / sub_82BCC6F0 / sub_82BCC970). This is the per-kind switch inside the recursive
+# structure processor (its single caller, ProcessStructure_Recursive_82BCB610).
+# Part of the 0x82BCB cluster (sibling of ProcessStructure_Recursive_82BCB610). 228 lines, 4 callees.
+# 1 caller: ProcessStructure_Recursive_82BCB610.
+[functions."0x82BCB480"]
+name = "DispatchOnKind7_82BCB480"
+
+
+# Frees a block of virtual memory - the companion to VirtualAllocate_82CC0CA0. It takes a base address
+# (r3), a size (r4), and a flags word (r5). When the MEM_RELEASE-style flag (bit 15, 0x8000) is set and the
+# size is non-zero it takes the error path (sub_82CC1C38 - the same error handler the allocator uses, with a
+# status code 0x80000000 | 13) and returns 0; otherwise it releases the region through the
+# __imp__NtFreeVirtualMemory syscall, passing the base and size (staged on the stack) and returning the
+# NT status. Used by 9 callers (the 0x8322F/0x83230 allocation / clamped-access cluster) to release memory
+# previously obtained from the pool allocator.
+# Part of the 0x82CC0 virtual-memory cluster (sibling of VirtualAllocate_82CC0CA0). 63 lines, 1 callee
+# (sub_82CC1C38 - the shared error handler). 9 callers (the 0x82B4D/0x8322F/0x83230 cluster).
+[functions."0x82CC0CF0"]
+name = "VirtualFree_82CC0CF0"
+
+
+# Issues a vtable call and then reads an element from a 4-byte array. It dispatches the method at
+# obj->0->4 (passed obj plus a constant string from a .data table as arguments), then computes the offset
+# of the n-th element in the 4-byte array at obj->4 (offset = n * 4) and returns the first field of that
+# element. This is a "call this virtual routine, then fetch the Nth slot's first member" helper. Reached
+# only via a vtable / function-pointer table (no direct callers in the recompiled code). Part of the
+# 0x82C21 element-access cluster (sibling of ReturnPointer3_82C21F28 / ProcessGrow_82C21C90).
+# 50 lines, 0 direct callees (only the indirect vtable call). No direct callers found in the recompiled
+# code (likely reached via a vtable / function-pointer table).
+[functions."0x82C21650"]
+name = "VtableElementAccess_82C21650"
+
+
+# Dispatches on a value's type tag and processes the payload accordingly. It reads the tag at obj->4 and
+# branches: a few inline cases (obj->4 == 3 converts the float at obj->0 to an integer and stores it; the
+# default and other cases just pass through), and the remaining kinds are routed to sub_82228570 /
+# SwitchDispatch_82A2F3E8 / SwitchDispatch_82BC8260 / sub_82229260 for their type-specific handling. This is
+# the "interpret / coerce this typed value" switch in the 0x82228 value-dispatch cluster, used by 9 callers
+# across the 0x821C/0x8222/0x822D/0x82A2 range. Part of the 0x82228 typed-value cluster.
+# 141 lines, 4 callees (SwitchDispatch_82A2F3E8, SwitchDispatch_82BC8260, sub_82228570, sub_82229260). 9
+# callers (the 0x821C/0x8222/0x82A2 cluster).
+[functions."0x822285D8"]
+name = "DispatchValueType_822285D8"
+
+
+# Dispatches on a value's type tag through a jump table. It reads the tag byte at obj->4, normalizes it
+# (obj->4 - 4), and range-checks it (out-of-range jumps to a default handler at loc_82A2D578). The valid
+# range (0..6) selects one of seven case handlers, each routed through a method-pointer table (a .data
+# jump table indexed by tag) with a bctr indirect call; the inline cases then forward to the per-type
+# processors (ProcessVirtual_82227940 / sub_8222B4C0 / sub_82A20130 / sub_82A2DEA8). This is the
+# "interpret one typed value by kind" dispatcher for the 0x82A2D value cluster, called only by
+# sub_82A2D590. Part of the 0x82A2D type-dispatch cluster (sibling of SwitchDispatch_82A2F3E8).
+# 224 lines, 4 callees (ProcessVirtual_82227940, sub_8222B4C0, sub_82A20130, sub_82A2DEA8). 1 caller:
+# sub_82A2D590.
+[functions."0x82A2D408"]
+name = "DispatchTypeTag_82A2D408"
+
+
+# Dispatches on a value's type tag through a jump table - the 0x822D8 twin of DispatchTypeTag_82A2D408. It
+# reads the tag word at obj->4, range-checks it (out-of-range and the "no-op" tags 1, 2, 4, 6 all jump to a
+# common default at loc_822D83A0). The valid tags (0..7) select one of the case handlers, each routed
+# through a method-pointer table (a .data jump table indexed by tag) with a bctr indirect call, then to the
+# per-type handlers (sub_82BCBF50 / sub_82BCC108). This is the "interpret one typed value by kind"
+# dispatcher for the 0x822D8 value cluster, used by 2 callers (sub_822DF280 / sub_82BC5940). Part of the
+# 0x822D8 type-dispatch cluster (sibling of DispatchTypeTag_82A2D408 / SwitchDispatch_82A2F3E8).
+# 175 lines, 2 callees (sub_82BCBF50, sub_82BCC108). 2 callers: sub_822DF280, sub_82BC5940.
+[functions."0x822D8298"]
+name = "DispatchTypeTag2_822D8298"
+
+
+# A small virtual-call thunk that calls the method at the structure's ->40->0->32 vtable slot. It takes a structure (a: a
+# pointer at a->40, whose vtable is at a->40->0 and method slot is at a->40->0->32). It reads the vtable (a->40->0->32)
+# and calls the virtual method (a->40->0->32, passing a). This is the "call this virtual method (a->40->0->32, passing a)"
+# thunk for the 0x82C6F vcall cluster, called only via the vtable (0 direct callers). Part of the 0x82C6F vcall cluster.
+# 15 lines, 0 callees. 0 direct callers (vtable dispatch).
+[functions."0x82C6FC00"]
+name = "VcallThunk_82C6FC00"
+
+
+# A small virtual-call thunk that calls the method at the structure's ->8->0->36 vtable slot. It takes a structure (a: a
+# field at a->8, with a vtable at a->8->0 and method slot at a->8->0->36). When the field (a->8) is zero, it returns 0.
+# Otherwise it reads the vtable (a->8->0->36) and calls the virtual method (a->8->0->36, passing a->8). This is the "call this
+# virtual method (a->8->0->36, passing a->8, when the field is non-null)" thunk for the 0x82C6C vcall cluster, called only
+# via the vtable (0 direct callers). Part of the 0x82C6C vcall cluster (sibling of VcallThunk_82C6FC00). 23 lines, 0 callees.
+# 0 direct callers (vtable dispatch).
+[functions."0x82C6C788"]
+name = "VcallThunk_82C6C788"
+
+
+# A small virtual-call thunk that calls the method at the structure's ->8->0->24 vtable slot. It takes a structure (a: a field
+# at a->8, with a vtable at a->8->0 and method slot at a->8->0->24). It reads the vtable (a->8->0->24) and calls the virtual
+# method (a->8->0->24, passing a->8). This is the "call this virtual method (a->8->0->24, passing a->8)" thunk for the 0x82C63
+# vcall cluster, used by 2 callers (sub_824154F0 and sub_824E9A98). Part of the 0x82C63 vcall cluster (sibling of
+# VcallThunk_82C6FC00 / VcallThunk_82C6C788). 34 lines, 0 callees. 2 callers.
+[functions."0x82C63008"]
+name = "VcallThunk_82C63008"
+
+
+# A small thunk that calls the function (sub_82CA44C8, passing the values). It takes several values (a, b, c, d). It calls the
+# function (ProcessAndCheckAndProcessDefault_82CA44C8, on a, b, and c). This is the "call this function (sub_82CA44C8, passing the
+# values)" thunk for the 0x82CA4 thunk cluster, used by 6 callers (ProcessAndStoreAndDispatch_82BF2EC8, sub_82584D48, sub_82C87
+# DC0, sub_82C87F30, sub_82BF8C50, and sub_82EE4808). Part of the 0x82CA4 thunk cluster (sibling of ProcessAndCheckAndProcess
+# Default_82CA44C8). 11 lines, 1 callee. 6 callers.
+[functions."0x82CA4578"]
+name = "Thunk_82CA4578"
+
+
+# A thunk that forwards to an unresolved routine. It takes the same arguments and unconditionally tail-calls sub_82CA6BE8 (a 3-line
+# forward, no logic of its own; the callee body is not recovered). This is the "forward" thunk, part of the 0x82BF2 cluster. 3 lines.
+# 1 callee (sub_82CA6BE8, unresolved). 1 caller (sub_82BF0CE0).
+[functions."0x82BF2358"]
+name = "Thunk_82BF2358"
+
+
+# A thunk that invokes a method. It takes a structure (a: a pointer at a->8), reads the sub-object at a->8 (then at +0), reads the method pointer
+# at offset +36 of that sub-object, and invokes it indirectly. This is the "invoke this method" thunk, called only via the vtable (0 direct
+# callers), part of the 0x826C0 method cluster. 15 lines. 0 callees (single indirect call). 0 direct callers (vtable dispatch).
+[functions."0x826C03B8"]
+name = "InvokeMethod_Thunk_826C03B8"
+
+
+# A caller that calls a method. It takes a structure (a: a field at a->28). It reads a->28 (a pointer) and calls the pointer's +12 field as a method (bctrl), with a + 28
+# as the argument. This is the "call this method" routine, a leaf function (no direct callees), part of the 0x82C88 call cluster. 15 lines. 0 callees. 0 callers (unresolved
+# — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82C885A8"]
+name = "CallMethod_82C885A8"
+
+
+# A dispatcher that parses and processes the data. It takes a base pointer (a), an index (b), a limit (c), a structure (d: fields at d->0 and d->12), and other values (e, f).
+# It iterates over the data starting at b + 1: for each byte it computes an index (the byte's value plus a base offset's +76 field minus 3) and dispatches on that index via a
+# table lookup (bctrl) with 27 cases (0-26). Each case handles a specific token/opcode, updating the output structure (d) and advancing the index. When the computed index
+# exceeds 26 it bails out. This is the "parse and process this data" routine (a large switch-based dispatch loop), part of the 0x82C8D dispatch cluster. 413 lines. 0 callees
+# (all inline). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82C8D000"]
+name = "DispatchAndParseAndProcess_82C8D000"
+
+
+# A caller that calls from a structure. It takes a structure (a: fields at a->8 and a->12). It reads a->12 (a pointer); when the pointer is zero it returns. Otherwise it reads a->8
+# (another pointer) and that pointer's +4 field, and tail-calls sub_82C88E68 (with the first pointer and the second pointer's +4 field). This is the "call from this structure" routine,
+# part of the 0x82C86 call cluster. 19 lines. 1 callee (sub_82C88E68). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82C86C50"]
+name = "CallFromStructure_82C86C50"
+
+
+# A dispatcher that processes the data. It takes a value (a) and a value (b). It tail-calls ProcessAndDispatchAndProcess2_82C20AF0 with b and a + 4. This is the "dispatch and process
+# this data" routine (a simple wrapper), part of the 0x82C20 dispatch cluster. 13 lines. 1 callee (ProcessAndDispatchAndProcess2). 0 callers (unresolved — body is recovered but no
+# callers found; likely a vtable method or indirect entry).
+[functions."0x82C20C80"]
+name = "DispatchAndProcess_82C20C80"
+
+
+# A dispatcher that processes the data (second form). It takes a value (a) and a value (b). It tail-calls ProcessAndDispatchAndProcess4_82C235F8 with b and a + 4. This is the "dispatch
+# and process this data" routine (second form, a simple wrapper), part of the 0x82C23 dispatch cluster. 13 lines. 1 callee (ProcessAndDispatchAndProcess4). 0 callers (unresolved — body
+# is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82C23838"]
+name = "DispatchAndProcess2_82C23838"
+
+
+# A dispatcher that processes the data (third form). It takes a value (a) and a value (b). It tail-calls ProcessAndDispatchAndProcess5_82C251D0 with b and a + 4. This is the "dispatch
+# and process this data" routine (third form, a simple wrapper), part of the 0x82C25 dispatch cluster. 13 lines. 1 callee (ProcessAndDispatchAndProcess5). 0 callers (unresolved — body
+# is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82C254F0"]
+name = "DispatchAndProcess3_82C254F0"
+
+
+# A dispatcher that processes the data (fourth form). It takes a value (a) and a value (b). It tail-calls ProcessAndDispatchAndProcess6_82C25360 with b and a + 4. This is the "dispatch
+# and process this data" routine (fourth form, a simple wrapper), part of the 0x82C25 dispatch cluster. 13 lines. 1 callee (ProcessAndDispatchAndProcess6). 0 callers (unresolved — body
+# is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82C25500"]
+name = "DispatchAndProcess4_82C25500"
+
+
+# A dispatcher that processes the data (fifth form). It takes a value (a) and a value (b). It tail-calls ProcessAndDispatchAndProcess8_82C27D40 with b and a + 4. This is the "dispatch
+# and process this data" routine (fifth form, a simple wrapper), part of the 0x82C27 dispatch cluster. 13 lines. 1 callee (ProcessAndDispatchAndProcess8). 0 callers (unresolved — body
+# is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82C27F80"]
+name = "DispatchAndProcess5_82C27F80"
+
+
+# A dispatcher that processes the data (sixth form). It takes a value (a) and a value (b). It tail-calls ProcessAndDispatchAndProcess9_82C290D0 with b and a + 4. This is the "dispatch
+# and process this data" routine (sixth form, a simple wrapper), part of the 0x82C29 dispatch cluster. 13 lines. 1 callee (ProcessAndDispatchAndProcess9). 0 callers (unresolved — body
+# is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82C29260"]
+name = "DispatchAndProcess6_82C29260"
+
+
+# A dispatcher that processes the data (seventh form). It takes a value (a) and a value (b). It tail-calls ProcessAndDispatchAndProcess11_82C2CB78 with b and a + 4. This is the
+# "dispatch and process this data" routine (seventh form, a simple wrapper), part of the 0x82C2C dispatch cluster. 13 lines. 1 callee (ProcessAndDispatchAndProcess11). 0 callers
+# (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82C2CDB8"]
+name = "DispatchAndProcess7_82C2CDB8"
+
+
+# A dispatcher that processes the data (eighth form). It takes a value (a) and a value (b). It tail-calls ProcessAndDispatchAndProcess12_82C2EB88 with b and a + 4. This is the
+# "dispatch and process this data" routine (eighth form, a simple wrapper), part of the 0x82C2E dispatch cluster. 13 lines. 1 callee (ProcessAndDispatchAndProcess12). 0 callers
+# (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82C2EDC8"]
+name = "DispatchAndProcess8_82C2EDC8"
+
+
+# A dispatcher that processes the data (ninth form). It takes a value (a) and a value (b). It tail-calls ProcessAndDispatchAndProcess13_82C30490 with b and a + 4. This is the
+# "dispatch and process this data" routine (ninth form, a simple wrapper), part of the 0x82C30 dispatch cluster. 13 lines. 1 callee (ProcessAndDispatchAndProcess13). 0 callers
+# (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82C30620"]
+name = "DispatchAndProcess9_82C30620"
+
+
+# A dispatcher that processes the data (tenth form). It takes a value (a) and a value (b). It tail-calls ProcessAndDispatchAndProcess14_82C3F760 with b and a + 4. This is the
+# "dispatch and process this data" routine (tenth form, a simple wrapper), part of the 0x82C3F dispatch cluster. 13 lines. 1 callee (ProcessAndDispatchAndProcess14). 0 callers
+# (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82C3FA80"]
+name = "DispatchAndProcess10_82C3FA80"
+
+
+# A dispatcher that processes the data (eleventh form). It takes a value (a) and a value (b). It tail-calls ProcessAndDispatchAndProcess15_82C3F8F0 with b and a + 4. This is the
+# "dispatch and process this data" routine (eleventh form, a simple wrapper), part of the 0x82C3F dispatch cluster. 13 lines. 1 callee (ProcessAndDispatchAndProcess15). 0 callers
+# (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82C3FA90"]
+name = "DispatchAndProcess11_82C3FA90"
+
+
+# Simple thunk that forwards to sub_82BFD850 (a forwarding thunk). It takes no arguments and simply calls sub_82BFD850. This is a "forward to another function" thunk. 7 lines. 1 callee (sub_82BFD850). 1 caller (ProcessAndProcessAndProcess506).
+[functions."0x822C5A18"]
+name = "ThunkTo_82BFD850_822C5A18"
+
+
+# Dispatch by type code, setting values in two output structures based on the code (a type-dispatch routine). It takes a type code (a), and two output structures (b: field at b->0, and c: field at c->0); it dispatches on the type code and sets the output values accordingly. This is a "dispatch by type code" routine. 87 lines. 0 callees. 10 callers (many from the 0x821F* and 0x8300* clusters).
+[functions."0x821FAFF8"]
+name = "DispatchByTypeCode_821FAFF8"
+
+
+# Dispatch by type code, setting a value based on the structure's type (a type-dispatch routine, second form). It takes a structure (a: fields at a->0, a->48, and a->32); it reads the type code from the structure and sets a value based on the type. This is a "dispatch by type code" routine (second form), part of the 0x821FA type-dispatch cluster. 81 lines. 0 callees. 10 callers (many from the 0x821F*, 0x82D*, and 0x8300* clusters).
+[functions."0x821FABA0"]
+name = "DispatchByTypeCode2_821FABA0"
+
+
+# Issue a virtual call after checking two values (a virtual-call wrapper). It takes a structure (a), a value (b), and a value (c); it checks the values, and — when valid — issues a virtual call via the structure's vtable. This is a "virtual call with check" routine. 27 lines. 0 callees. 0 callers (likely called via a vtable or function pointer).
+[functions."0x82227130"]
+name = "VirtualCallWithCheck_82227130"
+
+
+# Issue a virtual call after checking two values (a virtual-call wrapper, second form). It takes a structure (a) and a value (b); it checks the values, and — when valid — issues a virtual call via the structure's vtable. This is a "virtual call with check" routine (second form). 25 lines. 0 callees. 0 callers (likely called via a vtable or function pointer).
+[functions."0x82227290"]
+name = "VirtualCallWithCheck2_82227290"
+
+
+# Dispatch by type code, setting values in two output structures based on the code (a type-dispatch routine, third form). It takes a structure (a: fields at a->40, a->48, and a->36), and two output structures (b: field at b->0, and c: field at c->0); it dispatches on the type code and sets the output values accordingly. This is a "dispatch by type code" routine (third form), part of the 0x821FA type-dispatch cluster. 84 lines. 0 callees. 6 callers (many from the 0x821F*, 0x8300*, and 0x82B* clusters).
+[functions."0x821FAA08"]
+name = "DispatchByTypeCode3_821FAA08"
+
+
+# Make a virtual call by checking the structure's state (third form). It takes a structure (a: fields at a->4 and a->8); it checks the structure's state, and — when valid — makes a virtual call. This is a "virtual call with check" routine (third form). 23 lines. 0 callees. 0 callers.
+[functions."0x82C55310"]
+name = "VirtualCallWithCheck3_82C55310"
+
+
+# Make a virtual call (fourth form). It takes a structure (a: fields at a->4 and a->0); it makes a virtual call based on the structure's vtable. This is a "virtual call" routine (fourth form). 15 lines. 0 callees. 0 callers.
+[functions."0x82A5BCB8"]
+name = "VirtualCallWithCheck4_82A5BCB8"
+
+
+# Make a virtual call by looking up the function pointer in a vtable (a virtual call function). It takes a value (a) and a structure (b: fields at b->0 and b->8); it looks up the function pointer in the vtable, and makes the call. This is a "virtual call" routine. 19 lines. 0 callees. 0 callers.
+[functions."0x82AB0090"]
+name = "VirtualCallWithCheck5_82AB0090"
+
+
+# Dispatch to one of several handlers based on a type code (third form). It takes a structure (a: field at a->368) and a value (b); it reads the type code from a->368->32 and dispatches to one of several handlers (ProcessAndProcessAndProcess688, ProcessAndProcessAndProcess691, ProcessAndProcessAndProcess692, and more) based on its value. This is the type-code dispatcher (third form), part of the 0x83229 dispatch cluster. 149 lines. 10 callees. 0 callers.
+[functions."0x83229B58"]
+name = "DispatchByTypeCode3_83229B58"
+
+
+# Make a virtual call through a vtable. It takes a structure (a: fields at a->16, a->0, and a->8); it reads the vtable from a->16->0->8 and makes an indirect call through it. This is the virtual-call thunk, part of the 0x82C09 virtual-call cluster. 15 lines. 0 callees (indirect call). 0 callers.
+[functions."0x82C090C8"]
+name = "VirtualCallThunk_82C090C8"
+
+
+# Make a virtual call through a vtable (second form). It takes a structure (a: fields at a->4, a->8, and a->12); it reads the vtable from a->4->52->0 and makes an indirect call through it. This is the virtual-call thunk (second form), part of the 0x82C4C virtual-call cluster. 24 lines. 0 callees (indirect call). 0 callers.
+[functions."0x82C4C610"]
+name = "VirtualCallThunk2_82C4C610"
+
+
+# Check a global flag and entity type (must be >= 2), then dereference a global context chain and call an indirect vtable method. Used to invoke a method on the active player entity. 90 lines. 0 direct callees. Called from the main game loop.
+[functions."0x821A11E8"]
+name = "CallActivePlayerMethod_821A11E8"
+
+
+# Dispatch a per-frame callback via vtable. Takes the game state structure, a frame counter, and a float (delta time). Dereferences structure->128->4->8 and calls an indirect vtable method. 132 lines. 1 callee. Called from the main game loop.
+[functions."0x821A6010"]
+name = "DispatchFrameCallback_821A6010"
+
+
+# Dispatch OS notifications. Uses XNotifyGetNext to retrieve pending notifications and dispatches by type (9, 10, 11, >11). 272 lines. 10 callees. Called from the main game loop.
+[functions."0x82185080"]
+name = "DispatchOsNotifications_82185080"
+
+[functions."0x8222B3C8"]
+name = "SwitchDispatch_8222B3C8"
+size = 0x00F8
+
+
+[functions."0x822A2AB0"]
+name = "VtableSlotX3173_822A2AB0"
+size = 0x00F0
+
+
+[functions."0x822D7C50"]
+name = "SwitchDispatch_822D7C50"
+size = 0x0060
+
+
+[functions."0x822D7CB0"]
+name = "SwitchDispatch_822D7CB0"
+size = 0x0078
+
+
+[functions."0x822D7D58"]
+name = "SwitchDispatch_822D7D58"
+size = 0x00A0
+
+
+[functions."0x822D7DF8"]
+name = "SwitchDispatch_822D7DF8"
+size = 0x00A8
+
+
+[functions."0x822D7EA0"]
+name = "SwitchDispatch_822D7EA0"
+size = 0x00E8
+
+
+[functions."0x822EAA98"]
+name = "SwitchDispatch_822EAA98"
+size = 0x0098
+
+
+[functions."0x823A5A28"]
+name = "SwitchDispatch_823A5A28"
+size = 0x0118
+
+
+[functions."0x824063B0"]
+name = "SwitchDispatch_824063B0"
+size = 0x00F0
+
+
+[functions."0x82415A20"]
+name = "SwitchDispatch_82415A20"
+size = 0x01B8
+
+
+[functions."0x8241BAA8"]
+name = "SwitchDispatch_8241BAA8"
+size = 0x0120
+
+
+[functions."0x8242C5E0"]
+name = "SwitchDispatch_8242C5E0"
+size = 0x0088
+
+
+[functions."0x824B7E70"]
+name = "SwitchDispatch_824B7E70"
+size = 0x0090
+
+
+[functions."0x824BDE60"]
+name = "SwitchDispatch_824BDE60"
+size = 0x00A8
+
+
+[functions."0x824CAC90"]
+name = "SwitchDispatch_824CAC90"
+size = 0x0158
+
+
+[functions."0x824D2800"]
+name = "SwitchDispatch_824D2800"
+size = 0x0080
+
+
+[functions."0x8250B778"]
+name = "SwitchDispatch_8250B778"
+size = 0x0058
+
+
+[functions."0x82520C00"]
+name = "SwitchDispatch_82520C00"
+size = 0x0070
+
+
+[functions."0x82522E18"]
+name = "SwitchDispatch_82522E18"
+size = 0x0178
+
+
+[functions."0x82592C80"]
+name = "SwitchDispatch_82592C80"
+size = 0x0088
+
+
+[functions."0x8259AF48"]
+name = "SwitchDispatch_8259AF48"
+size = 0x0080
+
+
+[functions."0x825A0B58"]
+name = "SwitchDispatch_825A0B58"
+size = 0x0090
+
+
+[functions."0x82622360"]
+name = "SwitchDispatch_82622360"
+size = 0x00C0
+
+
+[functions."0x826224B8"]
+name = "SwitchDispatch_826224B8"
+size = 0x00B0
+
+
+[functions."0x8272B2C0"]
+name = "SwitchDispatch_8272B2C0"
+size = 0x0168
+
+
+[functions."0x82771250"]
+name = "SwitchDispatch_82771250"
+size = 0x0070
+
+
+[functions."0x827D30C0"]
+name = "SwitchDispatch_827D30C0"
+size = 0x02E0
+
+
+[functions."0x8283A008"]
+name = "SwitchDispatch_8283A008"
+size = 0x0088
+
+
+[functions."0x8283FF98"]
+name = "SwitchDispatch_8283FF98"
+size = 0x00D0
+
+
+[functions."0x8289FB40"]
+name = "SwitchDispatch_8289FB40"
+size = 0x02C8
+
+
+[functions."0x8299F668"]
+name = "SwitchDispatch_8299F668"
+size = 0x0090
+
+
+[functions."0x82A2F3E8"]
+name = "SwitchDispatch_82A2F3E8"
+size = 0x0118
+
+
+[functions."0x82A34680"]
+name = "SwitchDispatch_82A34680"
+size = 0x0480
+
+
+[functions."0x82B38270"]
+name = "SwitchDispatch_82B38270"
+size = 0x0110
+
+
+[functions."0x82B57148"]
+name = "SwitchDispatch_82B57148"
+size = 0x02E0
+
+
+[functions."0x82B809E8"]
+name = "SwitchDispatch_82B809E8"
+size = 0x0230
+
+
+[functions."0x82B8F5E8"]
+name = "SwitchDispatch_82B8F5E8"
+size = 0x0128
+
+
+[functions."0x82BC8260"]
+name = "SwitchDispatch_82BC8260"
+size = 0x0080
+
+
+[functions."0x82BC9B28"]
+name = "SwitchDispatch_82BC9B28"
+size = 0x0128
+
+
+[functions."0x82BE0100"]
+name = "SwitchDispatch_82BE0100"
+size = 0x00A8
+
+
+[functions."0x82BE9668"]
+name = "TailCall_82BE9668"
+size = 0x0018  # was 0x08D4 in XenonRecomp; trimmed to avoid overlap with 0x82BE9680
+
+
+[functions."0x82BE9680"]
+name = "VtableSlotX1_82BE9680"
+size = 0x08BC
+
+
+[functions."0x82C56828"]
+name = "SwitchDispatch_82C56828"
+size = 0x0078
+
+
+[functions."0x82C89840"]
+name = "SwitchDispatch_82C89840"
+size = 0x0078  # was 0x01D8 in XenonRecomp; trimmed to avoid overlap with 0x82C898B8
+
+
+[functions."0x82C898B8"]
+name = "SwitchDispatch_82C898B8"
+size = 0x00A8  # was 0x0154 in XenonRecomp; trimmed to avoid overlap with 0x82C89960
+
+
+[functions."0x82C89960"]
+name = "SwitchDispatch_82C89960"
+size = 0x00AC
+
+
+[functions."0x82C8C9F0"]
+name = "SwitchDispatch_82C8C9F0"
+size = 0x0150
+
+
+[functions."0x82C8CF00"]
+name = "SwitchDispatch_82C8CF00"
+size = 0x0100
+
+
+[functions."0x82C8D3F0"]
+name = "SwitchDispatch_82C8D3F0"
+size = 0x01E8  # original XenonRecomp size; nested 0x82C8D4E8 entry removed (see comment above)
+
+
+[functions."0x82C8D750"]
+name = "SwitchDispatch_82C8D750"
+size = 0x00D0
+
+
+[functions."0x82C8DAE8"]
+name = "SwitchDispatch_82C8DAE8"
+size = 0x00F8
+
+
+[functions."0x82C97120"]
+name = "SwitchDispatch_82C97120"
+size = 0x0098
+
+
+[functions."0x82C99CB8"]
+name = "SwitchDispatch_82C99CB8"
+size = 0x0180
+
+
+[functions."0x82C99ED0"]
+name = "SwitchDispatch_82C99ED0"
+size = 0x0190
+
+
+[functions."0x82C9A118"]
+name = "SwitchDispatch_82C9A118"
+size = 0x0190
+
+
+[functions."0x82C9B420"]
+name = "SwitchDispatch_82C9B420"
+size = 0x00D0
+
+
+[functions."0x82C9D280"]
+name = "SwitchDispatch_82C9D280"
+size = 0x0198
+
+
+[functions."0x82C9DB00"]
+name = "SwitchDispatch_82C9DB00"
+size = 0x0130
+
+
+[functions."0x82C9E878"]
+name = "SwitchDispatch_82C9E878"
+size = 0x00E0
+
+
+[functions."0x82C9E9B8"]
+name = "SwitchDispatch_82C9E9B8"
+size = 0x0108
+
+
+[functions."0x82CA1A00"]
+name = "SwitchDispatch_82CA1A00"
+size = 0x0118
+
+
+[functions."0x82CA1E98"]
+name = "SwitchDispatch_82CA1E98"
+size = 0x0140
+
+
+[functions."0x82D7F5B0"]
+name = "SwitchDispatch_82D7F5B0"
+size = 0x0158
+
+
+[functions."0x82D82B48"]
+name = "SwitchDispatch_82D82B48"
+size = 0x01A0
+
+
+[functions."0x82D97098"]
+name = "SwitchDispatch_82D97098"
+size = 0x03F0
+
+
+[functions."0x82D9E998"]
+name = "SwitchDispatch_82D9E998"
+size = 0x0058
+
+
+[functions."0x82D9E9F0"]
+name = "SwitchDispatch_82D9E9F0"
+size = 0x0074
+
+
+[functions."0x82DA60B0"]
+name = "SwitchDispatch_82DA60B0"
+size = 0x0320
+
+
+[functions."0x82DDC208"]
+name = "SwitchDispatch_82DDC208"
+size = 0x0250
+
+
+[functions."0x82DE4C10"]
+name = "SwitchDispatch_82DE4C10"
+size = 0x01E8
+
+
+[functions."0x82DE6750"]
+name = "SwitchDispatch_82DE6750"
+size = 0x00F8
+
+
+[functions."0x82E0F3A8"]
+name = "SwitchDispatch_82E0F3A8"
+size = 0x00D0
+
+
+[functions."0x82E33B90"]
+name = "SwitchDispatch_82E33B90"
+size = 0x00B8
+
+
+[functions."0x82FE7850"]
+name = "VtableSlotX2_82FE7850"
+size = 0x0108
+
+
+[functions."0x83046BE8"]
+name = "VtableSlotX2_83046BE8"
+size = 0x0118
+
+
+[functions."0x83095890"]
+name = "IndirectCall_83095890"
+size = 0x0110
+
+
+[functions."0x8310FC68"]
+name = "IndirectCall_8310FC68"
+size = 0x0080
+
+
+[functions."0x831B31B8"]
+name = "IndirectCall_831B31B8"
+size = 0x0078
+
+
+[functions."0x831FBA60"]
+name = "IndirectCall_831FBA60"
+size = 0x0068
+
+
+[functions."0x831FBAC8"]
+name = "IndirectCall_831FBAC8"
+size = 0x0068
+
+
+[functions."0x831FBB30"]
+name = "IndirectCall_831FBB30"
+size = 0x0060
+
+
+[functions."0x831FBB90"]
+name = "IndirectCall_831FBB90"
+size = 0x0198
+
+
+# Gap targets: branches from discovered functions land at addresses the
+# auto-discovery never registered as functions. Seeded here without a size so
+# the scanner determines the extent (added 2026-09-19 after
+# "Validation failed: 12 unresolved calls").
+[functions."0x82BEA25C"]
+name = "TailCall_82BEA25C"
+
+[functions."0x82C00108"]
+name = "TailCall_82C00108"
+
+[functions."0x82C00118"]
+name = "TailCall_82C00118"
+
+[functions."0x82C14D58"]
+name = "TailCall_82C14D58"
+
+[functions."0x82E7E4F8"]
+name = "TailCall_82E7E4F8"
+
+[functions."0x82C0B680"]
+name = "TailCall_82C0B680"
+
+[functions."0x82C00120"]
+name = "TailCall_82C00120"
+
+[functions."0x82C00110"]
+name = "TailCall_82C00110"
+
+[functions."0x82C00128"]
+name = "TailCall_82C00128"
+
+[functions."0x82C0B688"]
+name = "TailCall_82C0B688"
+
+[functions."0x82238FCC"]
+name = "TailCall_82238FCC"
+
+[functions."0x822396C8"]
+name = "TailCall_822396C8"
+
+[functions."0x829FCB00"]
+name = "VtableSlotX3_829FCB00"
+
+[functions."0x82C5CFBC"]
+name = "TailCall_82C5CFBC"
+
+[functions."0x82CA36C4"]
+name = "TailCall_82CA36C4"
+
+[functions."0x82CA4DFC"]
+name = "TailCall_82CA4DFC"
+
+[functions."0x82CA5064"]
+name = "TailCall_82CA5064"
+
+[functions."0x82CA53D0"]
+name = "TailCall_82CA53D0"
+
+[functions."0x82CA7300"]
+name = "TailCall_82CA7300"
+
+[functions."0x82CA7C90"]
+name = "TailCall_82CA7C90"
+
+[functions."0x82CA7C9C"]
+name = "TailCall_82CA7C9C"
+
+[functions."0x82CA8060"]
+name = "TailCall_82CA8060"
+
+[functions."0x82CA806C"]
+name = "TailCall_82CA806C"
+
+[functions."0x82CA8154"]
+name = "TailCall_82CA8154"
+
+[functions."0x82CA827C"]
+name = "TailCall_82CA827C"
+
+[functions."0x82CA91E8"]
+name = "TailCall_82CA91E8"
+
+[functions."0x82CAB2D4"]
+name = "TailCall_82CAB2D4"
+
+[functions."0x82CAF40C"]
+name = "TailCall_82CAF40C"
+
+[functions."0x82CAF658"]
+name = "TailCall_82CAF658"
+
+[functions."0x82CAFAFC"]
+name = "TailCall_82CAFAFC"
+
+[functions."0x82CAFC88"]
+name = "TailCall_82CAFC88"
+
+[functions."0x82CAFEE4"]
+name = "TailCall_82CAFEE4"
+
+[functions."0x82CB0184"]
+name = "TailCall_82CB0184"
+
+[functions."0x82CB49B0"]
+name = "TailCall_82CB49B0"
+
+[functions."0x82CB4EAC"]
+name = "TailCall_82CB4EAC"
+
+[functions."0x82CB4FDC"]
+name = "TailCall_82CB4FDC"
+
+[functions."0x82CB4FEC"]
+name = "TailCall_82CB4FEC"
+
+[functions."0x82CB5918"]
+name = "TailCall_82CB5918"
+
+[functions."0x82CB68F4"]
+name = "TailCall_82CB68F4"
+
+[functions."0x82CB6C90"]
+name = "TailCall_82CB6C90"
+
+[functions."0x82CB9018"]
+name = "TailCall_82CB9018"
+
+[functions."0x82CBA370"]
+name = "TailCall_82CBA370"
+
+[functions."0x82CBA8D0"]
+name = "TailCall_82CBA8D0"
+
+[functions."0x82CC0494"]
+name = "TailCall_82CC0494"
+
+[functions."0x82CC04B0"]
+name = "TailCall_82CC04B0"
+
+[functions."0x82CD1690"]
+name = "TailCall_82CD1690"
+
+[functions."0x83001184"]
+name = "TailCall_83001184"
+
+[functions."0x830013A8"]
+name = "TailCall_830013A8"
+
+[functions."0x8300164C"]
+name = "TailCall_8300164C"
+
+[functions."0x830017A0"]
+name = "TailCall_830017A0"
+
+[functions."0x83002F18"]
+name = "TailCall_83002F18"
+
+[functions."0x83003414"]
+name = "TailCall_83003414"
+
+[functions."0x8300342C"]
+name = "TailCall_8300342C"
+
+[functions."0x830F0980"]
+name = "TailCall_830F0980"
+
+[functions."0x824F0600"]
+name = "VtableSlot29_824F0600"
+
+[functions."0x825EF568"]
+name = "VtableSlotX6922_825EF568"
+
+[functions."0x82903F70"]
+name = "VtableSlot5_82903F70"
+
+[functions."0x82903F80"]
+name = "VtableSlot2_82903F80"
+
+[functions."0x82B56870"]
+name = "VtableSlotX4_82B56870"
+
+[functions."0x82B84350"]
+name = "TailCall_82B84350"
+
+[functions."0x82BBC898"]
+name = "VtableSlotX4765_82BBC898"
+
+[functions."0x82BFA4A8"]
+name = "VtableSlot1_82BFA4A8"
+
+[functions."0x82C09188"]
+name = "VtableSlotX17_82C09188"
+
+[functions."0x82C0B400"]
+name = "VtableSlotX7_82C0B400"
+
+[functions."0x82C1DC50"]
+name = "VtableSlot7_82C1DC50"
+
+[functions."0x82C1DC60"]
+name = "VtableSlot6_82C1DC60"
+
+[functions."0x82C1DC80"]
+name = "VtableSlotX3_82C1DC80"
+
+[functions."0x82C2F500"]
+name = "VtableSlotX12_82C2F500"
+
+[functions."0x82C4C2C8"]
+name = "VtableSlotX10_82C4C2C8"
+
+[functions."0x82C4C2E8"]
+name = "VtableSlotX11_82C4C2E8"
+
+[functions."0x82C4C300"]
+name = "VtableSlotX6_82C4C300"
+
+[functions."0x82C4C320"]
+name = "VtableSlotX2_82C4C320"
+
+[functions."0x82C4C5A8"]
+name = "VtableSlotX2_82C4C5A8"
+
+[functions."0x82C4C5C8"]
+name = "VtableSlotX1_82C4C5C8"
+
+[functions."0x82C4C5E8"]
+name = "VtableSlotX1_82C4C5E8"
+
+[functions."0x82C867E8"]
+name = "TailCall_82C867E8"
+
+[functions."0x82CE1510"]
+name = "TailCall_82CE1510"
+
+[functions."0x82CE1520"]
+name = "TailCall_82CE1520"
+
+[functions."0x82CE1548"]
+name = "TailCall_82CE1548"
+
+[functions."0x82CE3750"]
+name = "TailCall_82CE3750"
+
+[functions."0x82CE3760"]
+name = "TailCall_82CE3760"
+
+[functions."0x82CE3768"]
+name = "TailCall_82CE3768"
+
+[functions."0x82CE3770"]
+name = "TailCall_82CE3770"
+
+[functions."0x82CE3798"]
+name = "TailCall_82CE3798"
+
+[functions."0x82CE37A0"]
+name = "TailCall_82CE37A0"
+
+[functions."0x82CE37A8"]
+name = "TailCall_82CE37A8"
+
+[functions."0x82CE5D50"]
+name = "VtableSlotX4_82CE5D50"
+
+[functions."0x82EF41D8"]
+name = "VtableSlotX3_82EF41D8"
+
+[functions."0x82EF41F0"]
+name = "VtableSlotX4_82EF41F0"
+
+[functions."0x82F04420"]
+name = "VtableSlot26_82F04420"
+
+[functions."0x82F0BAF8"]
+name = "TailCall_82F0BAF8"
+
+[functions."0x82F0BB08"]
+name = "TailCall_82F0BB08"
+
+[functions."0x82F1D508"]
+name = "VtableSlotX10_82F1D508"
+
+[functions."0x82F1D520"]
+name = "VtableSlotX4_82F1D520"
+
+[functions."0x82F1D538"]
+name = "VtableSlotX11_82F1D538"
+
+[functions."0x82F1D550"]
+name = "VtableSlotX5_82F1D550"
+
+[functions."0x82F1D568"]
+name = "VtableSlotX6_82F1D568"
+
+[functions."0x82F1D580"]
+name = "VtableSlotX7_82F1D580"
+
+[functions."0x82F1D598"]
+name = "VtableSlotX8_82F1D598"
+
+[functions."0x82F1D5B0"]
+name = "VtableSlotX9_82F1D5B0"
+
+[functions."0x82F2C3A8"]
+name = "VtableSlotX14_82F2C3A8"
+
+[functions."0x82F38DA0"]
+name = "TailCall_82F38DA0"
+
+[functions."0x82F56690"]
+name = "TailCall_82F56690"
+
+[functions."0x82F67E18"]
+name = "VtableSlotX3_82F67E18"
+
+[functions."0x82F67E40"]
+name = "VtableSlotX6_82F67E40"
+
+[functions."0x82F67E68"]
+name = "VtableSlotX7_82F67E68"
+
+[functions."0x82FE7EF8"]
+name = "TailCall_82FE7EF8"
+
+[functions."0x82FE7F00"]
+name = "TailCall_82FE7F00"
+
+[functions."0x83056810"]
+name = "VtableSlot95_83056810"
+
+[functions."0x83056BC0"]
+name = "VtableSlotX133_83056BC0"
+
+[functions."0x83056BE8"]
+name = "VtableSlotX134_83056BE8"
+
+[functions."0x83056C10"]
+name = "VtableSlotX133_83056C10"
+
+[functions."0x83056C38"]
+name = "VtableSlotX134_83056C38"
+
+[functions."0x83057068"]
+name = "VtableSlotX151_83057068"
+
+[functions."0x831C5CD8"]
+name = "VtableSlotX3_831C5CD8"
+
+
+
+[functions."0x831FBD28"]
+name = "IndirectCall_831FBD28"
+size = 0x0170

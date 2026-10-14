@@ -43,6 +43,12 @@ if(NOT EXISTS "${REXGLUE_SDK_SOURCE}/CMakeLists.txt")
     message(FATAL_ERROR "SDK source not found at ${REXGLUE_SDK_SOURCE} - run git submodule update --init --recursive first")
 endif()
 
+# The SDK's src/core/memory.cpp SIMD byte-swap paths use SSSE3+ intrinsics
+# (_mm_shuffle_epi8) without per-function target attributes, and the SDK's
+# CMake compiles with a baseline x86-64 ISA - so enable a modern x86-64
+# baseline for the whole tree here (the game target already uses -msse4.1).
+add_compile_options(-msse4.2)
+
 # Add PDB debug info to the Release build so crash dumps can be symbolized with
 # cdb. -g emits CodeView debug info into the objects (does not change the -O3
 # machine code, so the PDBs match the DLLs); /DEBUG makes the linker emit the

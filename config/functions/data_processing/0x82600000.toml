@@ -1,0 +1,58 @@
+# data-processing region 0x82600000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# A processor that copies and clones a refcounted node. It takes a value, another value, and a structure (a: fields at a->0, a->4, and a->8). It
+# reads a->8; when it is non-zero it atomically increments the refcount at that field (lwarx/stwcx. with the global lock and MSR save/restore).
+# It then processes the data, allocating checked memory (AllocateChecked_8264EFE0), copying and incrementing a node
+# (ProcessAndCopyNodeAndIncrement_8290F610), and copying and incrementing a ref (ProcessAndCopyAndIncrementRef_823541A8), releasing refcounts
+# (Release_RefCounted_829FF648), and performing further processing (sub_82367D10 and sub_82A97648), freeing size-bucketed memory
+# (Free_SizeBucketed_Thunk_8221BE68). This is the "copy and clone this refcounted node" routine, part of the 0x82601 clone cluster. 380 lines. 7
+# callees. 1 caller (Process12Byte_826016B0).
+[functions."0x82601D80"]
+name = "ProcessAndCopyAndClone_82601D80"
+
+
+# A processor that appends and resolves the data (third form). It takes a structure (a: field at a->0), a value (b), and a value (c). It reads a->0 (a pointer). When the pointer is non-zero it reads the
+# pointer's +0 field (a value) and the +4 field (a count). It then appends an element (ProcessAndAppendElement_82229208, with the value, -10000, and the count), dispatches and resolves (ProcessAndDispatch
+# AndResolve_822279A0, with the value and 4), and stores c into the resolved value's first field. This is the "append and resolve this data" routine (third form), part of the 0x8260D process cluster.
+# 89 lines. 5 callees (including ProcessAndAppendElement, ProcessAndDispatchAndResolve, and ProcessAndResolveTypedField). 3 callers (sub_82903620, sub_8260C3B8, and sub_8290B948).
+[functions."0x8260D230"]
+name = "ProcessAndAppendAndResolve3_8260D230"
+
+
+# A processor that processes the data (twenty-eighth form). It takes a structure (a: field at a->0), a value (b), and a value (c). It processes the data (a, b, and c). This is the "process this data" routine (twenty-eighth form), part of the 0x8260D process cluster. 89 lines. 5 callees (ProcessAndAppendElement, ProcessAndCopyReferenceAndHash, ProcessAndDispatchAndResolve, ProcessAndHashString, and ProcessAndResolveTypedField). 1 caller (sub_8260C3B8).
+[functions."0x8260D020"]
+name = "ProcessAndProcessAndProcess28_8260D020"
+
+
+# A processor that processes the data (one hundred and thirty-third form). It takes a structure (a: field at a->0), a value (b), and a value (c). It processes the data (a, b, and c). This is the "process this data" routine (one hundred and thirty-third form), part of the 0x8260C process cluster. 89 lines. 5 callees (ProcessAndAppendElement, ProcessAndCopyReferenceAndHash, ProcessAndDispatchAndResolve, ProcessAndHashString, and ProcessAndResolveTypedField). 2 callers (sub_8253B3F0 and sub_8260C3B8).
+[functions."0x8260CF40"]
+name = "ProcessAndProcessAndProcess133_8260CF40"
+
+
+# A processor that processes the data (one hundred and thirty-fourth form). It takes a structure (a: field at a->0), a value (b), and a value (c). It processes the data (a, b, and c). This is the "process this data" routine (one hundred and thirty-fourth form), part of the 0x8260D process cluster. 89 lines. 5 callees (ProcessAndAppendElement, ProcessAndCopyReferenceAndHash, ProcessAndDispatchAndResolve, ProcessAndHashString, and ProcessAndResolveTypedField). 1 caller (sub_8260C3B8).
+[functions."0x8260D0B8"]
+name = "ProcessAndProcessAndProcess134_8260D0B8"
+
+
+# A processor that processes the data (one hundred and thirty-fifth form). It takes a structure (a: field at a->0), a value (b), and a value (c). It processes the data (a, b, and c). This is the "process this data" routine (one hundred and thirty-fifth form), part of the 0x8260D process cluster. 89 lines. 5 callees (ProcessAndAppendElement, ProcessAndCopyReferenceAndHash, ProcessAndDispatchAndResolve, ProcessAndHashString, and ProcessAndResolveTypedField). 1 caller (sub_8260C3B8).
+[functions."0x8260D150"]
+name = "ProcessAndProcessAndProcess135_8260D150"
+
+
+# A processor that processes the data (two hundred and seventy-sixth form). It takes a structure (a: field at a->8). It processes the data (a). This is the "process this data" routine (two hundred and seventy-sixth form), part of the 0x8260C process cluster. 1143 lines. 17 callees (ProcessAndAppendAndResolve3, ProcessAndAppendElement, ProcessAndCopyReferenceAndHash, ProcessAndDispatchAndResolve, ProcessAndHashString, ProcessAndResolveTypedField, Release_RefCounted, sub_822B9510, sub_824EF020, sub_824EF300, sub_824EF558, sub_8260CF40, sub_8260D020, sub_8260D0B8, sub_8260D150, sub_82903C38, and sub_82A1F5B0). 2 callers (sub_825ACEA0 and ProcessAndProcessAndProcess233).
+[functions."0x8260C3B8"]
+name = "ProcessAndProcessAndProcess276_8260C3B8"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand four hundred and one hundred and nineteenth form). It takes a value (a), a structure (b: fields at b->4 and b->8), and a value (c); it checks the value's state, and drives sub-operations (sub_82610990) based on the result, performing a bounds check. This is the "process this data" routine (two thousand four hundred and one hundred and nineteenth form), part of the 0x82610 process cluster. 132 lines. 1 callee. 3 callers (sub_82B18688, sub_827325C8, and sub_82192848).
+[functions."0x826107D8"]
+name = "ProcessAndProcessAndProcess2568_826107D8"
+
+
+# Process a value by checking its state and driving many sub-operations (two thousand four hundred and one hundred and twentieth form). It takes a structure (a: fields at a->4, a->8, and a->12), a value (b), and a value (c); it checks the value's state, and drives many sub-operations (AllocateChecked4, Free_SizeBucketed_Thunk, and more) based on the result. This is the "process this data" routine (two thousand four hundred and one hundred and twentieth form), part of the 0x82610 process cluster. 493 lines. 3 callees. 1 caller (ProcessAndProcessAndProcess2568).
+[functions."0x82610990"]
+name = "ProcessAndProcessAndProcess2569_82610990"

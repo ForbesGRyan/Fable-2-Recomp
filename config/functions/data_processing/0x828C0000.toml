@@ -1,0 +1,19 @@
+# data-processing region 0x828C0000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# A processor that processes the data (thirtieth form). It takes a structure (a: fields at a->0, a->4, a->8, a->12, and a->16), a pointer (b), a pointer (c), and a pointer (d). It processes the data (a, b, c, and d). This is the "process this data" routine (thirtieth form), part of the 0x828C9 process cluster. 107 lines. 3 callees (DestructRefCounted, ProcessConstructString, and ProcessToLower). 2 callers (sub_827CD128 and ProcessHashLookup).
+[functions."0x828C9450"]
+name = "ProcessAndProcessAndProcess30_828C9450"
+
+
+# Process a large data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and thirtieth form). It takes a structure, checks its state, and drives sub-operations (sub_82283ED0, sub_82293968, sub_823F7CE8, sub_823F94C8, sub_828C9860, sub_82A39D88, sub_82A39E30, sub_8322BA18, sub_8322BB68, sub_8322BD20) based on the result. Part of the 0x828C9 process cluster. 433 lines. 10 callees. 2 callers (sub_82201C70 and ProcessAndProcessAndProcess1329).
+[functions."0x828C95E8"]
+name = "ProcessAndProcessAndProcess1330_828C95E8"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and sixty-fifth form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess1662). This is a frequently-called helper in the 0x828CE process cluster. 114 lines. 1 callee. 14 callers.
+[functions."0x828CE180"]
+name = "ProcessAndProcessAndProcess1665_828CE180"

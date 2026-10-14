@@ -1,0 +1,77 @@
+# data-processing region 0x82700000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# A process (an increment, with a copy, the caller of CheckedCopy_82CA3808, the sibling of ProcessGrowAppend10_82301
+# 2B0): (if a base (obj->4, a base, a particular value, a particular size / a particular allocation) is != a limit
+# (obj->8, a limit, a particular value, a particular size / a particular allocation), a particular value) perform an
+# increment (an increment, a particular increment / a particular count, a particular size / a particular allocation, a
+# particular operation, a particular state / a particular result), and copy (CheckedCopy_82CA3808, on a value, a
+# particular copy, a particular size / a particular allocation, a particular operation, a particular state / a
+# particular result), and store the new limit (obj->8 = r30, a store, a limit, a particular value, a particular size /
+# a particular allocation, a particular state / a particular result), and (otherwise) take one path (a no-op / a
+# return, a particular state, a particular result, a particular size / a particular allocation).
+
+# Args: obj (r3, r31, ->4 = a base, ->8 = a limit, a particular structure, a grow object), (more). It checks a base
+# (r3, obj->4, a base, a particular value, a particular size / a particular allocation): if it is != a limit (r5,
+# obj->8, a limit, a particular value, a particular size / a particular allocation, a particular state), it performs an
+# increment (an increment, a particular increment / a particular count, a particular size / a particular allocation, a
+# particular operation, a particular state / a particular result), and copies (CheckedCopy_82CA3808, sub_82CA3808, a
+# checked copy, on a value (r6, a zero, a particular value, a particular size / a particular allocation, a
+# particular source), a particular copy, a particular size / a particular allocation, a particular operation, a
+# particular state / a particular result), and stores the new limit (obj->8 = r30, a store, a limit, a particular
+# value, a particular size / a particular allocation, a particular state / a particular result). If it is == the
+# limit (a particular state, a particular value, a particular size / a particular allocation), it takes one path (a
+# no-op / a return, a particular state, a particular result, a particular size / a particular allocation). So it's a
+# "process (an increment, with a copy: (if a base (obj->4, a base, a particular value, a particular size / a
+# particular allocation) is != a limit (obj->8, a limit, a particular value, a particular size / a particular
+# allocation), a particular value) perform an increment (an increment, a particular increment / a
+# particular count, a particular size / a particular allocation, a particular operation, a particular state / a
+# particular result), and copy (CheckedCopy_82CA3808, on a value, a particular copy, a particular size / a
+# particular allocation, a particular operation, a particular state / a particular result), and store the new limit
+# (obj->8 = r30, a store, a limit, a particular value, a particular size / a particular allocation, a
+# particular state / a particular result), and (otherwise) take one path (a no-op / a return, a particular state, a
+# particular result, a particular size / a particular allocation))" routine (an increment process, with a copy, part
+# of the 0x8272E cluster, a sibling of ProcessGrowAppend10_823012B0, a caller of CheckedCopy_82CA3808). 55 lines, 1
+# callee (CheckedCopy_82CA3808). 4 callers: sub_83232A70, sub_8272E610, sub_82840D20, sub_82B4A380 (processes, which
+# call this to perform the increment, a particular count / a particular size, a particular size / a
+# particular allocation, a particular operation). The object's class (obj, ->4 = a base, ->8 = a limit, a
+# particular structure, a grow object, a particular size / a particular allocation, a particular value /
+# a particular state) isn't resolvable, so the name states the mechanism: an increment process (with a copy) ((if a
+# base (obj->4, a base, a particular value, a particular size / a particular allocation) is != a limit (obj->8, a
+# limit, a particular value, a particular size / a particular allocation), a particular value) perform an increment
+# (an increment, a particular increment / a particular count, a particular size / a particular allocation, a
+# particular operation, a particular state / a particular result), and copy (CheckedCopy_82CA3808, on a value, a
+# particular copy, a particular size / a particular allocation, a particular operation, a particular state / a
+# particular result), and store the new limit (obj->8 = r30, a store, a limit, a particular value, a
+# particular size / a particular allocation, a particular state / a particular result), and (otherwise) take one path
+# (a no-op / a return, a particular state, a particular result, a particular size / a
+# particular allocation)). The "IncrementCopy" refers to the increment (an increment, a
+# particular increment / a particular count, a particular size / a particular allocation, a
+# particular operation, a particular state / a particular result) and the copy (a copy, a
+# particular copy, a particular size / a particular allocation, a particular operation, a
+# particular state / a particular result).
+[functions."0x8272E7D0"]
+name = "ProcessIncrementCopy_8272E7D0"
+
+
+# A processor that validates and processes the data (third form). It takes a structure (a: fields at a->0 and a->4). It validates the structure (a->0 and a->4). It then processes the data (a->0 and a->4). This is the "validate and process this data" routine (third form), part of the 0x8273F process cluster. 93 lines. 0 callees (leaf function — performs raw memory operations). 12 callers (sub_825F1D78, sub_824D8638, sub_82A586E0, sub_82B5BEC8, sub_82C0FFF8, sub_82418758, sub_8218CA10, sub_82BFD118, sub_82376898, sub_82A50BA0, sub_824EBE60, and ProcessAndSpliceAndProcess4).
+[functions."0x8273F9D8"]
+name = "ProcessAndValidateAndProcess3_8273F9D8"
+
+
+# Process a very frequently-used structure (seven hundred and one hundred and one hundred and one hundred and thirty-ninth form). It takes a structure and checks its state, with no external sub-operations. This is one of the most frequently-called helpers in the recompiled binary. 93 lines. 0 callees. 70 callers.
+[functions."0x8273FAF8"]
+name = "ProcessAndProcessAndProcess1039_8273FAF8"
+
+
+# Process a very frequently-used structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and twenty-seventh form). It takes a structure and checks its state, with no external sub-operations. This is a frequently-called helper in the 0x8272E process cluster. 80 lines. 0 callees. 9 callers (including ProcessAndProcessAndProcess1070).
+[functions."0x8272EFC0"]
+name = "ProcessAndProcessAndProcess1327_8272EFC0"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and four hundred and thirty-second form). It takes a structure and checks its state, with no external sub-operations. This is a frequently-called helper in the 0x8273A process cluster. 112 lines. 0 callees. 33 callers.
+[functions."0x8273ACB8"]
+name = "ProcessAndProcessAndProcess2132_8273ACB8"

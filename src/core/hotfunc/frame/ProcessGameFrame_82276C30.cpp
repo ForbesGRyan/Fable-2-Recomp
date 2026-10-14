@@ -113,7 +113,7 @@ extern "C" void QueryActivePlayerMethod_821EC8A0(PPCContext& ctx, uint8_t* base)
 extern "C" void RegisterFrameCallback_821DCF10(PPCContext& ctx, uint8_t* base);
 extern "C" void Release_RefCounted_821C67D8(PPCContext& ctx, uint8_t* base);
 extern "C" void ResolveSubsystemReference_821F8760(PPCContext& ctx, uint8_t* base);
-extern "C" void YieldAndCheckThreshold_82CBD098(PPCContext& ctx, uint8_t* base);
+extern "C" void Yield_82CBD098(PPCContext& ctx, uint8_t* base);
 extern "C" void __imp__RtlEnterCriticalSection(PPCContext& ctx, uint8_t* base);
 extern "C" void __imp__RtlLeaveCriticalSection(PPCContext& ctx, uint8_t* base);
 extern "C" void __restfpr_21(PPCContext& ctx, uint8_t* base);
@@ -1080,7 +1080,7 @@ extern "C" void ProcessGameFrame_82276C30(PPCContext& __restrict ctx, uint8_t* b
 	// --- (no work on this path) yield + re-check the frame threshold ---
 	// bl 0x82cbd098
 	ctx.lr = 0x8227720C;
-	YieldAndCheckThreshold_82CBD098(ctx, base);
+	Yield_82CBD098(ctx, base);
 	}
 	check_loop_backedge(ctx, base);
 	} while (!ctx.cr6.eq);

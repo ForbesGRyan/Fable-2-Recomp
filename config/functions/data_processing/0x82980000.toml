@@ -1,0 +1,16 @@
+# data-processing region 0x82980000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# Aiming range weapon (skill)
+[functions."0x82988EE8"]
+name = "Skill_AimRangeWeapon"
+
+
+# Shooting a gun when on a pressure plate in wellspring cave (issue #38)
+[functions."0x82988EA8"]
+
+[functions."0x82996258"]
+name = "RetConst173_82996258"

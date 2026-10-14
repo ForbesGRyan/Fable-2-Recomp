@@ -1,0 +1,186 @@
+# data-processing region 0x82640000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# A destruct (a destruct, with a loop and a free, the sibling of Destruct_822C97D0 / Destruct3_822F5208 / ListUnlink
+# _82B5E7F8, the caller of Free_SizeBucketed_Thunk_8221BE68): destruct an object (a destruct, a
+# particular destruct / a
+# particular release, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a loop) loop over a range (a loop, a particular loop / a
+# particular range, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, over obj->4, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result), and (in a free) free a value (Free_SizeBucketed_Thunk_8221BE68, on a
+# value (r3->0, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular free / a
+# particular size, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and store values (obj->8 = 0, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, obj->4 = 0, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result).
+
+# Args: obj (r3, r31, ->4 = a field, a value, ->8 = a field, a value, a
+# particular object), (more). It destructs an object (a
+# destruct, a
+# particular destruct / a
+# particular release, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result). In the loop, it loops over a range (a
+# loop, a
+# particular loop / a
+# particular range, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, over obj->4, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result). In the free, it frees a value (Free_SizeBucketed_Thunk_8221BE68, sub_8221BE68, a
+# free, on a
+# value (r3->0, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular free / a
+# particular size, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result). It stores values (obj->8 = 0, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, obj->4 = 0, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result). So it's a "destruct an object (a
+# destruct, with a
+# loop and a
+# free: destruct an object (a destruct, a
+# particular destruct / a
+# particular release, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a loop) loop over a range (a loop, a
+# particular loop / a
+# particular range, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, over obj->4, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result), and (in a free) free a value (Free_SizeBucketed_Thunk_8221BE68, on a
+# value (r3->0, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular free / a
+# particular size, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and store values (obj->8 = 0, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, obj->4 = 0, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result))" routine (a destruct routine, part of the 0x8264E cluster, a sibling of
+# Destruct_822C97D0, Destruct3_822F5208, and ListUnlink_82B5E7F8, a caller of Free_SizeBucketed_Thunk_8221BE68). 63
+# lines, 1 callee (Free_SizeBucketed_Thunk_8221BE68). 10 callers: sub_826928F8, sub_82B3BAC0, sub_832ABDC0, sub_82817D28,
+# sub_82768B70, sub_82A45F58, sub_8268A9A0, sub_82647328, sub_82A46EA8, sub_82359BE8 (processes, which
+# call this to destruct the object, a
+# particular size / a
+# particular allocation, a
+# particular operation). The object's class (obj, r31, ->4 = a field, a value, ->8 = a field, a value, a
+# particular object, a
+# particular value /
+# a particular state) isn't resolvable, so the name states the mechanism: a destruct (with a
+# loop and a
+# free) (destruct an object (a destruct, a
+# particular destruct / a
+# particular release, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a loop) loop over a range (a loop, a
+# particular loop / a
+# particular range, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, over obj->4, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result), and (in a free) free a value (Free_SizeBucketed_Thunk_8221BE68, on a
+# value (r3->0, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular free / a
+# particular size, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and store values (obj->8 = 0, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, obj->4 = 0, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result)). The "4" distinguishes it from Destruct_822C97D0 and Destruct3_822F5208.
+[functions."0x8264EDF8"]
+name = "Destruct4_8264EDF8"

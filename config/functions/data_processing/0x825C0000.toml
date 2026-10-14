@@ -1,0 +1,24 @@
+# data-processing region 0x825C0000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# A processor that calls methods on a list of structures (sixth form). It takes a value (a), a value (b), a value (c), and a value (d). When b is not equal to c it iterates over an array of
+# pointers (from d to c): for each non-zero pointer it stores the pointer and calls a method on the structure it points to (bctrl, via the structure's +4 entry). This is the "call methods on
+# this list of structures" routine (sixth form), part of the 0x825F5 method cluster. 63 lines. 0 callees (leaf function). 3 callers (sub_822F7870, sub_825F4EA0, and sub_822F7B70).
+[functions."0x825F51D0"]
+name = "ProcessAndCallMethods6_825F51D0"
+
+
+# A processor that performs a vcall and processes the data (third form). It takes a value (a, a count), a value (b, a pointer), and a structure (c: field at c->0). It iterates a times: for each
+# element it reads c->0 (a pointer). When the pointer is non-zero it stores it into the element's first field and performs a vcall via the pointer's +0 and +4 entries (bctrl). When the pointer is zero it
+# stores zero. It then increments the element by 4 and decrements the count. This is the "perform a vcall and process this data" routine (third form), part of the 0x825F4 process cluster. 69 lines.
+# 0 callees (leaf function). 3 callers (sub_822F7B70, sub_825F4EA0, and sub_822F7870).
+[functions."0x825F4E30"]
+name = "ProcessAndVcallAndProcess3_825F4E30"
+
+
+# A processor that processes the data (twenty-seventh form). It takes a value (a), a structure (b: field at b->4), and a pointer (c). It processes the data (a, b, and c). This is the "process this data" routine (twenty-seventh form), part of the 0x825F2 process cluster. 183 lines. 2 callees (ProcessChain2 and ProcessAndProcessAndProcess6). 3 callers (ProcessAndFindTreeLeafLocked, sub_8223F1E0, and sub_82420FB8).
+[functions."0x825F2B58"]
+name = "ProcessAndProcessAndProcess27_825F2B58"

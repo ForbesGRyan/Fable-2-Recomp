@@ -1,0 +1,1555 @@
+# data-processing region 0x82B80000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# 1-instruction tail-branch thunk: "b 0x822085d0" — a plain (unswapped)
+# alias to the vectorized memcpy kernel MemCpy_Vectorized_822085D0, passing
+# (dst=r3, src=r4, len=r5) through unchanged. Single caller: sub_830FB4E8,
+# which sets up (r3=r23=dst, r4=r31=src, r5=*(r25)=len) — a straightforward
+# forward copy. Its 8-byte neighbor sub_82B93040 is the SWEAP-direction
+# sibling (swaps r3/r4 then tail-calls the same kernel, single caller
+# sub_83045C00), so the pair offers both argument orders of the same SIMD
+# copy kernel. Named as a thunk/trampoline to the vectorized memcpy.
+[functions."0x82B93038"]
+name = "MemCpy_Vectorized_Thunk_82B93038"
+
+
+# A range/counter advance: consume a delta by incrementing counters and advancing several
+# 12-byte range pointers (offsets 32/44 and 40/44) by the delta, with clamping.
+
+# Args: obj (r3, a multi-range object: ->0/->12 = counters, ->8 = a clamped counter,
+# ->32/->40/->44 = a range triple, and (obj + 32) = another range triple), delta (r4). If
+# delta <= 0, return (no-op). Otherwise: obj->0 += 1, obj->12 += 1; clamp obj->8 to
+# min(obj->8, obj->12); advance the ranges (obj->32 += delta, obj->44 += delta, and the
+# (obj + 32) range) with similar clamping. So it's a "consume/advance N" operation over a
+# multi-buffer / multi-range object. Returns void. 108 lines, 0 external callees (all
+# inline). 2 callers (sub_82BAA4A8, sub_82BA8F18 -- both in the TODO). The object class and
+# the exact range semantics aren't resolvable, so the name states the mechanism: advance the
+# range pointers by a delta.
+[functions."0x82BAA6F0"]
+name = "AdvanceRanges_82BAA6F0"
+
+
+# A range/counter advance (the sibling of AdvanceRanges_82BAA6F0): if delta > 0, update the
+# counters and advance the range pointers -- but in the opposite (shrink/consume) direction
+# (obj->36 += delta while obj->44 -= delta, etc.).
+
+# Args: obj (r3, a multi-range object: ->4/->12 = counters, ->20/->28, ->36/->44, ->52/->60 =
+# range triples), delta (r4). If delta <= 0, return (no-op). Otherwise: obj->12 -= 1, obj->4 +=
+# 1, obj->20 += 1, obj->28 -= 1; advance the ranges (obj->36 += delta while obj->44 -= delta,
+# obj->52 += delta while obj->60 -= delta) -- so it shrinks the ranges from both ends. Returns
+# void. 64 lines, 0 external callees (all inline). 3 callers (sub_82BA9068, sub_82BAA570 -- in
+# the TODO -- sub_82BA8D90). A sibling of AdvanceRanges_82BAA6F0 (same multi-range object,
+# opposite direction); the "2" distinguishes the two. The object class and exact range
+# semantics aren't resolvable.
+[functions."0x82BAA7B8"]
+name = "AdvanceRanges2_82BAA7B8"
+
+
+# An indexed-region processor: index a 16-byte-stride array in a large object (index clamped to
+# 0-511), update the region's counters, and advance the ranges (AdvanceRanges2_82BAA7B8).
+
+# Args: obj (r3, a large object with a 16-byte-stride array starting at offset 44), gate (r4,
+# a non-zero check), index (r5, clamped to 511), (r6). If gate == 0, returns. Clamps index to
+# 511. Accesses the region at (obj + 44 + (index + 196) * 16) and updates its counters (region->4
+# += 1, region->12 -= 1), then walks the region (a loop over obj + 44) and calls
+# AdvanceRanges2_82BAA7B8 (sub_82BAA7B8) and sub_82BAA570. So it's a "process the region at the
+# clamped index" routine. 196 lines. Many callers, in the 0x82BB/0x82BA cluster (sub_82BB7700,
+# sub_82BAE500, sub_823F8F40, ...). The region object and the exact counter semantics aren't
+# resolvable, so the name states the mechanism: process an indexed region.
+[functions."0x82BA9068"]
+name = "ProcessIndexedRegion_82BA9068"
+
+
+# An indexed-region processor (the sibling of ProcessIndexedRegion_82BA9068): index a
+# 16-byte-stride array in a large object (index clamped to 0-511), update the region's counters,
+# and advance the ranges (AdvanceRanges_82BAA6F0).
+
+# Args: obj (r3, a large object with a 16-byte-stride array), index (r4, clamped to 511), (r5),
+# (r6), (r7). Clamps index to 511. Accesses the region at (obj + (index + 196) * 16) and updates
+# its counters (region->0 += 1, region->12 += 1), clamps region->8 to the new region->12, then
+# walks the region and calls AdvanceRanges_82BAA6F0 (sub_82BAA6F0) and sub_82BAA4A8. So it's a
+# "process the region at the clamped index" routine. 194 lines. Many callers, in the 0x82BB/
+# 0x82BC/0x82BA cluster (sub_82BBDC90, sub_82BAFBE8, sub_82BC4040, ...). A sibling of
+# ProcessIndexedRegion_82BA9068 (same 16-byte-stride array + clamped-index shape, but increments
+# ->0/->12 and calls AdvanceRanges rather than AdvanceRanges2); the "2" distinguishes the two.
+# The region object and the exact counter semantics aren't resolvable.
+[functions."0x82BA8F18"]
+name = "ProcessIndexedRegion2_82BA8F18"
+
+
+# A range-advance + dispatch: call AdvanceRanges_82BAA6F0 to advance the object's ranges, then
+# dispatch (a vcall via a global function pointer / sub_82BAA688).
+
+# Args: obj (r3), (r4), (r5), (r6). Calls AdvanceRanges_82BAA6F0 (sub_82BAA6F0) with a global
+# base pointer + obj + the range args to advance the ranges. Then it loads a global function
+# pointer (from a global table) and dispatches a call through it (bctrl) with obj, and also calls
+# sub_82BAA688 (a further advance/range helper). It also loads/compares a 2-field global
+# (a low/high pair). So it's an "advance the ranges, then dispatch" routine. 116 lines. 1 caller:
+# ProcessIndexedRegion2_82BA8F18 (sub_82BA8F18). Part of the 0x82BAA range/advance cluster. The
+# object class and the dispatched call's meaning aren't resolvable, so the name states the
+# mechanism: advance the ranges and dispatch.
+[functions."0x82BAA4A8"]
+name = "AdvanceAndDispatch_82BAA4A8"
+
+
+# A range-advance + dispatch (the sibling of AdvanceAndDispatch_82BAA4A8): run a setup (sub_82BAA5D8),
+# advance the ranges (AdvanceRanges2_82BAA7B8), then dispatch a vcall.
+
+# Args: obj (r3), (r4), (r5). If obj is null, it returns. Otherwise it calls sub_82BAA5D8 (a setup,
+# passing obj), then AdvanceRanges2_82BAA7B8 (sub_82BAA7B8, with a global base and obj -- the second
+# range-advance variant), and then dispatches a vcall (loading a global function pointer and
+# bctrl'ing on it, passing obj). So it's a "set up, advance the ranges, and dispatch a vcall" routine
+# (the 0x82BAA indexed-region / range subsystem). 61 lines. 1 caller: ProcessIndexedRegion_82BA9068
+# (sub_82BA9068). The vcall's target and the range object's meaning aren't resolvable, so the name
+# states the mechanism: advance the ranges and dispatch.
+[functions."0x82BAA570"]
+name = "AdvanceRangesDispatch_82BAA570"
+
+
+# An append-to-a-global-array: append a record (5 words) to a global array (count at ->10244, capacity at ->10240),
+# with a capacity check (return early if the array is full).
+
+# Args: (r3), a (r4), b (r5), c (r6), (more). Loads a global array (a fixed .data base): the count (->10244) and
+# capacity (->10240). If count == capacity (the array is full), it returns early. Otherwise it appends a record: it
+# copies 5 words (a, b, c, and 2 more from the stack, saved at stack[32]) to the array at the count's offset (a
+# 5-word record, stored word-by-word), and increments the count (count++). So it's a "append a 5-word record to a
+# global array (with a capacity check)" routine (a global array appender, part of the 0x82BAA cluster). 56 lines,
+# no callees (pure data manipulation). 1 caller: AdvanceAndDispatch_82BAA4A8 (sub_82BAA4A8). The array's meaning
+# (a global list of 5-word records, a log / registry / event list) and the record's fields (a, b, c) aren't
+# resolvable, so the name states the mechanism: append to a global array.
+[functions."0x82BAA688"]
+name = "AppendToGlobalArray_82BAA688"
+
+
+# A copy (a 20-byte copy, the sibling of Copy8Bytes_82B56820 / CopyRecords20_82A13138): copy 20 bytes (four words
+# (src->0, ->4, ->8, ->12) and a float (src->16)) from src to dst, then call a process (ProcessCount_82B728D8, on dst
+# + 20 and src + 20, the objects' tails).
+
+# Args: dst (r3, r31, +20 = a tail), src (r4, r11, +20 = a tail), (more). It copies 20 bytes (from src to dst -- four
+# words: src->0 to dst->0, src->4 to dst->4, src->8 to dst->8, src->12 to dst->12, and a float: src->16 to dst->16, a
+# 20-byte copy). It then calls a process (ProcessCount_82B728D8, sub_82B728D8, a count process, on the objects' tails
+# (dst + 20 and src + 20, the 20-byte objects' tails)). So it's a "copy a 20-byte object (copy four words and a float
+# from src to dst, and process the objects' tails)" routine (a 20-byte copy, part of the 0x82B82 cluster, a sibling of
+# Copy8Bytes_82B56820). 50 lines (to the next function), 1 callee (ProcessCount_82B728D8). 1 caller: sub_82B828C8 (a
+# sibling in the 0x82B82 cluster). The object's class (a 20-byte object, ->0, ->4, ->8, ->12 = words, ->16 = a float, ->
+# 20 = a tail, an object with a head and a tail) and the source/destination's meaning (a 20-byte object, a data object
+# / node / value) aren't resolvable, so the name states the mechanism: a 20-byte copy (copy four words and a float from
+# src to dst, and process the objects' tails). The "20" distinguishes it from Copy8Bytes_82B56820 (8-byte).
+[functions."0x82B82C68"]
+name = "Copy20Bytes_82B82C68"
+
+
+# A process (a double-vcall, the sibling of VirtualCall4_8260C130): (if a value is non-zero) perform a double-vcall
+# (call obj->4->0->32, a virtual method, and then obj->4->0->76, another virtual method, on a node), and (depending on
+# a flag, r3 & 0xFF) take a path.
+
+# Args: obj (r3, r31, ->4 = a node, ->24 = a field), value (r4, r30, a value), a (r5, r29), b (r6, r28), (more). It
+# checks the value (r30, a value): if it is zero (an empty state), it takes one path. If it is non-zero, it performs a
+# double-vcall (call obj->4->0->32, a virtual method, on the node (obj->4, a node, a refcounted object with a vtable at
+# ->0), and then obj->4->0->76, another virtual method, on the node). It then checks a flag (r3 & 0xFF, a low-byte
+# flag, a state / a marker): if it is zero (a state), it takes one path; if it is non-zero, it continues (a complex
+# computation, with a large stack frame (128 bytes), and a call to ComputeClamped2_83230D00, sub_83230D00, a clamp
+# computation). So it's a "process (a double-vcall: (if a value is non-zero) perform a double-vcall (call two virtual
+# methods on a node), and (depending on a flag) take a path)" routine (a double-vcall process, part of the 0x82BB0
+# cluster, a sibling of VirtualCall4_8260C130). 121 lines, no direct callees (pure data manipulation, with indirect
+# vcalls). 0 callers: it is registered in the function table but not called from any recompiled guest function (a
+# registered-but-uncalled function, part of the 0x82BB0 cluster, a double-vcall operation). The node's class (obj->4,
+# a node, a refcounted object with a vtable at ->0, ->32 and ->76 = virtual methods) and the value's meaning (a value,
+# a particular argument) aren't resolvable, so the name states the mechanism: a double-vcall process ((if a value is
+# non-zero) perform a double-vcall (call two virtual methods on a node) and (depending on a flag) take a path).
+[functions."0x82BB06D8"]
+name = "ProcessDoubleVcall_82BB06D8"
+
+
+# A process (a construct, with a float-to-int conversion and a complex computation, the caller of sub_82BBF648):
+# (if a value (obj->40, a value, a particular value) is == a value (obj->36, a value, a particular value), a particular
+# match / a particular state) perform a construct (a float-to-int conversion, a particular conversion / a particular
+# operation, a complex computation, a particular computation / a particular operation, a particular size / a
+# particular allocation, calling sub_82BBF648, a complex computation, a particular computation / a particular
+# operation, a particular size / a particular allocation), and (otherwise) take one path (a no-op / a return, a
+# particular state, a particular result, a particular size / a particular allocation).
+
+# Args: obj (r3, r31, ->36 = a value, ->40 = a value, ->44 = a float, a particular structure, a construct object, a
+# particular size / a particular allocation), a (r4, r30, a value), (more). It checks a value (r10, obj->40, a value,
+# a particular value) against a value (r11, obj->36, a value, a particular value): if the value is == the other value
+# (a particular match / a particular state, a particular value, a particular state / a particular operation), it
+# performs a construct (a float-to-int conversion, a particular conversion / a particular operation, a complex
+# computation, a particular computation / a particular operation, a particular size / a particular allocation: it
+# reads a value (r11, obj->36, a value, a particular value, a count, a particular count / a particular value), and a
+# float (f0, obj->44, a float, a particular value, a particular value / a particular state), and performs a float-to
+# -int conversion (a float-to-int conversion, a particular conversion / a particular operation, a particular value / a
+# particular state, a particular size / a particular allocation: it converts a float (f0, a float, a particular value
+# , a particular value / a particular state), and a count (f13, r11, a count, a particular count / a particular
+# value), and a float (f10, f0 * f11, a float, a particular value, a particular value / a particular state), and an
+# int (f9, fctiwz(f10), a float-to-int conversion, a particular value / a particular state, a particular size / a
+# particular allocation, a particular operation), and (in paths) calls a complex computation (sub_82BBF648, a complex
+# computation, a particular computation / a particular operation, a particular size / a particular allocation, a
+# particular state / a particular result). If the value is != the other value (a particular miss / a particular state,
+# a particular value, a particular state / a particular operation), it takes one path (a no-op / a return, a
+# particular state, a particular result, a particular size / a particular allocation). So it's a "process (a
+# construct, with a float-to-int conversion and a complex computation: (if a value (obj->40, a value, a particular
+# value) is == a value (obj->36, a value, a particular value), a particular match / a particular state) perform a
+# construct (a float-to-int conversion, a particular conversion / a particular operation, a complex computation, a
+# particular computation / a particular operation, a particular size / a particular allocation, calling sub_82BBF648,
+# a complex computation, a particular computation / a particular operation, a particular size / a particular
+# allocation), and (otherwise) take one path (a no-op / a return, a particular state, a particular result, a
+# particular size / a particular allocation))" routine (a construct process, part of the 0x82BAE cluster, a caller of
+# sub_82BBF648). 94 lines, 1 callee (sub_82BBF648, a complex computation). 10 callers: sub_82BC4040, sub_822D8AA0, sub
+# _82BB3E40, sub_82BAD9D8, sub_82BBF3F0, sub_82BAECF0, sub_82BC4D98, sub_82BC37B8, sub_82BAD1D8, sub_82BAE500
+# (siblings in the 0x82BC4/0x822D8/0x82BB3/0x82BAD/0x82BBF/0x82BAE/0x82BC4/0x82BC3/0x82BAD/0x82BAE clusters). The
+# object's class (obj, ->36 = a value, ->40 = a value, ->44 = a float, a particular structure, a construct object, a
+# particular size / a particular allocation, a particular value / a particular state) and the value's meaning (a
+# value, a particular value, a particular size / a particular allocation) aren't resolvable, so the name states the
+# mechanism: a construct process (with a float-to-int conversion and a complex computation) ((if a value (obj->40, a
+# value, a particular value) is == a value (obj->36, a value, a particular value), a particular match / a particular
+# state) perform a construct (a float-to-int conversion, a particular conversion / a particular operation, a complex
+# computation, a particular computation / a particular operation, a particular size / a particular allocation, calling
+# sub_82BBF648, a complex computation, a particular computation / a particular operation, a particular size / a
+# particular allocation), and (otherwise) take one path (a no-op / a return, a particular state, a particular result,
+# a particular size / a particular allocation)). The "FloatToInt" refers to the float-to-int conversion (a
+# float-to-int conversion, a particular conversion / a particular operation, a particular value / a particular state,
+# a particular size / a particular allocation).
+[functions."0x82BAE368"]
+name = "ProcessFloatToInt_82BAE368"
+
+
+# A process (a process, with a loop and a check, the sibling of ProcessObject_82BC2860 / StringCopyN_822CD828, the
+# caller of StringCopyN_822CD828): do a process (a process, a particular process, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a loop) loop over a range (a loop, a particular loop / a
+# particular range, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, over a value (r11, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular loop / a
+# particular range, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a check) check a value (a value, a
+# particular value, a
+# particular size / a
+# particular allocation, r3->42, a
+# particular value, a
+# particular state / a
+# particular result), and (in a call) call a function (a
+# call, a
+# particular call / a
+# particular function, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, via an indirect call, bctrl, on a
+# value (r10, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular call / a
+# particular function, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result).
+
+# Args: obj (r3, r31, ->8 = a field, a value, ->12 = a field, a value, ->32 = a field, a value, ->36 = a field, a
+# value, a
+# particular object), a (r5, r28, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), b (r6, r29, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), c (r7, r27, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), d (r8, r26, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), (more). It does a process (a
+# process, a
+# particular process, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result). In the loop, it loops over a range (a
+# loop, a
+# particular loop / a
+# particular range, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, over a value (r11, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular loop / a
+# particular range, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result). In the check, it checks a value (a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, r3->42, a
+# particular value, a
+# particular state / a
+# particular result). In the call, it calls a function (a
+# call, a
+# particular call / a
+# particular function, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, via an indirect call, bctrl, on a
+# value (r10, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular call / a
+# particular function, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result). So it's a "process (a
+# process, with a
+# loop and a
+# check: do a process (a process, a
+# particular process, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a loop) loop over a range (a loop, a
+# particular loop / a
+# particular range, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, over a value (r11, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular loop / a
+# particular range, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a check) check a value (a value, a
+# particular value, a
+# particular size / a
+# particular allocation, r3->42, a
+# particular value, a
+# particular state / a
+# particular result), and (in a call) call a function (a
+# call, a
+# particular call / a
+# particular function, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, via an indirect call, bctrl, on a
+# value (r10, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular call / a
+# particular function, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result))" routine (a process routine, part of the 0x82BAD cluster, a sibling of
+# ProcessObject_82BC2860 and StringCopyN_822CD828, a caller of StringCopyN_822CD828). 175
+# lines, 1 callee (StringCopyN_822CD828). 1 caller: sub_82BC2860 (a
+# process, which calls this to do the process, a
+# particular size / a
+# particular allocation, a
+# particular operation). The object's class (obj, r31, ->8 = a field, a value, ->12 = a field, a value, ->32 = a
+# field, a value, ->36 = a field, a value, a
+# particular object, a
+# particular value /
+# a particular state) and the value's meaning (a, r28, a value, a
+# particular value, a
+# particular size / a
+# particular allocation; b, r29, a value, a
+# particular value, a
+# particular size / a
+# particular allocation; c, r27, a value, a
+# particular value, a
+# particular size / a
+# particular allocation; d, r26, a value, a
+# particular value, a
+# particular size / a
+# particular allocation) aren't resolvable, so the name states the mechanism: a process (with a
+# loop and a
+# check) (do a process (a process, a
+# particular process, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a loop) loop over a range (a loop, a
+# particular loop / a
+# particular range, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, over a value (r11, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular loop / a
+# particular range, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a check) check a value (a value, a
+# particular value, a
+# particular size / a
+# particular allocation, r3->42, a
+# particular value, a
+# particular state / a
+# particular result), and (in a call) call a function (a
+# call, a
+# particular call / a
+# particular function, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, via an indirect call, bctrl, on a
+# value (r10, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular call / a
+# particular function, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result)). The "82BAD8A8" refers to the address (a
+# particular address, a
+# particular size / a
+# particular allocation).
+[functions."0x82BAD8A8"]
+name = "ProcessObject_82BAD8A8"
+
+
+# Returns its input pointer advanced by a fixed 620-byte offset (r3 = r3 + 620; return). A tiny
+# leaf accessor (5 lines) with no calls of its own; the constant 620 suggests it is a "get the field
+# at offset 620" helper for a large struct. No direct callers found in the recompiled code (likely
+# reached via a vtable / function-pointer table). Part of the 0x82BAA cluster (sibling of
+# AdvanceAndDispatch_82BAA4A8 / AdvanceRanges_82BAA6F0).
+[functions."0x82BAA140"]
+name = "PointerOffset620_82BAA140"
+
+
+# Transforms a packed bit-field value and writes the result back. It takes a base object (obj) and a set
+# of packed parameters (a..e). It first makes a vtable call (obj->0->4) to run the object's pre-handler, then
+# reinterprets the base as a larger enclosing struct (obj - 76) and works on a sub-record at (obj - 76) + 48.
+# It unpacks the bit fields (r28 << 1 to align, then r27 << 5 to expand a 3-bit field into an 8-bit value,
+# a low-bit test r5 & 1), clears the target words (store 0 to r9->0 / r9->8), and repacks the transformed
+# fields. This is a "decode / re-encode a bit-packed descriptor" routine for the 0x82BAF bit-transform
+# cluster. Reached only via a vtable / function-pointer table (no direct callers in the recompiled code).
+# 87 lines, 0 direct callees (one indirect vtable call). No direct callers found in the recompiled code
+# (likely reached via a vtable / function-pointer table).
+[functions."0x82BAFA00"]
+name = "ProcessBitTransform_82BAFA00"
+
+
+# Sets a single flag bit on a byte field, guarded by a vtable pre-handler. It takes a base object (obj) and
+# a value (a). It first runs the object's handler (vcall through obj->0->4), then reads the flag byte at
+# (obj + 48) + 16, sets bit 2 (value 4) when the low byte of (a) is non-zero (a & 0xFF, then OR'd in as
+# r8 << 2 masked to just bit 2), and writes the byte back. This is the "toggle on one bit in a packed
+# descriptor" routine, the lighter sibling of ProcessBitTransform_82BAFA00 in the same 0x82BAF bit-field
+# cluster. Reached only via a vtable / function-pointer table (no direct callers in the recompiled code).
+# 33 lines, 0 direct callees (one indirect vtable call). No direct callers found in the recompiled code
+# (likely reached via a vtable / function-pointer table).
+[functions."0x82BAFA98"]
+name = "SetFlagBit_82BAFA98"
+
+
+# Processes a nested object through a pair of vtable calls. It takes a base object (obj) and parameters
+# (a, b). It first dereferences the sub-object at obj->4 and runs its method at offset 32 (vcall through
+# obj->4->0->32), then reads a further nested pointer (obj->4->0) and runs the method at offset 36 (vcall
+# through ->0->36). The rest of the 320-line body walks the returned structure (reading fields at +76 and
+# other offsets) and forwards the work to DispatchVcallSequence7_82BB0148 for the per-type handler chain.
+# This is the "dispatch a nested object through its two primary vtable slots" routine for the 0x82BAF
+# object-processing cluster (sibling of ProcessBitTransform_82BAFA00 / SetFlagBit_82BAFA98 / DispatchVcall
+# Sequence7_82BB0148). Reached only via a vtable / function-pointer table (no direct callers in the
+# recompiled code).
+# 320 lines, 1 callee (DispatchVcallSequence7_82BB0148). No direct callers found in the recompiled code
+# (likely reached via a vtable / function-pointer table).
+[functions."0x82BAFCE0"]
+name = "ProcessVcallObject_82BAFCE0"
+
+
+# Processes one element of a 16-byte array after a flag check. It takes a base object (obj) and an index
+# (a). It computes the element address (obj->8 + index * 16), reads the element's header word, and tests
+# bit 30 (a "present / enabled" flag); if clear it bails early (loc_82BB0A2C). When set it re-derives the
+# element's payload offset (a *3 then *8 scaling of the element's offset field, plus obj->16 as a base)
+# and dispatches the element through a vtable (vcall through obj->4->0->32). The remaining ~150 lines handle
+# the per-element follow-up. This is the "visit one entry of a 16-byte element table" routine for the 0x82BB0
+# array-processing cluster. Reached only via a vtable / function-pointer table (no direct callers in the
+# recompiled code). 181 lines, 0 direct callees (one indirect vtable call). No direct callers found in the
+# recompiled code (likely reached via a vtable / function-pointer table).
+[functions."0x82BB0910"]
+name = "ProcessArrayElement_82BB0910"
+
+
+# A processor that invokes a virtual method, checks the result against a count, and processes the value. It
+# takes a context (a: a vtable pointer at a->0, a descriptor at a - 72), a value (b), a count (c), and a flag
+# (d). It invokes a virtual method through a->0 (reading the method at a->0->4 and bctrl-ing into it). It then
+# validates the count: when c is below 1, or when c does not exceed the result's capacity byte (result->42), it
+# bails out. When the flag (d & 0xFF) is non-zero it loads a nested descriptor (a - 72 -> 0 -> 116) and processes
+# the value through it (driving FloatToIntProcess_82284810 for the float / int conversion). This is the "call
+# this virtual method, validate the count against the result's capacity, and process the value" routine for the
+# 0x82BAF value-check cluster, reached only via a vtable / function-pointer table (no direct callers in the
+# recompiled code). Part of the 0x82BAF value-check cluster (sibling of FloatToIntProcess_82284810 /
+# ProcessAndDispatchValue_822848B8). 208 lines, 1 callee. No direct callers found in the recompiled code (likely
+# reached via a vtable / function-pointer table).
+[functions."0x82BAF540"]
+name = "ProcessAndCheckCount_82BAF540"
+
+
+# A processor that invokes a virtual method, then walks an array of 16-bit elements. It takes a context (a: a
+# vtable chain at a->4, an element-base at a->8) and an index (b). It invokes a virtual method through a->4 (reading
+# the method at a->4->0->44 and bctrl-ing into it). It then forms the element pointer (base + (index << 5) - the
+# 32-byte stride), reads the element's bounds (element->16) and payload head (element->28). When the bounds are
+# non-zero it walks the payload - a run of 16-bit pairs (element->4, element->6), each pair carrying a sign bit and
+# a value - accumulating / processing them in a loop. This is the "call this virtual method and walk this index's
+# 16-bit element array" routine for the 0x82BB0 array cluster, reached only via a vtable / function-pointer table
+# (no direct callers in the recompiled code). Part of the 0x82BB0 array cluster (sibling of ProcessAndCheckCount
+# _82BAF540). 146 lines, 0 callees. No direct callers found in the recompiled code (likely reached via a vtable /
+# function-pointer table).
+[functions."0x82BB0028"]
+name = "ProcessAndWalkArray_82BB0028"
+
+
+# A processor that, when a new size exceeds the current, expands and clears the indexed region. It takes a
+# structure (a: a current size at a->36, a pointer at a->40) and a new size (b). When the new size (b) is at or
+# below the current size (a->36) it does nothing. Otherwise it computes a 4-byte size (b << 2), obtains the
+# singleton (GetSingleton_82BA8718), processes the indexed region (ProcessIndexedRegion2_82BA8F18 with a tag of 141),
+# and clears the newly added memory (MemSet_SdkRuntime_82CA3190, zero-filling). This is the "grow this indexed
+# region to the new size and zero the new space" routine for the 0x82BBF region cluster, used by 10 callers (the
+# 0x82BAE/0x82BAF/0x82BB2/0x82BB3/0x82BBC/0x82BBD/0x82BC4/0x82BE7 range). Part of the 0x82BBF region cluster
+# (sibling of ProcessIndexedRegion_82BA9068 / ProcessIndexedRegion2_82BA8F18). 88 lines, 5 callees. 10 callers.
+[functions."0x82BBF648"]
+name = "ProcessAndClearIndexedRegion_82BBF648"
+
+
+# A processor that pulls an element, stores it into an 8-byte slot, and reads back the typed field. It takes a
+# structure (a: a buffer end at a->8, a source at a->16). It reads the source's element (a->16->92) and accesses the
+# first element (ElementAccess_821E1498(..., 1)). It copies the element's two 32-bit words into the buffer (a->8->0
+# and a->8->4) and advances the buffer end by 8 bytes. It then reads back the newly stored value as a typed field
+# (GetTypedField_822AF338(a, -1)) and steps the buffer end back. This is the "store this element into the buffer and
+# read it back typed" routine for the 0x82BB1 element-store cluster, used by 10 callers (sub_821D2C70 and the
+# 0x82BB1/0x82BB2/0x82BB3/0x82BB6/0x82BB7/0x82BB9 range). Part of the 0x82BB1 element-store cluster (sibling of
+# ElementAccess_821E1498 / GetTypedField_822AF338). 67 lines, 2 callees. 10 callers.
+[functions."0x82BB1E58"]
+name = "ProcessAndStoreElement_82BB1E58"
+
+
+# A processor that compares the two floats, and when the first exceeds the second, copies the three floats from the source.
+# It takes a destination (a: a float at a->0, a limit at a->12) and a source (b: three floats at b->0, b->4, and b->8). It
+# reads the float (a->0) and the limit (a->12). When a->0 exceeds a->12, it copies the three floats from the source (a->0 =
+# b->0, a->4 = b->4, a->8 = b->8) and continues. This is the "compare these two floats, and when the first exceeds the
+# second, copy the three floats from the source" routine for the 0x82BB4 float-copy cluster, used by 3 callers (sub_82819130,
+# sub_82BB43A0, and sub_82BB7B68). Part of the 0x82BB4 float-copy cluster. 181 lines, 0 callees. 3 callers.
+[functions."0x82BB42A0"]
+name = "ProcessAndCopyFloats_82BB42A0"
+
+
+# A processor that, when the condition is met, performs the processing (the specific case and the hash insertion). It takes
+# a structure (a: a limit at a->8, a value at a->12, with a type at a->12->4). It reads a->12 and a->8. When a->12 exceeds
+# a->8, or a->12 equals the default value, or a->12->4 is 2, it takes the specific path. Otherwise it performs the processing
+# (sub_82BC68F0, with a, 1, and the .data pointer->8), and, for the specific case, it reads the typed field (GetTypedField
+# _822AF338) and inserts the hash entry (InsertHashEntry_8219CDA8). This is the "when this condition is met, perform the
+# processing (the specific case and the hash insertion)" routine for the 0x82BB6 specific-case cluster, called only via the
+# vtable (0 direct callers). Part of the 0x82BB6 specific-case cluster (sibling of GetTypedField_822AF338 /
+# InsertHashEntry_8219CDA8). 125 lines, 3 callees. 0 direct callers (vtable dispatch).
+[functions."0x82BB6BC0"]
+name = "ProcessAndDispatchSpecificCase_82BB6BC0"
+
+
+# A processor that performs the linear search and, when found, stores the value (the result). It takes a value (a), a value (b),
+# a structure (c: a field at c->0), and a structure (d: a field at d->0). It reads c->0 and computes the value (c->0 >> 5). It
+# performs the linear search (LinearSearch_82284448, on b and the computed value). When the result is non-zero (found), it stores
+# the value (d->0 = r3->4, c->0 = r3->0) and returns 1. Otherwise it returns 0. This is the "perform this linear search and, when
+# found, store the value (the result)" routine for the 0x82BAC search-store cluster, called only via the vtable (0 direct callers).
+# Part of the 0x82BAC search-store cluster (sibling of LinearSearch_82284448). 64 lines, 1 callee. 0 direct callers (vtable
+# dispatch).
+[functions."0x82BAC8A8"]
+name = "ProcessAndSearchAndStoreResult_82BAC8A8"
+
+
+# A function that zeroes 16 bytes. It takes a pointer and stores 0 into the first 16 bytes (four 32-bit words at offsets 0, 4, 8, and 12). This
+# is the "zero these 16 bytes" routine, a leaf function (no callees), called only via the vtable (0 direct callers), part of the 0x82BA9 zero
+# cluster. 16 lines. 0 callees. 0 direct callers (vtable dispatch).
+[functions."0x82BA9280"]
+name = "Zero16Bytes_82BA9280"
+
+
+# A processor that handles a value type. It takes a structure (a: fields at a->8 and a->12). It reads a->8 (a base) and a->12 (an index); when the
+# index is out of range (at least a->8) or equals a .data sentinel it takes one path. Otherwise it reads the element's type field (at +4) and when
+# it equals 2 it takes another path. It then performs substantial processing including storing elements (ProcessAndStoreElement_82BB1E58), hashing
+# strings (HashCstring_82188CF0 and InsertHashEntry_8219CDA8), reading typed fields (GetTypedField_822AF338), and looping and dispatching
+# (ProcessLoopDispatch_8227B8B8). This is the "handle this value type" routine, called only via the vtable (0 direct callers), part of the 0x82BB6
+# type-handling cluster. 632 lines. 8 callees (sub_82BC68F0, sub_82BC6A18, sub_82BCBDC8, ProcessAndStoreElement, HashCstring, InsertHashEntry,
+# GetTypedField, ProcessLoopDispatch). 0 direct callers (vtable dispatch).
+[functions."0x82BB6CA0"]
+name = "ProcessAndHandleType_82BB6CA0"
+
+
+# A processor that initializes a string. It takes a result structure (a: a pointer at a->0 and two 16-bit fields at a->4 and a->6) and a source
+# structure (b: a string pointer at b->0 and a length at b->4). It clears a->0, a->4, and a->6. When the length (b->4) is non-zero it reads the
+# string pointer (b->0); when the pointer is zero it uses a .data default string. It then inserts the string into the result structure
+# (StringInsert_82BA8850). This is the "initialize this string" routine, part of the 0x82BA8 string cluster. 60 lines. 1 callee (StringInsert). 6
+# callers.
+[functions."0x82BA8798"]
+name = "ProcessAndInitializeString_82BA8798"
+
+
+# A processor that handles a value type. It takes a structure (a: fields at a->8 and a->12). It reads a->8 (a base) and a->12 (an index); when the
+# index is out of range (at least a->8) it uses a .data sentinel element. It reads the element's type field (at +4); when the type equals 4 it takes
+# one path. Otherwise it processes the element (sub_82BCBDC8) and, when that succeeds, performs substantial processing including storing elements
+# (ProcessAndStoreElement_82BB1E58), hashing strings (HashCstring_82188CF0), reading typed fields (GetTypedField_822AF338), processing indexed
+# regions (ProcessIndexedRegion_82BA9068 and ProcessIndexedRegion2_82BA8F18), copying strings (StringCopyN_822CD828 and FindChar_82CA3980), and
+# looping and dispatching (ProcessLoopDispatch_8227B8B8). This is the "handle this value type" routine (third form), called only via the vtable (0
+# direct callers), part of the 0x82BB6 type-handling cluster. 419 lines. 11 callees. 0 direct callers (vtable dispatch).
+[functions."0x82BB68D8"]
+name = "ProcessAndHandleType3_82BB68D8"
+
+
+# A processor that swaps and processes the data. It takes values (a, b, c), a structure (d: a field at d->0), and another structure (e: a field at e->0). It reads
+# d->0 and e->0; when d->0 is less than e->0 it swaps the values (storing e->0 into d->0 and d->0 into e->0) and calls sub_82A5A588 (with d + 4 and e + 4). It then
+# performs further processing. This is the "swap and process this data" routine, part of the 0x82B83 swap cluster. 113 lines. 1 callee (sub_82A5A588). 1 caller
+# (sub_82A5A068).
+[functions."0x82B834D0"]
+name = "ProcessAndSwapAndProcess_82B834D0"
+
+
+# A processor that computes a length and processes the data. It takes a structure (a: fields at a->4 and a->6, both halfwords), a pointer (b), and a length (c, or -1).
+# When c is -1 it computes the string length of b (scanning for the null terminator). It then reads a->4 (a halfword) and a->6 (a halfword); when a->4 + c is less than or
+# equal to a->6 it performs further processing (ProcessIndexedRegion_82BA9068 and ProcessIndexedRegion2_82BA8F18). It gets a singleton (GetSingleton_82BA8718) and copies
+# memory (MemCpy_SdkRuntime_82CA2C60). This is the "compute this length and process the data" routine, part of the 0x82BA8 process cluster. 158 lines. 4 callees
+# (ProcessIndexedRegion, ProcessIndexedRegion2, GetSingleton, MemCpy_SdkRuntime). 5 callers.
+[functions."0x82BA89B0"]
+name = "ProcessAndComputeLengthAndProcess_82BA89B0"
+
+
+# A processor that processes and clears the fields. It takes a structure (a: fields at a->0, a->4, and a->6, the last two halfwords). It reads a->0 (a pointer); when
+# the pointer is non-zero it reads a->6 (a halfword) and adds 1, gets a singleton (GetSingleton_82BA8718, with the incremented value), and processes the indexed region
+# (ProcessIndexedRegion_82BA9068, with the pointer and the incremented value). It then clears a->6, a->4, and a->0 to 0. This is the "process and clear these fields"
+# routine, part of the 0x82BA8 process cluster. 50 lines. 2 callees (GetSingleton, ProcessIndexedRegion). 7 callers.
+[functions."0x82BA8800"]
+name = "ProcessAndClearFields_82BA8800"
+
+
+# A processor that checks and processes the data (fourth form). It takes a structure (a: fields at a->8 and a->12). It reads a->12 (a pointer) and a->8 (a limit); when
+# a->12 is less than a->8 and not equal to a .data descriptor, it reads the pointer's +4 field (a type). When the type is not 2 it calls sub_82BC68F0 (with a, 1, and a
+# field from a .data descriptor). It then stores the element (ProcessAndStoreElement_82BB1E58), appends a node (ProcessAndAppendNode_82BC5CD8), grows the region
+# (GrowRegion_823F9AE0), gets a typed field (GetTypedField_822AF338), processes the indexed region (ProcessIndexedRegion_82BA9068) and stores an indexed value
+# (ProcessAndStoreIndexedValue_82BC5F48), and serializes (Serialize_82CA3EB8). It gets a singleton (GetSingleton_82BA8718). This is the "check and process this data" routine
+# (fourth form), part of the 0x82BB7 check cluster. 228 lines. 9 callees. 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or
+# indirect entry).
+[functions."0x82BB7700"]
+name = "ProcessAndCheckAndProcess4_82BB7700"
+
+
+# A setter that sets a field (offset 8). It takes a structure (a) and a value (b). It stores b into a->8. This is a simple setter that sets the +8 field of a structure, part of the 0x82BAC set
+# cluster. 8 lines. 0 callees (leaf function). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82BACA60"]
+name = "SetField8_82BACA60"
+
+
+# A processor that stores and initializes the data. It takes a structure (a: a field at a->4), a value (b), and a value (c). It stores an element (ProcessAndStoreElement_82BB1E58, with a->4). It then
+# initializes a string (ProcessAndInitializeString_82BA8798, with a local buffer and a->8). It then computes a length and processes (ProcessAndComputeLengthAndProcess_82BA89B0, with the local buffer
+# and c and -1). It then reads a->4 (a pointer) and performs further processing (reading the pointer's +8, +12, and +16 fields and computing their differences). This is the "store and initialize
+# this data" routine, part of the 0x82BB1 process cluster. 582 lines. 15 callees (including ProcessAndStoreElement, ProcessAndInitializeString, and ProcessAndComputeLengthAndProcess). 0 callers
+# (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82BB1420"]
+name = "ProcessAndStoreAndInitialize_82BB1420"
+
+
+# A processor that reads and processes the data. It takes a structure (a: fields at a->8 and a->12). It reads a->8 (a value) and a->12 (a pointer). When a->12 is less than a->8 and not a specific
+# .data constant, it reads a->12's +4 field (a type). When the type is 2 it skips further processing. Otherwise it processes (sub_82BC68F0, with a, 1, and a .data pointer's +8 field). This is the
+# "read and process this data" routine, part of the 0x82BB7 process cluster. 667 lines. 13 callees (including ProcessAndStoreElement, ProcessAndReadOrResolveValue, and ProcessLoopDispatch). 0 callers
+# (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82BB7100"]
+name = "ProcessAndReadAndProcess_82BB7100"
+
+
+# A processor that indexes a region and processes the data. It takes a structure (a: fields at a->36 and a->40) and a value (b). It reads a->36 (a count). When b is greater than the count it gets a singleton
+# (GetSingleton_82BA8718), processes an indexed region (ProcessIndexedRegion2_82BA8F18, with b times 8, a, a .data pointer, and 141), zeroes memory (MemSet_SdkRuntime_82CA3190), and copies (MemCpy_SdkRuntime_82CA2C60).
+# This is the "index this region and process the data" routine, part of the 0x82BAF process cluster. 88 lines. 5 callees (including ProcessIndexedRegion2, MemSet, and MemCpy). 5 callers (sub_82BAF110,
+# sub_82BABEE8, sub_82BAC4E8, sub_82BAC658, and sub_82BAC750).
+[functions."0x82BAF4B0"]
+name = "ProcessAndIndexRegionAndProcess_82BAF4B0"
+
+
+# A processor that recurses and processes the data (second form). It takes a value (a), a value (b), a value (c), and a value (d). It reads two .data pointers (r27 and r29). It computes (r29 minus r27)
+# shifted right by 3. When the result is greater than 32 it iterates: for each element it processes (sub_82A59C98, with a local buffer, a, b, and d) and recurses (sub_82B830E8, with itself). This is the
+# "recurse and process this data" routine (second form), part of the 0x82B83 process cluster. 278 lines. 5 callees (sub_82A59C98, itself, sub_82B833E0, sub_82B83598, and sub_82B83728). 1 caller (sub_82B80D70).
+[functions."0x82B830E8"]
+name = "ProcessAndRecurseAndProcess2_82B830E8"
+
+
+# A processor that sorts and processes the data. It takes a value (a), a value (b), a structure (c: field at c->0), and an end pointer (d). It reads c (a pointer) and d (an end pointer). When c is not equal
+# to d it iterates over the range: for each element it reads the element's +0 field (a key) and compares it to the next element's +0 field. When the first key is greater than or equal to the second it stores
+# the element's +8 into a local. It then processes (sub_82B83808). This is the "sort and process this data" routine, part of the 0x82B83 process cluster. 134 lines. 1 callee (sub_82B83808). 1 caller
+# (ProcessAndRecurseAndProcess2_82B830E8).
+[functions."0x82B833E0"]
+name = "ProcessAndSortAndProcess_82B833E0"
+
+
+# A processor that reads and masks the data. It takes a value (a). It reads or resolves a value (ProcessAndReadOrResolveValue_82BC6F00, with a). When the result is greater than 255 it performs further
+# processing (sub_82BC67F0, with a, 1, and a .data pointer). It then returns the result masked to its low 8 bits (a byte). This is the "read and mask this data" routine, part of the 0x82BB6 process
+# cluster. 54 lines. 2 callees (ProcessAndReadOrResolveValue and sub_82BC67F0). 2 callers (sub_82BB62E0 and sub_82BB5EB0).
+[functions."0x82BB6880"]
+name = "ProcessAndReadAndMask_82BB6880"
+
+
+# A processor that performs a vcall and processes the data (fourth form). It takes a structure (a: fields at a->4 and a->32), a value (b), a value (c), and a value (d). It reads a->4 (a pointer) and the
+# pointer's +0 field. It performs a vcall via the +0 field's +32 entry (bctrl). When b is non-zero it performs another vcall via the +0 field's +76 entry (bctrl). It then checks the pointer's low 8 bits
+# (a flag); when the flag is non-zero it reads a->32. This is the "perform a vcall and process this data" routine (fourth form), part of the 0x82BB0 process cluster. 152 lines. 0 callees (leaf function).
+# 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82BB0458"]
+name = "ProcessAndVcallAndProcess4_82BB0458"
+
+
+# An initializer that initializes and processes the data. It takes a structure (a: fields at a->0, a->4, ..., a->80). It zeros out the first 88 bytes of the structure (a->0 through a->80). It then reads
+# a .data pointer's +28560 field (a counter) and increments it by 64. This is the "initialize and process this data" routine, part of the 0x82BA8 process cluster. 88 lines. 0 callees (leaf function).
+# 1 caller (sub_82BA8BB0).
+[functions."0x82BA8CE8"]
+name = "InitializeAndProcess_82BA8CE8"
+
+
+# A processor that compares and processes the data. It takes a value (a) and a value (b). It compares the strings (CompareStringsAndReturnValue_82BA8B40, with a and b). When the comparison
+# returns zero it reads b's +0 field (a pointer) and the +4 field (a length, a halfword); when the pointer is zero it uses a .data pointer (3224). This is the "compare and process this data"
+# routine, part of the 0x82BA8 process cluster. 69 lines. 2 callees (CompareStringsAndReturnValue and StringInsert). 9 callers (sub_82BBCD00, sub_82BBD7B8, sub_82BAA048, sub_82BC0D30,
+# sub_82BB0D78, sub_82BAA238, ProcessAndReadAndProcess_82BB7100, sub_82BB1398, and sub_82BAA310).
+[functions."0x82BA8AC8"]
+name = "ProcessAndCompareAndProcess_82BA8AC8"
+
+
+# A processor that performs a vcall and clears the data. It takes a structure (a: field at a->4). It reads a->4 (a pointer). When the pointer is non-zero it reads a .data pointer's +19052 field
+# (another pointer) and performs a vcall (bctrl). It then stores 0 into a->4. This is the "perform a vcall and clear this data" routine, part of the 0x82BBC process cluster. 47 lines. 0 callees
+# (leaf function). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82BBC828"]
+name = "ProcessAndVcallAndClear_82BBC828"
+
+
+# A processor that computes and processes the data (twenty-second form). It takes a structure (a: fields at a->8 and a->12). It computes (a->8 minus a->12) shifted right by 3 and calls sub_82BB5C30 (with a and the result). It then reads a->12
+# (a pointer); when the pointer is less than a->8 and not equal to a .data pointer (1876) it reads the pointer's +4 field. This is the "compute and process this data" routine (twenty-second form), part of the 0x82BB4 process cluster. 191
+# lines. 4 callees (ProcessAndGetPointerAndProcess, sub_82BB5BD0, sub_82BB5C30, and sub_82BC6A18). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82BB49E0"]
+name = "ProcessAndComputeAndProcess22_82BB49E0"
+
+
+# A processor that dispatches and processes the data (twelfth form). It takes a value (a). It dispatches and processes (ProcessAndDispatchAndProcess_82BC6558, with a and 12). It then hashes a string (ProcessAndHashString2_821E1408, with a,
+# -10000, and a .data pointer (-9996)). It then dispatches by type (ProcessAndDispatchByType_82BC5FF0, with a and -2). This is the "dispatch and process this data" routine (twelfth form), part of the 0x82BB5 process cluster. 58 lines.
+# 3 callees (ProcessAndDispatchAndProcess, ProcessAndDispatchByType, and ProcessAndHashString2). 5 callers (sub_82BB5388, sub_82BB18A0, sub_82BB5130, sub_82BB5260, and ProcessAndComputeAndProcess22_82BB49E0).
+[functions."0x82BB5C30"]
+name = "ProcessAndDispatchAndProcess12_82BB5C30"
+
+
+# A processor that vcalls and processes the data (nineteenth form). It takes a structure (a: fields at a->380 and a->492) and a value (b). It processes (sub_82BABEE8, with a+380). It then reads a->492 (a pointer) and +80 (a method pointer) and performs a virtual call (with a+492, b, 128, and 1). This is the "vcall and process this data" routine (nineteenth form), part of the 0x82BA9 process cluster. 55 lines. 1 callee (sub_82BABEE8). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82BA9870"]
+name = "ProcessAndVcallAndProcess19_82BA9870"
+
+
+# A processor that serializes and processes the data. It takes a structure (a: fields at a->32 and a->40), a value (b), a value (c), a value (d), and a value (e). It reads a->40 (a value) and a->32 (a pointer) and computes (a->40 shifted left by 2 and aligned to 4 bytes, plus a->32). It then processes (ProcessAndIndexRegionAndProcess_82BAF4B0, with a+32 and other values) and serializes (Serialize_82CA3EB8). This is the "serialize and process this data" routine, part of the 0x82BAB process cluster. 416 lines. 6 callees (GetSingleton, ProcessAndClearIndexedRegion, ProcessAndIndexRegionAndProcess, ProcessIndexedRegion2, Serialize, and sub_82BAC750). 1 caller (ProcessAndVcallAndProcess19_82BA9870).
+[functions."0x82BABEE8"]
+name = "ProcessAndSerializeAndProcess_82BABEE8"
+
+
+# A processor that computes and processes the data (twenty-eighth form). It takes a structure (a: fields at a->36, a->40, and a->44) and a value (b). It reads a->36 (a value) and a->40 (a value); when they are equal it reads a->44 (a float) and computes (a->44 times a->36, converted to a 32-bit integer). It then processes (ProcessAndIndexRegionAndProcess_82BAF4B0, with the result and b). This is the "compute and process this data" routine (twenty-eighth form), part of the 0x82BAC process cluster. 100 lines. 1 callee (ProcessAndIndexRegionAndProcess). 2 callers (ProcessAndSerializeAndProcess_82BABEE8 and sub_82BAC4E8).
+[functions."0x82BAC750"]
+name = "ProcessAndComputeAndProcess28_82BAC750"
+
+
+# A processor that initializes and processes the data. It processes (sub_82BB9068, with 0) and returns 1. This is the "initialize and process this data" routine, part of the 0x82BB8 process cluster. 28 lines. 1 callee (sub_82BB9068). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82BB89B0"]
+name = "ProcessAndInitializeAndProcess_82BB89B0"
+
+
+# A processor that grows and processes the data (second form). It takes a structure (a: fields at a->8, a->12, and a->16), a value (b), a value (c), and a value (d). It reads a->16 (a pointer) and +92 (a pointer). It then accesses an element (ElementAccess_821E1498, with a->16 + 92) and computes (a->8 minus a->12) shifted right by 3. It then grows the buffer (GrowAndZeroBuffer_82BC55B8, with other values). This is the "grow and process this data" routine (second form), part of the 0x82BB8 process cluster. 158 lines. 4 callees (CompareIndexedPointers, ElementAccess, GrowAndZeroBuffer, and ProcessAndStoreElement2). 2 callers (sub_82BB9600 and sub_82BB9068).
+[functions."0x82BB8F50"]
+name = "ProcessAndGrowAndProcess2_82BB8F50"
+
+
+# A processor that dispatches and processes the data (eighteenth form). It takes a structure (a: fields at a->8 and a->12) and a value (b). It reads a->12 (a pointer) and a->8 (a pointer); when a->12 is less than a->8 it uses a .data pointer (1876) instead. It then reads the pointer's +4 field (a value); when the value is not 4 it processes (sub_82BCBDC8, with a) and continues. This is the "dispatch and process this data" routine (eighteenth form), part of the 0x82BB9 process cluster. 796 lines. 24 callees (GetSingleton, GetTypedField, HashCstring, IncrementAndCheckThreshold, InsertHashEntry, MemMove_SdkRuntime, ProcessAndCheckAndProcess2, ProcessAndCheckAndProcess3, ProcessAndDispatchValue, ProcessAndHashString2, ProcessAndReadConvertedValue, ProcessAndStoreElement2, ProcessAndStoreElement, ProcessIndexedRegion2, ProcessIndexedRegion, ProcessLoopDispatch, ProcessAndGrowAndProcess2, and 8 sub_ functions). 2 callers (sub_82BB89D8 and ProcessAndInitializeAndProcess_82BB89B0).
+[functions."0x82BB9068"]
+name = "ProcessAndDispatchAndProcess18_82BB9068"
+
+
+# A processor that inserts and processes the data (second form). It takes a structure (a: fields at a->8, a->12, and a->68) and a value (b). It reads a->12 (a pointer) and a->8 (a pointer) and computes (a->8 minus a->12) shifted right by 3. It then inserts a hash entry (InsertHashEntry_8219CDA8, with a .data pointer (3488), the result, and other values). It then dispatches the value (DispatchValue_821CF230, with a->68 and a->8 - 8). This is the "insert and process this data" routine (second form), part of the 0x82BB9 process cluster. 137 lines. 5 callees (CompareIndexedPointers, DispatchValue, GrowAndZeroBuffer, InsertHashEntry, and SearchElementArray). 2 callers (sub_82BB9600 and ProcessAndDispatchAndProcess18_82BB9068).
+[functions."0x82BB9B60"]
+name = "ProcessAndInsertAndProcess2_82BB9B60"
+
+
+# A processor that inserts and processes the data (third form). It takes a structure (a: fields at a->8, a->12, and a->68). It reads a->8 (a pointer) and a->12 (a pointer) and computes (a->8 minus a->12) shifted right by 3. It then inserts a hash entry (InsertHashEntry_8219CDA8, with a .data pointer (3488), the result, and other values). It then dispatches the value (DispatchValue_821CF230, with a->68 and a->8 - 8). This is the "insert and process this data" routine (third form), part of the 0x82BB9 process cluster. 124 lines. 4 callees (DispatchValue, GetTypedField, GrowAndZeroBuffer, and InsertHashEntry). 2 callers (sub_82BB9600 and ProcessAndDispatchAndProcess18_82BB9068).
+[functions."0x82BB9C50"]
+name = "ProcessAndInsertAndProcess3_82BB9C50"
+
+
+# A processor that computes and processes the data (twenty-ninth form). It takes a structure (a: fields at a->36, a->40, and a->44) and a value (b). It reads a->36 (a value) and a->40 (a value); when they are equal it reads a->44 (a float) and computes (a->44 times a->36, converted to a 32-bit integer). It then clears the indexed region (ProcessAndClearIndexedRegion_82BBF648, with the result and b). This is the "compute and process this data" routine (twenty-ninth form), part of the 0x82BBA process cluster. 94 lines. 1 callee (ProcessAndClearIndexedRegion). 3 callers (ProcessAndDispatchAndProcess18_82BB9068, sub_82BB9600, and sub_82BBE220).
+[functions."0x82BBA130"]
+name = "ProcessAndComputeAndProcess29_82BBA130"
+
+
+# A processor that erases and processes the data. It takes a structure (a: fields at a->0 and a->4) and a value (b). It reads a->4 (a halfword length) and iterates the string (from a->0), searching for byte 46 (the period character). When the byte is found it erases it from the buffer (EraseByteFromBuffer_82BA8938, with a, b, and the index). This is the "erase and process this data" routine, part of the 0x82BAA process cluster. 85 lines. 2 callees (EraseByteFromBuffer and ProcessAndComputeLengthAndProcess). 2 callers (sub_823FC460 and sub_82BC3430).
+[functions."0x82BAA3D0"]
+name = "ProcessAndEraseAndProcess_82BAA3D0"
+
+
+# A processor that serializes and processes the data (second form). It takes a structure (a: fields at a->32, a->36, a->40, and a->44) and a value (b). It stores a .data value (-16596) into a->44 and 0 into a->32, a->36, and a->40. It then serializes (Serialize_82CA3EB8, with a, 32, a .data pointer (-6332), and other values). This is the "serialize and process this data" routine (second form), part of the 0x82BB2 process cluster. 76 lines. 2 callees (ProcessAndClearIndexedRegion and Serialize). 1 caller (sub_82BB0D78).
+[functions."0x82BB2CB8"]
+name = "ProcessAndSerializeAndProcess2_82BB2CB8"
+
+
+# A processor that vcalls and processes the data (twenty-third form). It takes a structure (a: fields at a->0 and a->4) and a value (b) and a value (c). It reads a->0 (a pointer) and +16 (a method pointer) and performs a virtual call. It then reads a .data pointer (19048) and performs another virtual call (with b and c). It then stores the result into a->4. This is the "vcall and process this data" routine (twenty-third form), part of the 0x82BBC process cluster. 49 lines. 0 callees (leaf function — performs raw memory operations and virtual calls). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82BBC7D8"]
+name = "ProcessAndVcallAndProcess23_82BBC7D8"
+
+
+# A processor that searches and processes the data (third form). It takes a structure (a: field at a->4), a value (b), and a value (c). When b is greater than zero it searches the structure (a->4, in 4-byte chunks) and processes (sub_82BAFBE8, with other values). This is the "search and process this data" routine (third form), part of the 0x82BAF process cluster. 86 lines. 1 callee (sub_82BAFBE8). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82BAFB58"]
+name = "ProcessAndSearchAndProcess3_82BAFB58"
+
+
+# A processor that serializes and processes the data (third form). It takes a structure (a: fields at a->32, a->36, a->40, and a->44) and a value (b). It serializes the data (Serialize_82CA3EB8, with a). It then clears the indexed region (ProcessAndClearIndexedRegion_82BBF648, with other values). This is the "serialize and process this data" routine (third form), part of the 0x82BAE process cluster. 75 lines. 2 callees (ProcessAndClearIndexedRegion and Serialize). 7 callers (sub_82BAD1D8, sub_82BC4040, sub_82BBDE60, sub_82BC3568, sub_82BAD9D8, sub_82BAE500, and sub_82BC37B8).
+[functions."0x82BAE2E8"]
+name = "ProcessAndSerializeAndProcess3_82BAE2E8"
+
+
+# A processor that reads and processes the data (fourth form). It takes a structure (a: fields at a->8 and a->12). It reads and processes the data (ProcessAndReadAndMask_82BB6880, with a). It then reads the data (sub_82BB6820, with a). This is the "read and process this data" routine (fourth form), part of the 0x82BB5 process cluster. 168 lines. 4 callees (ProcessAndReadAndMask, sub_82BB67C0, sub_82BB6820, and sub_82BC6A18). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82BB5EB0"]
+name = "ProcessAndReadAndProcess4_82BB5EB0"
+
+
+# A processor that hashes and processes the data (sixth form). It takes a value (a). It dispatches and processes (ProcessAndDispatchAndProcess_82BC6558, with a). It then hashes the string (ProcessAndHashString2_821E1408, with a). This is the "hash and process this data" routine (sixth form), part of the 0x82BB6 process cluster. 58 lines. 3 callees (ProcessAndDispatchAndProcess, ProcessAndDispatchByType, and ProcessAndHashString2). 2 callers (ProcessAndReadAndProcess4 and sub_82BB18A0).
+[functions."0x82BB6820"]
+name = "ProcessAndHashAndProcess6_82BB6820"
+
+
+# A processor that initializes and processes the data (third form). It takes a structure (a: fields at a->0, a->8, a->16, and a->24). It initializes the structure (a->0, a->8, a->16, and a->24). It then processes the data (sub_82BBB228, with a). This is the "initialize and process this data" routine (third form), part of the 0x82BBB process cluster. 57 lines. 2 callees (sub_82BBB228 and sub_82CC0620). 2 callers (sub_82BB0D78 and sub_82BB39F8).
+[functions."0x82BBB1C8"]
+name = "ProcessAndInitializeAndProcess3_82BBB1C8"
+
+
+# A processor that processes the timebase (third form). It takes a structure (a: fields at a->8, a->16, and a->24). It gets the timebase (GetTimebase_8221EB58, with a). It then processes the timebase (a->8, a->16, and a->24). This is the "process the timebase" routine (third form), part of the 0x82BBB process cluster. 71 lines. 1 callee (GetTimebase). 1 caller (ProcessAndInitializeAndProcess3).
+[functions."0x82BBB228"]
+name = "ProcessAndTimebaseAndProcess3_82BBB228"
+
+
+# A processor that vcalls and processes the data (thirty-third form). It takes a structure (a: fields at a->0 and a->4), a value (b), and a value (c). It reads a .data pointer (-7716) and the pointer's +16 field (a value). It then performs a virtual call (with the pointer's +16 field). This is the "vcall and process this data" routine (thirty-third form), part of the 0x82BBC process cluster. 64 lines. 0 callees (leaf function — performs raw memory operations and virtual calls). 2 callers (sub_82BB2A70 and sub_82BC3018).
+[functions."0x82BBC6B8"]
+name = "ProcessAndVcallAndProcess33_82BBC6B8"
+
+
+# A processor that processes the data (forty-fourth form). It takes a structure (a: fields at a->0, a->4, a->8, a->10, a->12, a->16, a->18, and a->20), a value (b), and a value (c). It processes the data (a, b, and c). This is the "process this data" routine (forty-fourth form), part of the 0x82BA9 process cluster. 470 lines. 7 callees (GetSingleton, ProcessAndClearIndexedRegion, ProcessIndexedRegion2, Serialize, StringInsert, sub_82BAC658, and sub_82BACD98). 1 caller (sub_82BE75D8).
+[functions."0x82BA92E0"]
+name = "ProcessAndProcessAndProcess44_82BA92E0"
+
+
+# A processor that processes the data (forty-fifth form). It takes a structure (a: field at a->12) and a value (b). It processes the data (a and b). This is the "process this data" routine (forty-fifth form), part of the 0x82BAA process cluster. 86 lines. 4 callees (GetSingleton, ProcessAndCompareAndProcess, ProcessIndexedRegion, and StringInsert). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82BAA048"]
+name = "ProcessAndProcessAndProcess45_82BAA048"
+
+
+# A processor that sets and processes the data (sixth form). It takes a value (a). It sets the data (a). This is the "set and process this data" routine (sixth form), part of the 0x82BAA process cluster. 8 lines. 0 callees (leaf function — performs raw memory operations). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82BAA110"]
+name = "ProcessAndSetAndProcess6_82BAA110"
+
+
+# A processor that sets and processes the data (seventh form). It takes a value (a). It sets the data (a). This is the "set and process this data" routine (seventh form), part of the 0x82BAA process cluster. 8 lines. 0 callees (leaf function — performs raw memory operations). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82BAA120"]
+name = "ProcessAndSetAndProcess7_82BAA120"
+
+
+# A processor that sets and processes the data (eighth form). It takes a value (a). It sets the data (a). This is the "set and process this data" routine (eighth form), part of the 0x82BAA process cluster. 8 lines. 0 callees (leaf function — performs raw memory operations). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82BAA128"]
+name = "ProcessAndSetAndProcess8_82BAA128"
+
+
+# A processor that processes the data (forty-sixth form). It takes a structure (a: field at a->0) and a structure (b: fields at b->0 and b->4). It processes the data (a and b). This is the "process this data" routine (forty-sixth form), part of the 0x82BAA process cluster. 130 lines. 3 callees (EraseByteFromBuffer, ProcessAndCompareAndProcess, and StringInsert). 1 caller (sub_82BB0D78).
+[functions."0x82BAA238"]
+name = "ProcessAndProcessAndProcess46_82BAA238"
+
+
+# A processor that processes the data (forty-seventh form). It takes a structure (a: field at a->-12) and a structure (b: field at b->-16). It processes the data (a and b). This is the "process this data" routine (forty-seventh form), part of the 0x82BAA process cluster. 48 lines. 2 callees (GetSingleton and ProcessIndexedRegion). 6 callers (sub_82BC0F90, sub_82BC4880, sub_82BA9708, sub_82BB3BC8, sub_82BB2A70, and sub_82BC3B68).
+[functions."0x82BAA458"]
+name = "ProcessAndProcessAndProcess47_82BAA458"
+
+
+# A processor that processes the data (forty-eighth form). It takes a structure (a: fields at a->32, a->36, a->40, and a->44) and a value (b). It processes the data (a and b). This is the "process this data" routine (forty-eighth form), part of the 0x82BAC process cluster. 89 lines. 2 callees (ProcessAndIndexRegionAndProcess and Serialize). 1 caller (ProcessAndProcessAndProcess44).
+[functions."0x82BAC658"]
+name = "ProcessAndProcessAndProcess48_82BAC658"
+
+
+# A processor that processes the data (forty-ninth form). It takes a value (a), a value (b), and a value (c). It processes the data (a, b, and c). This is the "process this data" routine (forty-ninth form), part of the 0x82BAC process cluster. 57 lines. 1 callee (LinearSearch). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82BAC918"]
+name = "ProcessAndProcessAndProcess49_82BAC918"
+
+
+# A processor that processes the data (fiftieth form). It takes a structure (a: fields at a->8, a->12, and a->16) and a structure (b: field at b->32). It processes the data (a and b). This is the "process this data" routine (fiftieth form), part of the 0x82BAC process cluster. 96 lines. 0 callees (leaf function — performs raw memory operations). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82BACA78"]
+name = "ProcessAndProcessAndProcess50_82BACA78"
+
+
+# A processor that processes the data (fifty-first form). It takes a structure (a: fields at a->48 and a->96). It processes the data (a). This is the "process this data" routine (fifty-first form), part of the 0x82BAC process cluster. 122 lines. 1 callee (ProcessAndGrowAndSerialize). 1 caller (ProcessAndProcessAndProcess44).
+[functions."0x82BACD98"]
+name = "ProcessAndProcessAndProcess51_82BACD98"
+
+
+# A processor that processes the data (fifty-second form). It takes a structure (a: fields at a->0, a->4, a->8, a->12, a->14, a->16, a->20, and a->24) and a value (b). It processes the data (a and b). This is the "process this data" routine (fifty-second form), part of the 0x82BB0 process cluster. 527 lines. 17 callees (DispatchValue, GetSingleton, GetTimebase, InsertHashEntry, ProcessAndAppendNode, ProcessAndCompareAndProcess, ProcessAndGuardedDispatch, ProcessAndHashString2, ProcessAndStoreIndexedValue, ProcessIndexedRegion, StringInsert, ProcessAndProcessAndProcess46, sub_82BB2528, sub_82BB2CB8, sub_82BBB1C8, sub_82BC62B8, and sub_82BC7FB0). 1 caller (sub_82BBDDE8).
+[functions."0x82BB0D78"]
+name = "ProcessAndProcessAndProcess52_82BB0D78"
+
+
+# A processor that processes the data (fifty-third form). It takes a structure (a: field at a->4). It processes the data (a). This is the "process this data" routine (fifty-third form), part of the 0x82BB2 process cluster. 663 lines. 6 callees (ComputeStringHash, ProcessApply, sub_82BB46A8, sub_82BB5C90, sub_82BBA1D8, and sub_82BBB3A8). 1 caller (ProcessAndProcessAndProcess52).
+[functions."0x82BB2528"]
+name = "ProcessAndProcessAndProcess53_82BB2528"
+
+
+# A processor that processes the data (fifty-fourth form). It takes a value (a) and a value (b). It processes the data (a and b). This is the "process this data" routine (fifty-fourth form), part of the 0x82BB3 process cluster. 473 lines. 9 callees (ComputeStringHash, GetSingleton, ProcessAndClearFields, ProcessApply, ProcessIndexedRegion, StringInsert, sub_82BBC920, sub_82BBF6D8, and sub_82BE75D8). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82BB3E88"]
+name = "ProcessAndProcessAndProcess54_82BB3E88"
+
+
+# A processor that processes the data (fifty-fifth form). It takes a structure (a: fields at a->8 and a->12). It processes the data (a). This is the "process this data" routine (fifty-fifth form), part of the 0x82BB4 process cluster. 456 lines. 7 callees (ComputeStringHash, GrowAndZeroBuffer, InsertHashEntry, ProcessAndCountAndProcess, ProcessAndHashAndAppend, ProcessApply, and ProcessDispatchLoop). 1 caller (ProcessAndProcessAndProcess53).
+[functions."0x82BB46A8"]
+name = "ProcessAndProcessAndProcess55_82BB46A8"
+
+
+# A processor that processes the data (fifty-sixth form). It takes a structure (a: fields at a->8 and a->12). It processes the data (a). This is the "process this data" routine (fifty-sixth form), part of the 0x82BB5 process cluster. 306 lines. 7 callees (ComputeStringHash, GrowAndZeroBuffer, InsertHashEntry, ProcessAndCountAndProcess, ProcessAndHashAndAppend, ProcessApply, and ProcessDispatchLoop). 1 caller (ProcessAndProcessAndProcess53).
+[functions."0x82BB5C90"]
+name = "ProcessAndProcessAndProcess56_82BB5C90"
+
+
+# A processor that processes the data (fifty-seventh form). It takes a structure (a: fields at a->8 and a->12). It processes the data (a). This is the "process this data" routine (fifty-seventh form), part of the 0x82BBA process cluster. 456 lines. 7 callees (ComputeStringHash, GrowAndZeroBuffer, InsertHashEntry, ProcessAndCountAndProcess, ProcessAndHashAndAppend, ProcessApply, and ProcessDispatchLoop). 1 caller (ProcessAndProcessAndProcess53).
+[functions."0x82BBA1D8"]
+name = "ProcessAndProcessAndProcess57_82BBA1D8"
+
+
+# A processor that processes the data (fifty-eighth form). It takes a structure (a: fields at a->8 and a->12). It processes the data (a). This is the "process this data" routine (fifty-eighth form), part of the 0x82BBB process cluster. 306 lines. 7 callees (ComputeStringHash, GrowAndZeroBuffer, InsertHashEntry, ProcessAndCountAndProcess, ProcessAndHashAndAppend, ProcessApply, and ProcessDispatchLoop). 1 caller (ProcessAndProcessAndProcess53).
+[functions."0x82BBB3A8"]
+name = "ProcessAndProcessAndProcess58_82BBB3A8"
+
+
+# A processor that processes the data (fifty-ninth form). It takes a structure (a: fields at a->8 and a->12). It processes the data (a). This is the "process this data" routine (fifty-ninth form), part of the 0x82BBB process cluster. 146 lines. 6 callees (MemCpy_SdkRuntime, ProcessAndDispatchAndProcess, ProcessAndDispatchByType, ProcessAndHashString2, sub_82BBC658, and sub_82BC6A18). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82BBB5C8"]
+name = "ProcessAndProcessAndProcess59_82BBB5C8"
+
+
+# A processor that processes the data (sixtieth form). It takes a structure (a: fields at a->0 and a->4). It processes the data (a). This is the "process this data" routine (sixtieth form), part of the 0x82BBC process cluster. 59 lines. 0 callees (leaf function — performs raw memory operations). 2 callers (sub_82BC3070 and sub_82BBC720).
+[functions."0x82BBC770"]
+name = "ProcessAndProcessAndProcess60_82BBC770"
+
+
+# A processor that processes the data (sixty-first form). It takes a structure (a: fields at a->0 and a->4) and a structure (b: fields at b->0 and b->4). It processes the data (a and b). This is the "process this data" routine (sixty-first form), part of the 0x82BBC process cluster. 151 lines. 4 callees (MemMove_SdkRuntime, ProcessAndClearFields, ProcessAndInitializeString, and ToLower_Ascii). 1 caller (ProcessAndProcessAndProcess54).
+[functions."0x82BBC920"]
+name = "ProcessAndProcessAndProcess61_82BBC920"
+
+
+# A processor that processes the data (sixty-second form). It takes a value (a) and a value (b). It processes the data (a and b). This is the "process this data" routine (sixty-second form), part of the 0x82BBD process cluster. 78 lines. 3 callees (GetSingleton, ProcessIndexedRegion2, and sub_82BC3248). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82BBDC90"]
+name = "ProcessAndProcessAndProcess62_82BBDC90"
+
+
+# A processor that processes the data (sixty-third form). It takes a value (a). It processes the data (a). This is the "process this data" routine (sixty-third form), part of the 0x82BBD process cluster. 74 lines. 3 callees (GetSingleton, ProcessIndexedRegion2, and ProcessAndProcessAndProcess52). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82BBDDE8"]
+name = "ProcessAndProcessAndProcess63_82BBDDE8"
+
+
+# A processor that processes the data (sixty-fourth form). It takes a structure (a: field at a->8) and a value (b). It processes the data (a and b). This is the "process this data" routine (sixty-fourth form), part of the 0x82BBF process cluster. 186 lines. 2 callees (ComputeStringHash and ProcessApply). 1 caller (ProcessAndProcessAndProcess54).
+[functions."0x82BBF6D8"]
+name = "ProcessAndProcessAndProcess64_82BBF6D8"
+
+
+# A processor that processes the data (one hundred and fiftieth form). It takes a value (a) and a structure (b: fields at b->0, b->4, and b->8). It processes the data (a and b). This is the "process this data" routine (one hundred and fiftieth form), part of the 0x82B82 process cluster. 64 lines. 2 callees (DestructRange and Free_SizeBucketed_Thunk). 5 callers (sub_82B828C8, sub_82B80D70, sub_82B82558, sub_82A49D48, and sub_82B82778).
+[functions."0x82B82860"]
+name = "ProcessAndProcessAndProcess150_82B82860"
+
+
+# A processor that processes the data (one hundred and fifty-first form). It takes a structure (a: fields at a->8, a->12, and a->16). It processes the data (a). This is the "process this data" routine (one hundred and fifty-first form), part of the 0x82BB1 process cluster. 369 lines. 11 callees (ElementAccess, GetIndexedPointer, GetSingleton, GetTypedField, ProcessAndComputeLengthAndProcess, ProcessAndGuardedDispatch, ProcessAndHashString2, ProcessIndexedRegion, ProcessLoopDispatch, StringInsert, and sub_82BCBDC8). 1 caller (sub_82BB8790).
+[functions."0x82BB1ED0"]
+name = "ProcessAndProcessAndProcess151_82BB1ED0"
+
+
+# A processor that processes the data (one hundred and fifty-second form). It takes a structure (a: fields at a->8 and a->16). It processes the data (a). This is the "process this data" routine (one hundred and fifty-second form), part of the 0x82BB2 process cluster. 94 lines. 2 callees (ProcessLoopDispatch and sub_82BCBDC8). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82BB29D0"]
+name = "ProcessAndProcessAndProcess152_82BB29D0"
+
+
+# A processor that processes the data (three hundred and twenty-first form). It takes a value (a). It processes the data (a). This is the "process this data" routine (three hundred and twenty-first form), part of the 0x82B80 process cluster. 68 lines. 2 callees (Allocate_OrDbgBreak and sub_822F1F00). 5 callers (sub_82B800A0, sub_82B63FC0, sub_82B7FAF8, sub_82B82D50, and sub_82B82638).
+[functions."0x82B80118"]
+name = "ProcessAndProcessAndProcess321_82B80118"
+
+
+# A processor that processes the data (three hundred and twenty-second form). It takes a value (a) and a structure (b: field at b->0). It processes the data (a and b). This is the "process this data" routine (three hundred and twenty-second form), part of the 0x82B80 process cluster. 2806 lines — the largest function in this batch. 24 callees (Allocate_SizeBucketed_Thunk, AtomicIncrement4, CopyAssign_RefCounted2, CopyAssign_RefCounted, DestructRefCounted, Free_SizeBucketed_Thunk, ProcessAndCopyStructRegion, ProcessAndRecurseAndProcess2, ProcessRefCountedBuffer, ProcessVcallConstruct, RegisterWithCounter, Release_RefCounted, sub_822D52C0, sub_82344AC8, sub_829EA980, sub_82A1B8C8, sub_82B3A158, sub_82B82638, sub_82B82860, sub_82B828C8, sub_82B82D50, sub_82B82FE0, sub_82C647D0, and sub_82CBBB58). 1 caller (ProcessAndProcessAndProcess312).
+[functions."0x82B80D70"]
+name = "ProcessAndProcessAndProcess322_82B80D70"
+
+
+# A processor that processes the data (three hundred and twenty-third form). It takes a value (a) and a structure (b: field at b->0). It processes the data (a and b). This is the "process this data" routine (three hundred and twenty-third form), part of the 0x82B82 process cluster. 234 lines. 4 callees (Allocate_OrDbgBreak, VirtualCall4, sub_82C64708, and sub_82CBBB60). 1 caller (ProcessAndProcessAndProcess312).
+[functions."0x82B820A8"]
+name = "ProcessAndProcessAndProcess323_82B820A8"
+
+
+# A processor that processes the data (three hundred and twenty-fourth form). It takes a structure (a: fields at a->4, a->8, a->16, a->36, and a->40). It processes the data (a). This is the "process this data" routine (three hundred and twenty-fourth form), part of the 0x82B82 process cluster. 306 lines. 9 callees (Allocate_OrDbgBreak, Construct32Byte, ProcessCriticalSection, QueuePush, VirtualCall4, ProcessAndProcessAndProcess317, sub_82B5D5F0, sub_82B82558, and sub_82B825D0). 1 caller (ProcessAndProcessAndProcess312).
+[functions."0x82B82248"]
+name = "ProcessAndProcessAndProcess324_82B82248"
+
+
+# A processor that processes the data (three hundred and twenty-fifth form). It takes a structure (a: fields at a->4, a->8, and a->12). It processes the data (a). This is the "process this data" routine (three hundred and twenty-fifth form), part of the 0x82B82 process cluster. 71 lines. 3 callees (Free_SizeBucketed_Thunk, sub_82B82778, and sub_82B82860). 2 callers (sub_82B80C18 and ProcessAndProcessAndProcess324).
+[functions."0x82B82558"]
+name = "ProcessAndProcessAndProcess325_82B82558"
+
+
+# A processor that processes the data (three hundred and twenty-sixth form). It takes a structure (a: fields at a->4, a->8, a->12, and a->17). It processes the data (a). This is the "process this data" routine (three hundred and twenty-sixth form), part of the 0x82B82 process cluster. 61 lines. 2 callees (ProcessAndProcessAndProcess316 and sub_82B827D8). 1 caller (ProcessAndProcessAndProcess324).
+[functions."0x82B825D0"]
+name = "ProcessAndProcessAndProcess326_82B825D0"
+
+
+# A processor that processes the data (three hundred and twenty-seventh form). It takes a structure (a: fields at a->4 and a->12) and a value (b). It processes the data (a and b). This is the "process this data" routine (three hundred and twenty-seventh form), part of the 0x82B82 process cluster. 195 lines. 4 callees (Dispose17, Free_SizeBucketed_Thunk, sub_82A97648, and ProcessAndProcessAndProcess321). 1 caller (ProcessAndProcessAndProcess322).
+[functions."0x82B82638"]
+name = "ProcessAndProcessAndProcess327_82B82638"
+
+
+# A processor that processes the data (three hundred and twenty-eighth form). It takes a structure (a: fields at a->4 and a->8). It processes the data (a). This is the "process this data" routine (three hundred and twenty-eighth form), part of the 0x82B82 process cluster. 58 lines. 2 callees (sub_82B82860 and sub_82B82FE0). 1 caller (ProcessAndProcessAndProcess325).
+[functions."0x82B82778"]
+name = "ProcessAndProcessAndProcess328_82B82778"
+
+
+# A processor that processes the data (three hundred and twenty-ninth form). It takes a structure (a: fields at a->4 and a->8). It processes the data (a). This is the "process this data" routine (three hundred and twenty-ninth form), part of the 0x82B82 process cluster. 85 lines. 2 callees (Dispose17 and sub_82B83318). 2 callers (ProcessAndProcessAndProcess326 and sub_82B80C18).
+[functions."0x82B827D8"]
+name = "ProcessAndProcessAndProcess329_82B827D8"
+
+
+# A processor that processes the data (three hundred and thirtieth form). It takes a structure (a: fields at a->4, a->8, and a->12), a value (b), a value (c), and a value (d). It processes the data (a, b, c, and d). This is the "process this data" routine (three hundred and thirtieth form), part of the 0x82B82 process cluster. 476 lines. 8 callees (Copy20Bytes, Free_SizeBucketed_Thunk, sub_821F01B8, sub_829EA980, sub_82A97648, sub_82B82860, sub_82B82CD0, and sub_82B83078). 1 caller (ProcessAndProcessAndProcess322).
+[functions."0x82B828C8"]
+name = "ProcessAndProcessAndProcess330_82B828C8"
+
+
+# A processor that processes the data (three hundred and thirty-first form). It takes a value (a). It processes the data (a). This is the "process this data" routine (three hundred and thirty-first form), part of the 0x82B82 process cluster. 72 lines. 2 callees (Allocate_OrDbgBreak and sub_822F1F00). 1 caller (ProcessAndProcessAndProcess330).
+[functions."0x82B82CD0"]
+name = "ProcessAndProcessAndProcess331_82B82CD0"
+
+
+# A processor that processes the data (three hundred and thirty-second form). It takes multiple values. It processes the data. This is the "process this data" routine (three hundred and thirty-second form), part of the 0x82B82 process cluster. 90 lines. 1 callee (sub_821F01B8). 2 callers (ProcessAndProcessAndProcess322 and ProcessAndProcessAndProcess328).
+[functions."0x82B82FE0"]
+name = "ProcessAndProcessAndProcess332_82B82FE0"
+
+
+# A processor that processes the data (three hundred and thirty-third form). It takes nothing. It processes the data. This is the "process this data" routine (three hundred and thirty-third form), part of the 0x82BA8 process cluster. 181 lines. 4 callees (InitializeAndProcess, MemSet_SdkRuntime, ProcessLoopVcall, and sub_82BAA948). 1 caller (GetSingleton).
+[functions."0x82BA8BB0"]
+name = "ProcessAndProcessAndProcess333_82BA8BB0"
+
+
+# A processor that processes the data (three hundred and thirty-fourth form). It takes multiple values. It processes the data. This is the "process this data" routine (three hundred and thirty-fourth form), part of the 0x82BA9 process cluster. 86 lines. 1 callee (sub_82BAA1D0). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82BA9F00"]
+name = "ProcessAndProcessAndProcess334_82BA9F00"
+
+
+# A processor that processes the data (three hundred and thirty-fifth form). It takes a structure (a: fields at a->32, a->36, a->40, a->44, a->48, and a->52). It processes the data (a). This is the "process this data" routine (three hundred and thirty-fifth form), part of the 0x82BAA process cluster. 55 lines. 0 callees (self-contained). 3 callers (sub_82BA9E18, ProcessAndProcessAndProcess334, and sub_82BA9F98).
+[functions."0x82BAA1D0"]
+name = "ProcessAndProcessAndProcess335_82BAA1D0"
+
+
+# A processor that processes the data (three hundred and thirty-sixth form). It takes nothing. It processes the data. This is the "process this data" routine (three hundred and thirty-sixth form), part of the 0x82BAA process cluster. 68 lines. 0 callees (self-contained). 1 caller (ProcessAndProcessAndProcess333).
+[functions."0x82BAA948"]
+name = "ProcessAndProcessAndProcess336_82BAA948"
+
+
+# A processor that processes the data (three hundred and thirty-seventh form). It takes a structure (a: fields at a->0, a->40, a->520, a->524, and a->528), a value (b), and a value (c). It processes the data (a, b, and c). This is the "process this data" routine (three hundred and thirty-seventh form), part of the 0x82BB3 process cluster. 223 lines. 8 callees (GetSingleton, ProcessAndClearIndexedRegion, ProcessIndexedRegion2, Serialize, sub_82BBB1C8, sub_82BBDE60, sub_82BC0E68, and sub_82BE7460). 1 caller (ProcessAndProcessAndProcess270).
+[functions."0x82BB39F8"]
+name = "ProcessAndProcessAndProcess337_82BB39F8"
+
+
+# A processor that processes the data (three hundred and thirty-eighth form). It takes a structure (a: fields at a->8 and a->12). It processes the data (a). This is the "process this data" routine (three hundred and thirty-eighth form), part of the 0x82BB8 process cluster. 311 lines. 9 callees (GetTypedField, HashCstring, ProcessAndStoreElement, ProcessLoopDispatch, sub_82BB1ED0, sub_82BB9F40, sub_82BC5C08, sub_82BC68F0, and sub_82BCBDC8). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82BB8790"]
+name = "ProcessAndProcessAndProcess338_82BB8790"
+
+
+# A processor that processes the data (three hundred and thirty-ninth form). It takes a structure (a: fields at a->0 and a->4). It processes the data (a). This is the "process this data" routine (three hundred and thirty-ninth form), part of the 0x82BBD process cluster. 130 lines. 5 callees (GetSingleton, MemSet_SdkRuntime, ProcessAndClearIndexedRegion, ProcessIndexedRegion2, and Serialize). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82BBDD10"]
+name = "ProcessAndProcessAndProcess339_82BBDD10"
+
+
+# A processor that processes the data (three hundred and fortieth form). It takes a structure (a: fields at a->0, a->4, a->8, a->40, a->44, a->48, and a->52), a value (b), and a value (c). It processes the data (a, b, and c). This is the "process this data" routine (three hundred and fortieth form), part of the 0x82BBD process cluster. 128 lines. 3 callees (ProcessAndClearIndexedRegion, Serialize, and sub_82BAE2E8). 1 caller (ProcessAndProcessAndProcess337).
+[functions."0x82BBDE60"]
+name = "ProcessAndProcessAndProcess340_82BBDE60"
+
+
+# Process timing and state by performing delay operations and driving sub-operations (five hundred and twenty-third form). It takes a structure (a: fields at a->0 and a->8); it performs delay operations (db16cyc), checks state flags, and drives sub-operations (GetGlobalField and sub_82BA0E80). This is the "process this data" routine (five hundred and twenty-third form), part of the 0x82B9B process cluster. 119 lines. 2 callees. 6 callers (including MainRenderLoop and sub_82242628).
+[functions."0x82B9BF90"]
+name = "GpuProgressCheck_82B9BF90"
+
+
+# Process a structure by computing coordinates and driving sub-operations (five hundred and sixty-ninth form). It takes a structure (a: fields at a->4, a->12, and a->8) and a pointer (b); it computes coordinates, and drives sub-operations (sub_82B90080) based on the result. This is the "process this data" routine (five hundred and sixty-ninth form), part of the 0x82B8F process cluster. 96 lines. 1 callee. 1 caller (sub_82B8BC08).
+[functions."0x82B8F7B8"]
+name = "ProcessAndProcessAndProcess569_82B8F7B8"
+
+
+# Process a structure by computing coordinates and driving sub-operations (five hundred and seventieth form). It takes a structure (a: fields at a->4, a->12, and a->8) and a pointer (b); it computes coordinates, and drives sub-operations (sub_82B90450) based on the result. This is the "process this data" routine (five hundred and seventieth form), part of the 0x82B8F process cluster. 221 lines. 1 callee. 1 caller (sub_82B8BC08).
+[functions."0x82B8F860"]
+name = "ProcessAndProcessAndProcess570_82B8F860"
+
+
+# Process a structure by computing coordinates and copying data (five hundred and seventy-first form). It takes a pointer (a) and a structure (b: fields at b->4 and b->8); it computes coordinates, and copies data based on the result. This is the "process this data" routine (five hundred and seventy-first form), part of the 0x82B8F process cluster. 260 lines. 0 callees. 1 caller (sub_82B8BC08).
+[functions."0x82B8F9F8"]
+name = "ProcessAndProcessAndProcess571_82B8F9F8"
+
+
+# Process a structure by recursively traversing its nodes (six hundred and seventeenth form). It takes a structure (a: field at a->20) and three values (b, c, and d); it recursively traverses the structure's nodes, processing each one. This is the "process this data" routine (six hundred and seventeenth form), part of the 0x82B8B process cluster. 96 lines. 1 callee. 1 caller (sub_82B8BC08).
+[functions."0x82B8BB60"]
+name = "ProcessAndProcessAndProcess617_82B8BB60"
+
+
+# Process a value by performing atomic operations (six hundred and eighty-first form). It takes no arguments; it performs atomic operations on the value. This is the "process this data" routine (six hundred and eighty-first form), part of the 0x82B9E process cluster. 83 lines. 0 callees. 3 callers (sub_82B9F280, sub_82B9F0A8, and sub_82B9F730).
+[functions."0x82B9E598"]
+name = "ProcessAndProcessAndProcess679_82B9E598"
+
+
+# Process a structure (seven hundred and thirty-first form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82B8B process cluster. 63 lines. 0 callees. 4 callers.
+[functions."0x82B8BA00"]
+name = "ProcessAndProcessAndProcess731_82B8BA00"
+
+
+# Process a structure by copying its data (seven hundred and thirty-ninth form). It takes a structure and copies its data (MemCpy). Part of the 0x82B9D process cluster. 114 lines. 1 callee. 1 caller (sub_82B9D618).
+[functions."0x82B9D490"]
+name = "ProcessAndProcessAndProcess739_82B9D490"
+
+
+# Process a structure by driving sub-operations (seven hundred and seventy-ninth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess739, sub_82B9D560) based on the result. Part of the 0x82B9D process cluster. 192 lines. 2 callees. 2 callers (sub_821DFDE0 and sub_82B9D980).
+[functions."0x82B9D618"]
+name = "ProcessAndProcessAndProcess779_82B9D618"
+
+
+# Process a structure by copying its data (seven hundred and one hundred and forty-fifth form). It takes a structure and copies its data (MemCpy). Part of the 0x82B9D process cluster. 108 lines. 1 callee. 1 caller (ProcessAndProcessAndProcess779).
+[functions."0x82B9D560"]
+name = "ProcessAndProcessAndProcess845_82B9D560"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and eighty-fourth form). It takes a structure and drives a sub-operation (sub_82B9C530). Part of the 0x82B9B process cluster. 91 lines. 1 callee. 0 callers.
+[functions."0x82B9B8D8"]
+name = "VblankInterruptCallback_82B9B8D8"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and ninety-second form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess771). Part of the 0x82B9B process cluster. 142 lines. 1 callee. 2 callers (sub_82B9BA58 and sub_82B9E848).
+[functions."0x82B9B7E8"]
+name = "ProcessAndProcessAndProcess902_82B9B7E8"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and ninety-third form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess902). Part of the 0x82B9E process cluster. 132 lines. 1 callee. 1 caller (sub_82B9ED28).
+[functions."0x82B9E848"]
+name = "ProcessAndProcessAndProcess903_82B9E848"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and ninety-sixth form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess568). Part of the 0x82B92 process cluster. 149 lines. 1 callee. 1 caller (sub_8219CE10).
+[functions."0x82B92790"]
+name = "ProcessAndProcessAndProcess906_82B92790"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and seventeenth form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess763). Part of the 0x82B89 process cluster. 181 lines. 1 callee. 2 callers (sub_82B69488 and sub_82B69FA0).
+[functions."0x82B89960"]
+name = "ProcessAndProcessAndProcess1017_82B89960"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and fifty-first form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess533). This is a frequently-called helper in the 0x82B87 process cluster. 75 lines. 1 callee. 16 callers.
+[functions."0x82B876D8"]
+name = "ProcessAndProcessAndProcess1051_82B876D8"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and fifty-eighth form). It takes a structure and drives a sub-operation (FastHelper). Part of the 0x82BA8 process cluster. 129 lines. 1 callee. 1 caller (sub_82B9C7F8).
+[functions."0x82BA8170"]
+name = "ProcessAndProcessAndProcess1058_82BA8170"
+
+
+# Process a large data structure by copying its data (seven hundred and one hundred and one hundred and one hundred and seventy-ninth form). It takes a structure, copies its data (MemCpy), and drives sub-operations (ProcessAndProcessAndProcess816, ProcessAndProcessAndProcess903, sub_82B9E610, sub_82B9E928, sub_82B9E9F0, sub_82B9EB28, sub_82B9EC20) based on the result. Part of the 0x82B9E process cluster. 502 lines. 8 callees. 1 caller (sub_82B9F280).
+[functions."0x82B9ED28"]
+name = "ProcessAndProcessAndProcess1079_82B9ED28"
+
+
+# Process a large data structure (seven hundred and one hundred and one hundred and one hundred and eightieth form). It takes a structure, checks its state, and drives sub-operations (GpuProgressCheck, ProcessAndProcessAndProcess679, sub_82B9BEC8) based on the result. Part of the 0x82B9F process cluster. 273 lines. 3 callees. 1 caller (sub_82B9F280).
+[functions."0x82B9F0A8"]
+name = "ProcessAndProcessAndProcess1080_82B9F0A8"
+
+
+# Dispatch a process operation (seven hundred and one hundred and one hundred and one hundred and eighty-first form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess679, ProcessAndProcessAndProcess1079, ProcessAndProcessAndProcess1080) based on the result. This is the dispatcher of the 0x82B9F process cluster. 471 lines. 3 callees. 1 caller (sub_82B9F598).
+[functions."0x82B9F280"]
+name = "ProcessAndProcessAndProcess1081_82B9F280"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and eighty-second form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess679). Part of the 0x82B9F process cluster. 97 lines. 1 callee. 0 callers.
+[functions."0x82B9F730"]
+name = "ProcessAndProcessAndProcess1082_82B9F730"
+
+
+# Process a structure by querying the timebase (seven hundred and one hundred and one hundred and one hundred and eighty-third form). It takes a structure, queries the timebase (GetTimebase), and drives sub-operations based on the result. Part of the 0x82B9C process cluster. 155 lines. 1 callee. 1 caller (VblankInterruptCallback).
+[functions."0x82B9C530"]
+name = "GpuInterruptHandler_82B9C530"
+
+
+# Process a large data structure by freeing size-bucketed memory (seven hundred and one hundred and one hundred and one hundred and eighty-eighth form). It takes a structure, frees size-bucketed memory (Free_SizeBucketed), and drives sub-operations (sub_82B7FDB0, ProcessAndProcessAndProcess1089) based on the result. Part of the 0x82B8B process cluster. 339 lines. 3 callees. 3 callers.
+[functions."0x82B8B690"]
+name = "ProcessAndProcessAndProcess1088_82B8B690"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and eighty-ninth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82B8B process cluster. 66 lines. 0 callees. 3 callers (sub_82B7D0F0, sub_82B8AA48, ProcessAndProcessAndProcess1088).
+[functions."0x82B8B8E8"]
+name = "ProcessAndProcessAndProcess1089_82B8B8E8"
+
+
+# Process a structure by performing a refcounted copy assignment (seven hundred and one hundred and one hundred and one hundred and ninetieth form). It takes a structure, performs a refcounted copy assignment (CopyAssign_RefCounted2), and drives a sub-operation (ProcessAndProcessAndProcess1088) based on the result. Part of the 0x82B8A process cluster. 203 lines. 2 callees. 1 caller (sub_82B7EC80).
+[functions."0x82B8A360"]
+name = "ProcessAndProcessAndProcess1090_82B8A360"
+
+
+# Process a structure by flushing the cache (seven hundred and one hundred and one hundred and one hundred and one hundred and ninety-ninth form). It takes a structure and flushes the cache (FlushCache). Part of the 0x82B9E process cluster. 146 lines. 1 callee. 1 caller (ProcessAndProcessAndProcess1079).
+[functions."0x82B9EC20"]
+name = "ProcessAndProcessAndProcess1199_82B9EC20"
+
+
+# Process a structure by driving sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and fifty-sixth form). It takes a structure and drives sub-operations (ProcessAndProcessAndProcess764, sub_82B9B970) based on the result. Part of the render-loop process path in the 0x82BA8 cluster. 136 lines. 2 callees. 2 callers (including MainRenderLoop).
+[functions."0x82BA8630"]
+name = "ProcessAndProcessAndProcess1256_82BA8630"
+
+
+# Process a large data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and fifty-eighth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess1058, ProcessAndProcessAndProcess791, FastHelper, ProcessAndProcessAndProcess952) based on the result. Part of the render-loop process path in the 0x82B9C cluster. 293 lines. 4 callees. 6 callers (including MainRenderLoop).
+[functions."0x82B9C7F8"]
+name = "ProcessAndProcessAndProcess1258_82B9C7F8"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and fifty-ninth form). It takes a structure and drives a sub-operation (FastHelper) based on the result. Part of the render-loop process path in the 0x82B9C cluster. 104 lines. 1 callee. 4 callers (including MainRenderLoop).
+[functions."0x82B9C9D8"]
+name = "ProcessAndProcessAndProcess1259_82B9C9D8"
+
+
+# Process a structure by driving sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and sixtieth form). It takes a structure and drives sub-operations (sub_82BA21F8, sub_82BA2568, sub_82BA29B8) based on the result. Part of the render-loop process path in the 0x82BA3 cluster. 138 lines. 3 callees. 1 caller (MainRenderLoop).
+[functions."0x82BA32C8"]
+name = "ProcessAndProcessAndProcess1260_82BA32C8"
+
+
+# Process a structure by clearing memory and driving sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and sixty-first form). It takes a structure, clears its memory (MemSet), and drives sub-operations (FastHelper, ProcessAndProcessAndProcess952, sub_82BA6820) based on the result. Part of the render-loop process path in the 0x82BA6 cluster. 174 lines. 4 callees. 1 caller (MainRenderLoop).
+[functions."0x82BA6F08"]
+name = "ProcessAndProcessAndProcess1261_82BA6F08"
+
+
+# Process a structure by clearing memory (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and sixty-second form). It takes a structure, clears its memory (MemSet), and drives sub-operations (sub_82BA7298, ProcessAndProcessAndProcess1264) based on the result. Part of the render-loop process path in the 0x82BA7 cluster. 200 lines. 3 callees. 1 caller (ProcessAndProcessAndProcess1263).
+[functions."0x82BA7BE0"]
+name = "ProcessAndProcessAndProcess1262_82BA7BE0"
+
+
+# Process a large data structure by clearing memory (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and sixty-third form). It takes a structure, clears its memory (MemSet), and drives sub-operations (sub_82B99578, sub_82B99C10, sub_82B9B970, ProcessAndProcessAndProcess1262, sub_82BA8248) based on the result. Part of the render-loop process path in the 0x82BA8 cluster. 410 lines. 6 callees. 1 caller (MainRenderLoop).
+[functions."0x82BA8350"]
+name = "ProcessAndProcessAndProcess1263_82BA8350"
+
+
+# Process a large structure (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and sixty-sixth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82B9C process cluster. 238 lines. 0 callees. 0 callers.
+[functions."0x82B9C648"]
+name = "ProcessAndProcessAndProcess1266_82B9C648"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and sixty-seventh form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82B89 process cluster. 89 lines. 0 callees. 0 callers.
+[functions."0x82B89A78"]
+name = "ProcessAndProcessAndProcess1267_82B89A78"
+
+
+# Process a large data structure by constructing a refcounted object (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and seventy-sixth form). It takes a structure, constructs a refcounted object (ConstructRefCounted), performs a refcounted copy assignment (CopyAssign_RefCounted2), destructs a refcounted object (DestructRefCounted), increments a global counter (IncrementGlobalCounter2), copies a structure region (ProcessAndCopyStructRegion), and drives sub-operations (ProcessAndProcessAndProcess951, ProcessAndProcessAndProcess1274) based on the result. This is a refcounted-object processor in the 0x82B8A cluster. 429 lines. 7 callees. 1 caller (sub_82B7C858).
+[functions."0x82B8A758"]
+name = "ProcessAndProcessAndProcess1276_82B8A758"
+
+
+# Process a large structure by hashing a cstring (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and thirty-ninth form). It takes a structure, gets a typed field (GetTypedField), hashes a cstring (HashCstring), stores an element (ProcessAndStoreElement), and drives sub-operations (ProcessLoopDispatch, sub_82BC68F0, sub_82BCBDC8) based on the result. Part of the 0x82BB7 process cluster. 212 lines. 6 callees. 0 callers.
+[functions."0x82BB7590"]
+name = "ProcessAndProcessAndProcess1639_82BB7590"
+
+
+# Process a large structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and fifty-third form). It takes a structure and drives a sub-operation (sub_82B8FCA8). This is a frequently-called helper in the 0x82B8B process cluster. 138 lines. 1 callee. 5 callers.
+[functions."0x82B8BA70"]
+name = "ProcessAndProcessAndProcess1653_82B8BA70"
+
+
+# Process a large data structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and fifty-fourth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess569, ProcessAndProcessAndProcess570, ProcessAndProcessAndProcess571, ProcessAndProcessAndProcess617) based on the result. Part of the 0x82B8B process cluster. 371 lines. 4 callees. 4 callers.
+[functions."0x82B8BC08"]
+name = "ProcessAndProcessAndProcess1654_82B8BC08"
+
+
+# Process a large data structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and sixty-sixth form). It takes a structure and drives a sub-operation (sub_82BA9E18). Part of the 0x82BA9 process cluster. 246 lines. 1 callee. 1 caller (ProcessAndProcessAndProcess_82174D38).
+[functions."0x82BA9988"]
+name = "ProcessAndProcessAndProcess1766_82BA9988"
+
+
+# Process a large data structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and sixty-seventh form). It takes a structure, checks its state, and drives sub-operations (sub_82BB0568, sub_82BB0628) based on the result. Part of the 0x82BB0 process cluster. 224 lines. 2 callees. 0 callers.
+[functions."0x82BB02D0"]
+name = "ProcessAndProcessAndProcess1767_82BB02D0"
+
+
+# Process a large structure by decrementing a refcount atomically (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and ninety-seventh form). It takes a structure, decrements a refcount atomically (DecrementRefcountAtomic), and copies memory (MemCpy_SdkRuntime). This is a frequently-called helper in the 0x82B86 process cluster. 174 lines. 2 callees. 18 callers.
+[functions."0x82B86DF8"]
+name = "ProcessAndProcessAndProcess1797_82B86DF8"
+
+
+# Process a large structure by getting a singleton (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and one hundred and tenth form). It takes a structure, gets a singleton (GetSingleton), initializes a string (ProcessAndInitializeString), processes an indexed region (ProcessIndexedRegion2), and drives a sub-operation (ProcessAndProcessAndProcess335) based on the result. Part of the 0x82BA9 process cluster. 138 lines. 4 callees. 1 caller (ProcessAndProcessAndProcess1766).
+[functions."0x82BA9E18"]
+name = "ProcessAndProcessAndProcess1810_82BA9E18"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and one hundred and fifteenth form). It takes a structure and checks its state, with no external sub-operations. This is a frequently-called helper in the 0x82BB3 process cluster. 100 lines. 0 callees. 5 callers.
+[functions."0x82BB3368"]
+name = "ProcessAndProcessAndProcess1815_82BB3368"
+
+
+# Process a very large data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and one hundred and thirty-ninth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82BA9 process cluster. 401 lines. 0 callees. 1 caller (ProcessAndProcessAndProcess_82174D38).
+[functions."0x82BA9B40"]
+name = "ProcessAndProcessAndProcess1839_82BA9B40"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and one hundred and fortieth form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess335). Part of the 0x82BA9 process cluster. 80 lines. 1 callee. 0 callers.
+[functions."0x82BA9F98"]
+name = "ProcessAndProcessAndProcess1840_82BA9F98"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and one hundred and forty-first form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess1842). Part of the 0x82BB2 process cluster. 30 lines. 1 callee. 0 callers.
+[functions."0x82BB2FA0"]
+name = "ProcessAndProcessAndProcess1841_82BB2FA0"
+
+
+# Process a very large data structure by getting a typed field (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and one hundred and forty-second form). It takes a structure, gets a typed field (GetTypedField), hashes a C string (HashCstring), processes a loop dispatch (ProcessLoopDispatch), reads a converted value (ProcessAndReadConvertedValue), stores an element (ProcessAndStoreElement), and drives sub-operations (ProcessAndCheckAndProcess3, ProcessAndProcessAndProcess154, ProcessAndProcessAndProcess1776, ProcessAndProcessAndProcess1815, sub_82188568, sub_82BC5870, sub_82BC68F0) based on the result. This is a frequently-called processor in the 0x82BB3 process cluster. 371 lines. 12 callees. 7 callers.
+[functions."0x82BB30D8"]
+name = "ProcessAndProcessAndProcess1842_82BB30D8"
+
+
+# Process a very large data structure by computing a wrapped value (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and one hundred and seventy-second form). It takes a structure and computes a wrapped value (ComputeWrapped). This is a frequently-called processor in the 0x82B8B process cluster. 419 lines. 1 callee. 5 callers.
+[functions."0x82B8BEA0"]
+name = "ProcessAndProcessAndProcess1872_82B8BEA0"
+
+
+# Process a structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and one hundred and eighty-eighth form). It takes a structure, checks its state, and drives sub-operations (sub_82B84060, ProcessAndProcessAndProcess1889, sub_82BE63B8, sub_82CBBB58) based on the result. This is a frequently-called helper in the 0x82B83 process cluster. 125 lines. 4 callees. 8 callers.
+[functions."0x82B83ED0"]
+name = "ProcessAndProcessAndProcess1888_82B83ED0"
+
+
+# Process a large structure by incrementing a refcount atomically (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and two hundred and fifth form). It takes a structure, increments a refcount atomically (IncrementRefcountAtomic), and drives sub-operations (ProcessAndProcessAndProcess1323, ProcessAndProcessAndProcess652) based on the result. This is a frequently-called helper in the 0x82B92 process cluster. 117 lines. 3 callees. 19 callers.
+[functions."0x82B920F0"]
+name = "ProcessAndProcessAndProcess1905_82B920F0"
+
+
+# Process a large structure by zeroing memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and two hundred and sixth form). It takes a structure, zeroes memory (MemSet_SdkRuntime), and drives sub-operations (ProcessAndComputeAndProcess28, ProcessAndIndexRegionAndProcess) based on the result. Part of the 0x82BAC process cluster. 207 lines. 3 callees. 1 caller (ProcessAndProcessAndProcess_82174D38).
+[functions."0x82BAC4E8"]
+name = "ProcessAndProcessAndProcess1906_82BAC4E8"
+
+
+# Process a very large data structure by copying memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and two hundred and thirty-seventh form). It takes a structure, copies memory (MemCpy_SdkRuntime), computes a wrapped value (ComputeWrapped), and drives sub-operations (sub_82B8C1C8, sub_82B8C900, sub_82B8D010, sub_82B8DFA0) based on the result. Part of the 0x82B8E process cluster. 1273 lines. 6 callees. 1 caller (ProcessAndProcessAndProcess1938).
+[functions."0x82B8E320"]
+name = "ProcessAndProcessAndProcess1937_82B8E320"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and two hundred and thirty-eighth form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess1937). Part of the 0x82B8F process cluster. 74 lines. 1 callee. 0 callers.
+[functions."0x82B8F568"]
+name = "ProcessAndProcessAndProcess1938_82B8F568"
+
+
+# Process a very large data structure by inserting a hash entry (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and two hundred and fifty-sixth form). It takes a structure and inserts a hash entry (InsertHashEntry). Part of the 0x82BB9 process cluster. 291 lines. 1 callee. 1 caller (sub_82BB8A50).
+[functions."0x82BB9D30"]
+name = "ProcessAndProcessAndProcess1956_82BB9D30"
+
+
+# Process a very large data structure by freeing size-bucketed memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and three hundred and forty-fifth form). It takes a structure, frees size-bucketed memory (Free_SizeBucketed), and drives sub-operations (sub_82A97648, ProcessAndProcessAndProcess2028) based on the result. Part of the 0x82B90 process cluster. 477 lines. 3 callees. 1 caller (ProcessAndProcessAndProcess569).
+[functions."0x82B90080"]
+name = "ProcessAndProcessAndProcess2045_82B90080"
+
+
+# Process a very large data structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and three hundred and sixty-sixth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess1653, ProcessAndProcessAndProcess1654, ProcessAndProcessAndProcess731) based on the result. Part of the 0x82B8C process cluster. 1009 lines. 3 callees. 1 caller (ProcessAndProcessAndProcess1937).
+[functions."0x82B8C1C8"]
+name = "ProcessAndProcessAndProcess2066_82B8C1C8"
+
+
+# Process a large structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and three hundred and seventy-third form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82B8A process cluster. 167 lines. 0 callees. 0 callers.
+[functions."0x82B8A628"]
+name = "ProcessAndProcessAndProcess2073_82B8A628"
+
+
+# Process a very large data structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and four hundred and twenty-eighth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess1653, ProcessAndProcessAndProcess1654, ProcessAndProcessAndProcess1872, ProcessAndProcessAndProcess731) based on the result. Part of the 0x82B8D process cluster. 2191 lines. 4 callees. 1 caller (ProcessAndProcessAndProcess1937).
+[functions."0x82B8D010"]
+name = "ProcessAndProcessAndProcess2128_82B8D010"
+
+
+# Process a large structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and four hundred and sixty-fourth form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess2167). This is a frequently-called helper in the 0x82B86 process cluster. 135 lines. 1 callee. 3 callers (sub_82B86778, ProcessAndProcessAndProcess2165, sub_82B86A08).
+[functions."0x82B86690"]
+name = "ProcessAndProcessAndProcess2164_82B86690"
+
+
+# Process a large structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and four hundred and sixty-fifth form). It takes a structure, checks its state, and drives sub-operations (sub_82B859F0, sub_82B85D40, sub_82B85E88, sub_82B86358, ProcessAndProcessAndProcess2164) based on the result. Part of the 0x82B86 process cluster. 180 lines. 5 callees. 1 caller (ProcessAndProcessAndProcess2147).
+[functions."0x82B868C0"]
+name = "ProcessAndProcessAndProcess2165_82B868C0"
+
+
+# Process a very large data structure by decrementing a refcount (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and four hundred and sixty-sixth form). It takes a structure, decrements a refcount (DecrementRefcountAtomic), sets memory (MemSet_SdkRuntime), and drives sub-operations (ProcessAndProcessAndProcess1051, ProcessAndProcessAndProcess1251, ProcessAndProcessAndProcess1407, ProcessAndProcessAndProcess1868, ProcessAndProcessAndProcess1905, ProcessAndProcessAndProcess1939, ProcessAndProcessAndProcess1940, ProcessAndProcessAndProcess1944, ProcessAndProcessAndProcess533, ProcessAndProcessAndProcess620, SwitchDispatch) based on the result. Part of the 0x82B8F process cluster. 457 lines. 13 callees. 0 callers.
+[functions."0x82B8F220"]
+name = "ProcessAndProcessAndProcess2166_82B8F220"
+
+
+# Process a structure by allocating fresh memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and four hundred and sixty-seventh form). It takes a structure, allocates fresh memory (Allocate_OrDbgBreak), drives a sub-operation (ProcessAndProcessAndProcess1872), and drives another sub-operation (sub_82B8EBD0) based on the result. Part of the 0x82B8F process cluster. 57 lines. 3 callees. 1 caller (ProcessAndProcessAndProcess2164).
+[functions."0x82B8F760"]
+name = "ProcessAndProcessAndProcess2167_82B8F760"
+
+
+# Process a very large data structure by copying memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and four hundred and seventy-fourth form). It takes a structure, copies memory (MemCpy_SdkRuntime), sets memory (MemSet_SdkRuntime), and copies a struct region (ProcessAndCopyStructRegion). This is a frequently-called processor in the 0x82B85 process cluster. 971 lines. 3 callees. 4 callers.
+[functions."0x82B852D0"]
+name = "ProcessAndProcessAndProcess2174_82B852D0"
+
+
+# Process a structure by allocating fresh memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and four hundred and ninety-ninth form). It takes a structure, allocates fresh memory (Allocate_OrDbgBreak), sets memory (MemSet_SdkRuntime via ProcessAndProcessAndProcess2184), and drives sub-operations (ProcessAndProcessAndProcess1888, ProcessAndProcessAndProcess880) based on the result. This is a frequently-called helper in the 0x82B85 process cluster. 111 lines. 4 callees. 20 callers.
+[functions."0x82B850B8"]
+name = "ProcessAndProcessAndProcess2199_82B850B8"
+
+
+# Process a structure by processing a float-to-int conversion (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and five hundred and thirty-sixth form). It takes a structure and processes a float-to-int conversion (FloatToIntProcess). Part of the 0x82BAC process cluster. 96 lines. 1 callee. 1 caller (ProcessAndProcessAndProcess9).
+[functions."0x82BACBE8"]
+name = "ProcessAndProcessAndProcess2236_82BACBE8"
+
+
+# Process a very large data structure by inserting a hash entry (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and five hundred and thirty-seventh form). It takes a structure, gets an indexed pointer (GetIndexedPointer), grows and zeros a buffer (GrowAndZeroBuffer), inserts a hash entry (InsertHashEntry), dispatches an indexed value (ProcessAndDispatchIndexedValue), performs a guarded dispatch (ProcessAndGuardedDispatch), stores an element (ProcessAndStoreElement2), and drives sub-operations (ProcessAndProcessAndProcess1956, ProcessApply) based on the result. Part of the 0x82BB8 process cluster. 237 lines. 8 callees. 0 callers.
+[functions."0x82BB8A50"]
+name = "ProcessAndProcessAndProcess2237_82BB8A50"
+
+
+# Process a large structure by setting memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and five hundred and seventy-fifth form). It takes a structure and sets memory (MemSet_SdkRuntime). Part of the 0x82B92 process cluster. 135 lines. 1 callee. 1 caller (ProcessAndProcessAndProcess2276).
+[functions."0x82B92EC0"]
+name = "ProcessAndProcessAndProcess2275_82B92EC0"
+
+
+# Process a structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and five hundred and seventy-sixth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess652, ProcessAndProcessAndProcess2275) based on the result. This is a frequently-called helper in the 0x82B92 process cluster. 80 lines. 2 callees. 6 callers.
+[functions."0x82B92FB0"]
+name = "ProcessAndProcessAndProcess2276_82B92FB0"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand three hundred and seventy-eighth form). It takes a value (a), a value (b), a value (c), a value (d), a value (e), a value (f), a value (g), and a value (h); it checks the value's state, and drives sub-operations (DispatchByTypeCode) based on the result. This is the "process this data" routine (two thousand three hundred and seventy-eighth form), part of the 0x82B91 process cluster. 196 lines. 1 callee. 2 callers (ProcessAndProcessAndProcess1323 and ProcessAndProcessAndProcess1945).
+[functions."0x82B91D00"]
+name = "ProcessAndProcessAndProcess2377_82B91D00"
+
+
+# Process a structure by checking its state and driving many sub-operations (two thousand four hundred and thirty-sixth form). It takes a structure (a: fields at a->4 and a->12), a value (b), a value (c), and a structure (d: fields at d->0, d->4, d->8, and d->12); it checks the structure's state, and drives many sub-operations (Free_SizeBucketed_Thunk, ProcessAndProcessAndProcess2259, and more) based on the result. This is the "process this data" routine (two thousand four hundred and thirty-sixth form), part of the 0x82B8F process cluster. 548 lines. 3 callees. 2 callers (sub_82B8AA48 and ProcessAndProcessAndProcess1653).
+[functions."0x82B8FCA8"]
+name = "ProcessAndProcessAndProcess2435_82B8FCA8"
+
+
+# Process a structure by checking its state and driving many sub-operations (two thousand four hundred and fifty-first form). It takes a value (a) and a structure (b: fields at b->20, b->12, and b->4); it checks the structure's state, and drives many sub-operations (Allocate_OrDbgBreak, Allocate_SizeBucketed_Thunk, ProcessAndCopyStructRegion, ProcessAndProcessAndProcess1089, ProcessAndProcessAndProcess2435, and more) based on the result. This is the "process this data" routine (two thousand four hundred and fifty-first form), part of the 0x82B8A process cluster. 1225 lines. 9 callees. 1 caller (ProcessAndProcessAndProcess2449).
+[functions."0x82B8AA48"]
+name = "ProcessAndProcessAndProcess2450_82B8AA48"
+
+
+# Process a structure by checking its state (two thousand four hundred and fifty-second form). It takes a structure (a: fields at a->0, a->20, a->4, and a->16), a value (b), and a value (c); it checks the structure's state. This is the "process this data" routine (two thousand four hundred and fifty-second form), part of the 0x82B98 process cluster. 351 lines. 0 callees. 2 callers (sub_82B8AA48 and sub_82B983D8).
+[functions."0x82B98158"]
+name = "ProcessAndProcessAndProcess2451_82B98158"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand four hundred and sixty-eighth form). It takes a value (a); it checks the value's state, and drives sub-operations (ProcessAndProcessAndProcess2276) based on the result. This is the "process this data" routine (two thousand four hundred and sixty-eighth form), part of the 0x82B86 process cluster. 68 lines. 1 callee. 12 callers (sub_82A8CCB8, sub_82A700A8, sub_82A53018, and more).
+[functions."0x82B86F38"]
+name = "ProcessAndProcessAndProcess2467_82B86F38"
+
+
+# Process a value by checking its state (two thousand four hundred and seventy-first form). It takes a value (a), a value (b), and a value (c); it checks the value's state, and packs the value's bits based on the result. This is the "process this data" routine (two thousand four hundred and seventy-first form), part of the 0x82B91 process cluster. 78 lines. 0 callees. 0 callers (vtable-dispatched).
+[functions."0x82B91440"]
+name = "ProcessAndProcessAndProcess2520_82B91440"
+
+
+# Process a value by checking its state (two thousand four hundred and seventy-second form). It takes a value (a), a value (b), and a value (c); it checks the value's state, and packs the value's bits based on the result. This is the "process this data" routine (two thousand four hundred and seventy-second form), part of the 0x82B91 process cluster. 74 lines. 0 callees. 0 callers (vtable-dispatched).
+[functions."0x82B91520"]
+name = "ProcessAndProcessAndProcess2521_82B91520"
+
+
+# Process a value by checking its state (two thousand four hundred and seventy-third form). It takes a value (a), a value (b), and a value (c); it checks the value's state, and packs the value's bits based on the result. This is the "process this data" routine (two thousand four hundred and seventy-third form), part of the 0x82B91 process cluster. 78 lines. 0 callees. 0 callers (vtable-dispatched).
+[functions."0x82B915D8"]
+name = "ProcessAndProcessAndProcess2522_82B915D8"
+
+
+# Process a value by checking its state (two thousand four hundred and seventy-fourth form). It takes a structure (a: field at a->24), a value (b), and a value (c); it checks the value's state, and packs the value's bits (scaling by a constant) based on the result. This is the "process this data" routine (two thousand four hundred and seventy-fourth form), part of the 0x82B91 process cluster. 50 lines. 0 callees. 0 callers (vtable-dispatched).
+[functions."0x82B91690"]
+name = "ProcessAndProcessAndProcess2523_82B91690"
+
+
+# Process a value by checking its state (two thousand four hundred and seventy-fifth form). It takes a value (a), a value (b), and a value (c); it checks the value's state, and packs the value's bits based on the result. This is the "process this data" routine (two thousand four hundred and seventy-fifth form), part of the 0x82B91 process cluster. 60 lines. 0 callees. 0 callers (vtable-dispatched).
+[functions."0x82B91778"]
+name = "ProcessAndProcessAndProcess2524_82B91778"
+
+
+# Process a value by checking its state (two thousand four hundred and seventy-sixth form). It takes a value (a), a value (b), and a value (c); it checks the value's state, and packs the value's bits based on the result. This is the "process this data" routine (two thousand four hundred and seventy-sixth form), part of the 0x82B91 process cluster. 60 lines. 0 callees. 0 callers (vtable-dispatched).
+[functions."0x82B917F8"]
+name = "ProcessAndProcessAndProcess2525_82B917F8"
+
+
+# Process a value by checking its state (two thousand four hundred and seventy-seventh form). It takes a value (a), a value (b), and a value (c); it checks the value's state, and packs the value's bits based on the result. This is the "process this data" routine (two thousand four hundred and seventy-seventh form), part of the 0x82B91 process cluster. 30 lines. 0 callees. 0 callers (vtable-dispatched).
+[functions."0x82B918F8"]
+name = "ProcessAndProcessAndProcess2526_82B918F8"
+
+
+# Process a value by checking its state (two thousand four hundred and seventy-eighth form). It takes a value (a), a value (b), and a value (c); it checks the value's state, and packs the value's bits based on the result. This is the "process this data" routine (two thousand four hundred and seventy-eighth form), part of the 0x82B91 process cluster. 30 lines. 0 callees. 0 callers (vtable-dispatched).
+[functions."0x82B91950"]
+name = "ProcessAndProcessAndProcess2527_82B91950"
+
+
+# Process a value by checking its state (two thousand four hundred and seventy-ninth form). It takes a value (a), a value (b), and a value (c); it checks the value's state, and packs the value's bits based on the result. This is the "process this data" routine (two thousand four hundred and seventy-ninth form), part of the 0x82B91 process cluster. 30 lines. 0 callees. 0 callers (vtable-dispatched).
+[functions."0x82B919A8"]
+name = "ProcessAndProcessAndProcess2528_82B919A8"
+
+
+# Process a value by checking its state (two thousand four hundred and eightieth form). It takes a value (a), a value (b), and a value (c); it checks the value's state, and packs the value's bits based on the result. This is the "process this data" routine (two thousand four hundred and eightieth form), part of the 0x82B91 process cluster. 30 lines. 0 callees. 0 callers (vtable-dispatched).
+[functions."0x82B91A00"]
+name = "ProcessAndProcessAndProcess2529_82B91A00"
+
+
+# Process a value by checking its state and driving many sub-operations (two thousand four hundred and eighty-seventh form). It takes a structure (a) and a structure (b: fields at b->4, b->0, and b->8); it checks the value's state, and drives many sub-operations (Allocate_OrDbgBreak, MemCpy_SdkRuntime, MemCpy_Vectorized, and more) based on the result. This is the "process this data" routine (two thousand four hundred and eighty-seventh form), part of the 0x82B84 process cluster. 149 lines. 4 callees. 2 callers (sub_82B8B330 and ProcessAndProcessAndProcess2450).
+[functions."0x82B84550"]
+name = "ProcessAndProcessAndProcess2536_82B84550"
+
+
+# Process a structure by checking its state and driving sub-operations (two thousand four hundred and one hundred and thirty-sixth form). It takes a structure (a: fields at a->16 and a->4); it checks the structure's state, and drives sub-operations (sub_82B8A510, Free_SizeBucketed_Thunk, DestructRefCounted, and more) based on the result, freeing fields and destructing the structure. This is the "process this data" routine (two thousand four hundred and one hundred and thirty-sixth form), part of the 0x82B8A process cluster. 67 lines. 3 callees. 2 callers (sub_82B7EC80 and sub_82B7E658).
+[functions."0x82B8A4A8"]
+name = "ProcessAndProcessAndProcess2585_82B8A4A8"
+
+
+# Process a value by checking its state and driving many sub-operations (two thousand four hundred and one hundred and thirty-seventh form). It takes several values (a through g); it checks the value's state, and drives many sub-operations (ProcessAndProcessAndProcess652, ProcessAndProcessAndProcess606, and more) based on the result, allocating a small structure. This is the "process this data" routine (two thousand four hundred and one hundred and thirty-seventh form), part of the 0x82B92 process cluster. 168 lines. 3 callees. 11 callers.
+[functions."0x82B923B8"]
+name = "ProcessAndProcessAndProcess2586_82B923B8"
+
+
+# Process a value by checking its state (two thousand four hundred and one hundred and thirty-eighth form). It takes a value (a) and a value (b); it checks the value's state, and drives sub-operations (a virtual call) based on the result, storing values into the result structure's fields. This is the "process this data" routine (two thousand four hundred and one hundred and thirty-eighth form), part of the 0x82BAF process cluster. 40 lines. 0 callees. 0 callers (vtable-dispatched).
+[functions."0x82BAF940"]
+name = "ProcessAndProcessAndProcess2587_82BAF940"
+
+
+# Process a value by checking its state and driving many sub-operations (two thousand four hundred and one hundred and sixtieth form). It takes a structure (a: fields at a->0 and a->4) and a structure (b: fields at b->4, b->0, and b->8); it checks the value's state, and drives many sub-operations (Allocate_OrDbgBreak, MemCpy_SdkRuntime, MemSet_SdkRuntime, and more) based on the result. This is the "process this data" routine (two thousand four hundred and one hundred and sixtieth form), part of the 0x82B84 process cluster. 127 lines. 6 callees. 2 callers (sub_82B8B330 and ProcessAndProcessAndProcess2450).
+[functions."0x82B843F8"]
+name = "ProcessAndProcessAndProcess2609_82B843F8"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand four hundred and one hundred and sixty-first form). It takes a structure (a: fields at a->32, a->0, a->4, a->20, and a->872) and a value (b); it checks the value's state, and drives sub-operations (MemSet_SdkRuntime, MemCpy_SdkRuntime, and more) based on the result, initializing a large structure. This is the "process this data" routine (two thousand four hundred and one hundred and sixty-first form), part of the 0x82B92 process cluster. 146 lines. 2 callees. 2 callers (ProcessAndProcessAndProcess2609 and sub_82B92D48).
+[functions."0x82B92C50"]
+name = "ProcessAndProcessAndProcess2610_82B92C50"
+
+
+# Process a value by checking its state and driving many sub-operations (two thousand four hundred and one hundred and eighty-first form). It takes a value (a) and a value (b); it checks the value's state, and drives many sub-operations (Allocate_OrDbgBreak, ProcessAndProcessAndProcess1888, ProcessAndProcessAndProcess2559, and more) based on the result, allocating a small structure. This is the "process this data" routine (two thousand four hundred and one hundred and eighty-first form), part of the 0x82B8B process cluster. 95 lines. 4 callees. 1 caller (sub_82B84BD0).
+[functions."0x82B8B960"]
+name = "ProcessAndProcessAndProcess2630_82B8B960"
+
+
+# Existing Functions
+
+# The main per-frame render/present loop (one call per frame: ~30/s at the
+# 30 fps cap). Presents the frame via VdSwap and
+# calls the frame limiter (0x82242628), the per-frame helpers, and the
+# 60 FPS dispatch function (0x82B9C7F8). fps_meter.h hooks this symbol.
+[functions."0x82B9CD68"]
+name = "MainRenderLoop_82B9CD68"

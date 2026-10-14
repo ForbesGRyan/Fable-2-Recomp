@@ -1,0 +1,464 @@
+# data-processing region 0x82240000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# A thin guard + dispatch: if both arguments are null, return 0; otherwise load a global and
+# tail-call sub_8240DAA8.
+
+# Args: (r3), a (r4), (r5), b (r6). If both a and b are 0, it returns 0 (nothing to do). Otherwise
+# it loads a global base (from a fixed .data address) and tail-calls sub_8240DAA8 (the actual
+# work). So it's a "guard (both-null fast path) then dispatch to sub_8240DAA8" thunk. 24 lines.
+# 0 direct callers (it's reached via a dispatch/vcall, not a direct call). The global's meaning and
+# sub_8240DAA8's role (the real operation) aren't resolvable from this thunk alone, so the name
+# states the mechanism: a guard that dispatches.
+[functions."0x8227CB70"]
+name = "GuardDispatch_8227CB70"
+
+
+# A process (a loop, with a state dispatch and a complex computation, the caller of StateDispatch_82BCBB40):
+# loop (a state dispatch, a particular state dispatch / a particular state, a complex computation, a particular
+# computation / a particular operation, a particular size / a particular allocation, calling StateDispatch_82BCBB40, a
+# state dispatch, a particular state / a particular transition), and (in paths) perform a complex computation (a count
+# , a particular count / a particular value, a size, a particular size / a particular allocation, a particular
+# operation).
+
+# Args: obj (r3, r29, ->16 = a value, a particular structure, a dispatch object), (more). It loops (a state dispatch,
+# a particular state dispatch / a particular state, a complex computation, a particular computation / a particular
+# operation, a particular size / a particular allocation): it reads a value (r31, obj->16, a value, a particular value
+# , a dispatch object), and computes a count (r11, r31->84, a count, a particular count / a particular value), and a
+# size (r10, r11 * 4, a size, a 4-byte element, a particular size), and a size (r11, r11 + r10, a size, a 3x size, a
+# particular size), and a size (r30, r11 * 2, a size, a 2-byte element, a particular size), and (if the size is non
+# -zero, a particular state, a particular size), it takes one path (a particular state / a particular operation); if it
+# is zero (a null state, a particular state), it loads a constant (r30, a constant, from a fixed .data address, a
+# particular value, a particular size, a particular state). It reads a value (r11, r31->64, a value, a particular
+# value), and a value (r9, r31->68, a value, a particular value), and a value (r10, r31->76, a value, a particular
+# value), and computes a size (r11, r9 - r11, a size, a particular size), and a size (r8, r11 + r10, a size, a
+# particular size), and stores it (r31->76, a store, a particular size, a particular value / a particular state). In
+# each iteration it performs a state dispatch (StateDispatch_82BCBB40, sub_82BCBB40, a state dispatch, on a value (obj
+# , r29, a particular structure, a dispatch object), a particular state / a particular transition, a particular
+# operation). So it's a "process (a loop, with a state dispatch and a complex computation: loop (a state dispatch, a
+# particular state dispatch / a particular state, a complex computation, a particular computation / a particular
+# operation, a particular size / a particular allocation, calling StateDispatch_82BCBB40, a state dispatch, a
+# particular state / a particular transition), and (in paths) perform a complex computation (a count, a particular
+# count / a particular value, a size, a particular size / a particular allocation, a particular operation))" routine (a
+# loop process, part of the 0x8227B cluster, a caller of StateDispatch_82BCBB40). 121 lines, 1 callee
+# (StateDispatch_82BCBB40, sub_82BCBB40, a state dispatch). 10 callers: sub_82BDA8F0, sub_82306698, sub_82BD8990, sub
+# _82BC71C0, sub_82BD7570, sub_8219CDA8, sub_82BC5A88, sub_82BB5FD0, sub_82BC05C8, sub_82BB8790 (siblings in the
+# 0x82BDA/0x82306/0x82BD8/0x82BC7/0x82BD7/0x8219C/0x82BC5/0x82BB5/0x82BC0/0x82BB8 clusters). The object's class (obj,
+# r29, ->16 = a value, a particular structure, a dispatch object, a particular state / a particular value) and the
+# value's meaning (a value, a particular value, a dispatch object) aren't resolvable, so the name states the
+# mechanism: a loop process (with a state dispatch and a complex computation) (loop (a state dispatch, a particular
+# state dispatch / a particular state, a complex computation, a particular computation / a particular operation, a
+# particular size / a particular allocation, calling StateDispatch_82BCBB40, a state dispatch, a particular state / a
+# particular transition), and (in paths) perform a complex computation (a count, a particular count / a particular
+# value, a size, a particular size / a particular allocation, a particular operation)).
+[functions."0x8227B8B8"]
+name = "ProcessLoopDispatch_8227B8B8"
+
+
+# Applies a per-element operation across a container's elements. It first inspects the sub-object at
+# obj->16; when that sub-object's internal range is "active" (obj->16->68 < obj->16->64) it kicks off
+# ProcessLoopDispatch_8227B8B8. It then resolves a per-element parameter (either obj->68, or
+# obj->20->4->0->12 when obj->20 differs from obj->40) and drives the actual element loop through
+# sub_8227B988, stepping by n (<< 3) bytes per iteration. This is the "walk the elements and process
+# each one" entry point for a family of 8-byte-element containers.
+# Part of the 0x8227B cluster (sibling of ProcessLoopDispatch_8227B8B8 / sub_8227B988). 125 lines,
+# 2 callees (ProcessLoopDispatch_8227B8B8, sub_8227B988). 10 callers (the 0x82BBx/0x82BCx/0x82BDx cluster).
+[functions."0x8227B7E0"]
+name = "ProcessApply_8227B7E0"
+
+
+# Inner element-processing loop called by ProcessApply_8227B7E0. It takes the element count n (r4)
+# and computes the payload size as n * 8 plus a 20-byte header (r30 = (n << 3) + 20). It issues a
+# virtual method call through the sub-object's method table (obj->16->12, passing obj->16->16 and
+# the payload size), and when that call returns non-zero it drives the follow-up via sub_82BCCB88
+# (flag 4). This walks/updates the n elements that ProcessApply set up.
+# Part of the 0x8227B cluster (sibling of ProcessApply_8227B7E0 / ProcessLoopDispatch_8227B8B8).
+# 94 lines, 1 callee (sub_82BCCB88). 1 caller: ProcessApply_8227B7E0.
+[functions."0x8227B988"]
+name = "ProcessApplyInner_8227B988"
+
+
+# A processor that accesses and converts the data. It takes a structure (a: a field at a->8). It accesses an element (AccessElement8_82A1E620, with a). It then computes and converts
+# (ProcessAndComputeAndConvert_8223B810, with a and the accessed element's first field). It then stores two fields (a->0 and a->4) from the computed result. It checks the element's -4 field
+# (a type) and, when it is at least 4 and the element's -8 field's +5 byte (masked to 2 bits) is non-zero, it performs further processing. This is the "access and convert this data" routine,
+# part of the 0x82241 process cluster. 94 lines. 2 callees (AccessElement8 and ProcessAndComputeAndConvert). 6 callers (sub_821A3A50, sub_82A23970, sub_82A23828, sub_82A298E8, sub_82A23EE8,
+# and sub_8228EF20).
+[functions."0x82241898"]
+name = "ProcessAndAccessAndConvert_82241898"
+
+
+# A processor that sets a jump point and processes the data. It takes a structure (a: field at a->96), a value (b), and a value (c). It stores b and c into local buffers. It then reads a->96 (a
+# pointer) and stores a local buffer into a->96 (a stack pointer). It then sets a jump point (ppc_setjmp_83000200, with a local buffer). This is the "set a jump point and process this data"
+# routine, part of the 0x82277 process cluster. 88 lines. 0 callees (leaf function). 4 callers (sub_82A20528, sub_82415428, sub_82277B88, and sub_8219A8E8).
+[functions."0x82277AF8"]
+name = "ProcessAndSetjmpAndProcess_82277AF8"
+
+
+# A processor that releases and processes the data. It takes a structure (a: fields at a->120 and a->124). It reads a->124 (a pointer) and a->120 (a pointer) and computes (a->124 minus a->120) shifted right by 3. It then iterates the list (from a->120), reading each element's +4 field (a pointer) and +0 field (a value); when the +4 field is non-zero it acquires a global lock and releases (Release_RefCounted_829FF648). This is the "release and process this data" routine, part of the 0x82270 process cluster. 104 lines. 2 callees (Release_RefCounted and sub_82270C00). 4 callers (sub_82283D80, sub_823FBF88, sub_8226EA00, and ProcessAndDispatch_828180A8).
+[functions."0x82270B68"]
+name = "ProcessAndReleaseAndProcess_82270B68"
+
+
+# A processor that constructs and processes the data (twenty-fifth form). It takes a structure (a: field at a->8). It reads a->8 (a value); when the value is not -1 it reads a .data pointer (offset 26788) and constructs a 12-byte structure (Construct12Byte_825F7B10, with a .data pointer (144) and other values). It then stores -1 into a->8. This is the "construct and process this data" routine (twenty-fifth form), part of the 0x82270 process cluster. 73 lines. 1 callee (Construct12Byte). 2 callers (ProcessAndReleaseAndProcess_82270B68 and sub_827DFE18).
+[functions."0x82270C00"]
+name = "ProcessAndConstructAndProcess25_82270C00"
+
+
+# A processor that searches and processes the data (seventh form). It takes a structure (a: fields at a->16 and a->32). When a->32 is non-zero it searches the structure (a->16, in 8-byte chunks) and processes (sub_82A2FD80, with a->32). This is the "search and process this data" routine (seventh form), part of the 0x82242 process cluster. 79 lines. 1 callee (sub_82A2FD80). 2 callers (sub_822D7F88 and GuildChest_ProcessItems).
+[functions."0x82242490"]
+name = "ProcessAndSearchAndProcess7_82242490"
+
+
+# Process a vector by performing vector operations on its elements (five hundred and fifty-sixth form). It takes a pointer (a, a destination) and a pointer (b, a source); it copies data (MemCpy_SdkRuntime) and performs vector operations on the elements. This is the "process this data" routine (five hundred and fifty-sixth form), part of the 0x82270 process cluster. 104 lines. 1 callee. 12 callers (many from the 0x821*, 0x822*, and 0x82A* clusters).
+[functions."0x82270C80"]
+name = "ProcessAndProcessAndProcess556_82270C80"
+
+
+# Process a structure by driving sub-operations (five hundred and ninety-second form). It takes a value (a), a structure (b: field at b->472), and three values (c, d, and e); it checks the structure's state, and drives sub-operations (ProcessAndProcessAndProcess516 and ProcessAndProcessAndProcess519) based on the result. This is the "process this data" routine (five hundred and ninety-second form), part of the 0x82269 process cluster. 288 lines. 2 callees. 1 caller (sub_82269BB8).
+[functions."0x82269FA0"]
+name = "ProcessAndProcessAndProcess592_82269FA0"
+
+
+# Process a structure by checking its state and driving sub-operations (five hundred and ninety-third form). It takes a value (a), a structure (b: fields at b->44, b->52, and b->48), and two values (c and d); it checks the structure's state, and drives sub-operations (sub_8321B498) based on the result. This is the "process this data" routine (five hundred and ninety-third form), part of the 0x8226A process cluster. 253 lines. 1 callee. 1 caller (sub_82269BB8).
+[functions."0x8226A338"]
+name = "ProcessAndProcessAndProcess593_8226A338"
+
+
+# Process a value by driving sub-operations (six hundred and fortieth form). It takes a value (a), a structure (b: field at b->0), and a value (c); it drives sub-operations (ProcessAndProcessAndProcess560, ProcessAndProcessAndProcess503, and more) based on the result. This is the "process this data" routine (six hundred and fortieth form), part of the 0x82261 process cluster. 105 lines. 5 callees. 12 callers (many from the 0x821*, 0x822*, 0x825*, 0x826*, 0x828*, and 0x829* clusters).
+[functions."0x82261A80"]
+name = "ProcessAndProcessAndProcess640_82261A80"
+
+
+# Process a structure by checking its state and driving many sub-operations (six hundred and sixty-ninth form). It takes a structure (a: fields at a->176 and a->216) and a value (b); it checks the structure's state, and drives many sub-operations (ProcessAndProcessAndProcess562, ProcessAndProcessAndProcess564, and more) based on the result. This is the "process this data" routine (six hundred and sixty-ninth form), part of the 0x82274 process cluster. 566 lines. 4 callees. 0 callers.
+[functions."0x82274910"]
+name = "ProcessAndProcessAndProcess669_82274910"
+
+
+# Process a structure by checking its state and driving sub-operations (six hundred and seventy-first form). It takes a structure (a: fields at a->32 and a->48), a value (b), and a value (c); it checks the structure's state, and drives sub-operations (sub_8225FE18) based on the result. This is the "process this data" routine (six hundred and seventy-first form), part of the 0x8225F process cluster. 61 lines. 1 callee. 4 callers (many from the 0x821*, 0x822*, and 0x82B* clusters).
+[functions."0x8225FDB0"]
+name = "ProcessAndProcessAndProcess670_8225FDB0"
+
+
+# Process a structure by checking its state and driving many sub-operations (six hundred and seventy-fourth form). It takes a structure (a: fields at a->32, a->24, and a->28), a value (b), and a value (c); it checks the structure's state, and drives many sub-operations (Allocate_OrDbgBreak, DestructRefCounted, and more) based on the result. This is the "process this data" routine (six hundred and seventy-fourth form), part of the 0x8225E process cluster. 199 lines. 5 callees. 2 callers (sub_821FBC60 and sub_8225FB90).
+[functions."0x8225E300"]
+name = "ProcessAndProcessAndProcess673_8225E300"
+
+
+# Process a structure by checking its state and driving many sub-operations (six hundred and ninety-second form). It takes a structure (a: fields at a->196, a->260, a->252, and a->264); it checks the structure's state, and drives many sub-operations (ProcessAndProcessAndProcess517 and more) based on the result. This is the "process this data" routine (six hundred and ninety-second form), part of the 0x82269 process cluster. 445 lines. 5 callees. 1 caller (sub_83229B58).
+[functions."0x822698B8"]
+name = "ProcessAndProcessAndProcess691_822698B8"
+
+
+# Process a structure by checking its state and driving many sub-operations (six hundred and ninety-third form). It takes a structure (a: fields at a->368, a->340, and a->360) and a value (b); it checks the structure's state, and drives many sub-operations (DivideFloats, ProcessAndProcessAndProcess591, ProcessAndProcessAndProcess592, ProcessAndProcessAndProcess593, ProcessAndProcessAndProcess594, ProcessAndProcessAndProcess689, and more) based on the result. This is the "process this data" routine (six hundred and ninety-third form), part of the 0x82269 process cluster. 581 lines. 10 callees. 1 caller (sub_83229B58).
+[functions."0x82269BB8"]
+name = "ProcessAndProcessAndProcess692_82269BB8"
+
+
+# Process a value by performing vector operations (six hundred and ninety-fourth form). It takes a value (a); it performs vector operations on the value. This is the "process this data" routine (six hundred and ninety-fourth form), part of the 0x8227C process cluster. 221 lines. 0 callees. 5 callers (many from the 0x821*, 0x822*, 0x82A*, 0x82B*, 0x82C*, and 0x832* clusters).
+[functions."0x8227C9F8"]
+name = "ProcessAndProcessAndProcess693_8227C9F8"
+
+
+# Process a structure by cloning and updating it (seven hundred and sixth form). It takes a structure, checks its state, and drives sub-operations (CloneObject, sub_822BFD90, sub_82A3F378) based on the result. Part of the 0x8227C process cluster. 135 lines. 3 callees. 0 callers.
+[functions."0x8227CB98"]
+name = "ProcessAndProcessAndProcess706_8227CB98"
+
+
+# Process a large data structure (seven hundred and ninetieth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x8226A process cluster. 537 lines. 0 callees. 2 callers (sub_821E5978 and sub_822683C0).
+[functions."0x8226A9F0"]
+name = "ProcessAndProcessAndProcess790_8226A9F0"
+
+
+# Process a frequently-used structure (seven hundred and ninety-first form). It takes a structure, checks its state, and drives a sub-operation (sub_821E8D20) based on the result. Part of the 0x82265 process cluster. 213 lines. 1 callee. 25 callers.
+[functions."0x822655B0"]
+name = "ProcessAndProcessAndProcess791_822655B0"
+
+
+# Process a structure (seven hundred and ninety-fifth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x8226B process cluster. 42 lines. 0 callees. 0 callers.
+[functions."0x8226B808"]
+name = "ProcessAndProcessAndProcess795_8226B808"
+
+
+# Process a large data structure by driving a sub-operation (seven hundred and one hundred and eleventh form). It takes a structure, checks its state, and drives a sub-operation (ProcessAndProcessAndProcess733) based on the result. Part of the 0x82264 process cluster. 408 lines. 1 callee. 8 callers.
+[functions."0x82264550"]
+name = "ProcessAndProcessAndProcess811_82264550"
+
+
+# Process a refcounted structure (seven hundred and one hundred and fourteenth form). It takes a structure, adjusts a counter (ProcessAndIncrementCounter), replaces a value (ProcessAndReplaceValue), releases a reference (ReleaseGlobalRef), and drives sub-operations based on the result. Part of the 0x82270 process cluster. 185 lines. 7 callees. 7 callers.
+[functions."0x82270A38"]
+name = "ProcessAndProcessAndProcess814_82270A38"
+
+
+# Process an enormous data structure (seven hundred and one hundred and fifteenth form). It takes a structure, checks its state, and drives many sub-operations (ConstructRefCounted, DestructRefCounted, ProcessAndReleaseAndProcess, Release_RefCounted, ProcessAndProcessAndProcess814, and more) based on the result. This is the largest processor in the recompiled binary so far, part of the 0x8226E process cluster. 5208 lines. 9 callees. 1 caller (ProcessAndProcessAndProcess521).
+[functions."0x8226EA00"]
+name = "ProcessAndProcessAndProcess815_8226EA00"
+
+
+# Process a refcounted structure (seven hundred and one hundred and twenty-fifth form). It takes a structure, adjusts its reference count (DecrementRefcountAtomic), and drives a sub-operation (ProcessAndProcessAndProcess811) based on the result. Part of the 0x82242 process cluster. 122 lines. 2 callees. 16 callers.
+[functions."0x822421D8"]
+name = "ProcessAndProcessAndProcess825_822421D8"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and thirty-second form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess833). Part of the 0x8226D process cluster. 78 lines. 1 callee. 3 callers.
+[functions."0x8226DF58"]
+name = "ProcessAndProcessAndProcess832_8226DF58"
+
+
+# Process a structure (seven hundred and one hundred and thirty-third form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x8226D process cluster. 57 lines. 0 callees. 1 caller (sub_8226DF58).
+[functions."0x8226DFE0"]
+name = "ProcessAndProcessAndProcess833_8226DFE0"
+
+
+# Process a large data structure (seven hundred and one hundred and forty-sixth form). It takes a structure, checks its state, and drives a sub-operation (ProcessAndProcessAndProcess832) based on the result. Part of the 0x8226D process cluster. 260 lines. 1 callee. 2 callers (sub_8226DA10 and sub_82AAC580).
+[functions."0x8226DD88"]
+name = "ProcessAndProcessAndProcess846_8226DD88"
+
+
+# Process a large data structure by allocating and driving sub-operations (seven hundred and one hundred and forty-ninth form). It takes a structure, allocates fresh memory (Allocate_OrDbgBreak, ProcessAndAllocateAndProcess2), and drives many sub-operations based on the result. Part of the 0x8226D process cluster. 556 lines. 10 callees. 2 callers (sub_82198F98 and sub_82222C48).
+[functions."0x8226DA10"]
+name = "ProcessAndProcessAndProcess849_8226DA10"
+
+
+# Process a structure by driving sub-operations (seven hundred and one hundred and sixtieth form). It takes a structure, checks its state, and drives sub-operations (sub_821E8D20, sub_82B9B340) based on the result. Part of the 0x8227C process cluster. 156 lines. 2 callees. 6 callers.
+[functions."0x8227CFC8"]
+name = "ProcessAndProcessAndProcess860_8227CFC8"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and sixty-third form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess819). Part of the 0x8227B process cluster. 21 lines. 1 callee. 0 callers.
+[functions."0x8227B030"]
+name = "ProcessAndProcessAndProcess863_8227B030"
+
+
+# Process a structure by driving sub-operations (seven hundred and one hundred and sixty-fifth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess510, ProcessAndProcessAndProcess790) based on the result. Part of the 0x82268 process cluster. 94 lines. 2 callees. 3 callers.
+[functions."0x822683C0"]
+name = "ProcessAndProcessAndProcess865_822683C0"
+
+
+# Dispatch a frequently-used structure (seven hundred and one hundred and eightieth form). It takes a structure, dispatches by type code (DispatchByTypeCode2), and drives a sub-operation (ProcessAndProcessAndProcess670) based on the result. This is a frequently-called dispatcher in the 0x8225F process cluster. 124 lines. 2 callees. 15 callers.
+[functions."0x8225FCD8"]
+name = "ProcessAndProcessAndProcess880_8225FCD8"
+
+
+# Acquire or release a refcount by driving a processor (seven hundred and one hundred and eighty-fifth form). It takes a structure, adjusts its reference count (IncrementRefcountAtomic), and drives sub-operations (ProcessAndProcessAndProcess792, ProcessAndProcessAndProcess805, ProcessAndProcessAndProcess806, ProcessAndProcessAndProcess825, sub_821FC410) based on the result. This is the core refcount acquire/release dispatcher in the 0x82242 cluster. 121 lines. 6 callees. 10 callers.
+[functions."0x82242110"]
+name = "ProcessAndProcessAndProcess885_82242110"
+
+
+# Process a structure by checking float properties (seven hundred and one hundred and eighty-eighth form). It takes a structure, checks and modifies float properties (CheckFloatProperties, ModifyFloatPrecision), and drives sub-operations (ProcessAndProcessAndProcess809) based on the result. Part of the 0x8227A process cluster. 285 lines. 7 callees. 5 callers.
+[functions."0x8227A818"]
+name = "ProcessAndProcessAndProcess898_8227A818"
+
+
+# Process a refcounted structure (seven hundred and one hundred and ninety-seventh form). It takes a structure, swaps its reference count (SwapRefcount), and drives sub-operations (ProcessAndProcessAndProcess772, ProcessAndProcessAndProcess811) based on the result. This is a refcount processor in the 0x8226B cluster. 59 lines. 3 callees. 16 callers.
+[functions."0x8226B038"]
+name = "ProcessAndProcessAndProcess907_8226B038"
+
+
+# Process a large data structure (seven hundred and one hundred and one hundred and thirty-second form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess898, sub_82B9B298) based on the result. Part of the 0x8227A process cluster. 685 lines. 2 callees. 2 callers (sub_821F0CC8 and sub_822A0760).
+[functions."0x8227A9F0"]
+name = "ProcessAndProcessAndProcess932_8227A9F0"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and fiftieth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x8226B process cluster. 18 lines. 0 callees. 1 caller (sub_82FEB738).
+[functions."0x8226B018"]
+name = "ProcessAndProcessAndProcess950_8226B018"
+
+
+# Process a structure by driving sub-operations (seven hundred and one hundred and one hundred and eighty-third form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess556, ProcessAndProcessAndProcess984) based on the result. Part of the 0x82270 process cluster. 262 lines. 2 callees. 4 callers.
+[functions."0x82270D28"]
+name = "ProcessAndProcessAndProcess983_82270D28"
+
+
+# Process a large data structure (seven hundred and one hundred and one hundred and eighty-fourth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess636, ProcessAndProcessAndProcess854) based on the result. Part of the 0x82270 process cluster. 631 lines. 2 callees. 1 caller (sub_82270D28).
+[functions."0x82270EE0"]
+name = "ProcessAndProcessAndProcess984_82270EE0"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and sixteenth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x8226A process cluster. 18 lines. 0 callees. 0 callers.
+[functions."0x8226AE38"]
+name = "ProcessAndProcessAndProcess1016_8226AE38"
+
+
+# Process a structure by driving sub-operations (seven hundred and one hundred and one hundred and one hundred and twenty-second form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess983, ProcessLoopVcall) based on the result. Part of the 0x8226D process cluster. 106 lines. 2 callees. 7 callers.
+[functions."0x8226D4D0"]
+name = "ProcessAndProcessAndProcess1022_8226D4D0"
+
+
+# Acquire a refcount by driving a processor (seven hundred and one hundred and one hundred and one hundred and twenty-sixth form). It takes a structure, increments its reference count (IncrementRefcountAtomic), and drives a sub-operation (ProcessAndProcessAndProcess792) based on the result. This is a refcount acquirer in the 0x82278 process cluster. 55 lines. 2 callees. 6 callers.
+[functions."0x82278C38"]
+name = "ProcessAndProcessAndProcess1026_82278C38"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and fifty-second form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82272 process cluster. 22 lines. 0 callees. 0 callers.
+[functions."0x82272E00"]
+name = "ProcessAndProcessAndProcess1052_82272E00"
+
+
+# Process a frequently-used structure by driving sub-operations (seven hundred and one hundred and one hundred and one hundred and eighty-seventh form). It takes a structure, checks its state, and drives sub-operations (GpuProgressCheck, FastHelper, sub_82B9BEC8) based on the result. This is a frequently-called helper in the 0x82242 process cluster, called from the main render loop and FastHelper. 139 lines. 3 callees. 11 callers.
+[functions."0x82242628"]
+name = "FrameLimiterWait_82242628"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and ninety-third form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess962). Part of the 0x82261 process cluster. 97 lines. 1 callee. 2 callers (sub_8322D988 and ProcessAndProcessAndProcess1095).
+[functions."0x82261668"]
+name = "ProcessAndProcessAndProcess1093_82261668"
+
+
+# Process a structure by driving sub-operations (seven hundred and one hundred and one hundred and one hundred and ninety-fourth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess962, sub_829FDC88, sub_8322B0D0) based on the result. Part of the 0x82261 process cluster. 153 lines. 3 callees. 2 callers (sub_8322D988 and ProcessAndProcessAndProcess1095).
+[functions."0x82261558"]
+name = "ProcessAndProcessAndProcess1094_82261558"
+
+
+# Process a very frequently-used structure (seven hundred and one hundred and one hundred and one hundred and one hundred and twenty-fourth form). It takes a structure and checks its state, with no external sub-operations. This is the second-most-called helper in the recompiled binary. 121 lines. 0 callees. 145 callers.
+[functions."0x822641F0"]
+name = "ProcessAndProcessAndProcess1124_822641F0"
+
+
+# Process a refcounted object by constructing and destructing it (seven hundred and one hundred and one hundred and one hundred and one hundred and sixty-seventh form). It takes a structure, allocates fresh memory (Allocate_OrDbgBreak), constructs and destructs a refcounted object (ConstructRefCounted, DestructRefCounted), and drives sub-operations (ProcessAndProcessAndProcess551, ProcessAndProcessAndProcess885, ProcessAndProcessAndProcess955, ProcessAndProcessAndProcess956, ProcessAndProcessAndProcess1156) based on the result. Part of the 0x82277 process cluster. 196 lines. 8 callees. 2 callers (sub_82277240 and sub_8228A7A8).
+[functions."0x822778B0"]
+name = "ProcessAndProcessAndProcess1167_822778B0"
+
+
+# Process a large data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and sixty-eighth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess510, ProcessAndProcessAndProcess549, ProcessAndProcessAndProcess551, ProcessAndProcessAndProcess552, ProcessAndProcessAndProcess864, ProcessAndProcessAndProcess907, ProcessAndProcessAndProcess1171, ProcessAndProcessAndProcess1172) based on the result. Part of the 0x82278 process cluster. 578 lines. 8 callees. 2 callers (sub_821CB3A0 and sub_8226E6E8).
+[functions."0x82278DF8"]
+name = "ProcessAndProcessAndProcess1168_82278DF8"
+
+
+# Process a large data structure by inserting an element (seven hundred and one hundred and one hundred and one hundred and one hundred and sixty-ninth form). It takes a structure, frees size-bucketed memory (Free_SizeBucketed), inserts an element (InsertElement4), and drives sub-operations (ProcessAndProcessAndProcess1020, sub_822B9880, sub_823B0B10) based on the result. Part of the 0x8227B process cluster. 501 lines. 5 callees. 1 caller (sub_821C8EB0).
+[functions."0x8227B050"]
+name = "ProcessAndProcessAndProcess1169_8227B050"
+
+
+# Process a large structure (seven hundred and one hundred and one hundred and one hundred and one hundred and seventieth form). It takes a structure and drives sub-operations (ProcessAndProcessAndProcess791, ProcessAndProcessAndProcess860, FastHelper) based on the result. Part of the 0x8227C process cluster. 282 lines. 3 callees. 2 callers (sub_822872D0 and sub_822AA060).
+[functions."0x8227CDD0"]
+name = "ProcessAndProcessAndProcess1170_8227CDD0"
+
+
+# Process a large data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and eighty-fourth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndAllocateAndProcess2, ProcessAndProcessAndProcess1074, ProcessAndProcessAndProcess1160, ProcessAndProcessAndProcess590, ProcessAndProcessAndProcess1182, sub_82AAB590, sub_82AAB770, sub_82AAC418, sub_82AAC500) based on the result. Part of the 0x82240 process cluster. 514 lines. 9 callees. 2 callers (sub_821BA1D0 and sub_821C38C8).
+[functions."0x82240CF0"]
+name = "ProcessAndProcessAndProcess1184_82240CF0"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and eighty-fifth form). It takes a structure, computes a wrapped value (ComputeWrapped), and drives a sub-operation (ProcessAndProcessAndProcess653) based on the result. Part of the 0x82275 process cluster. 120 lines. 2 callees. 2 callers (sub_822824B8 and ProcessAndProcessAndProcess1186).
+[functions."0x822757D0"]
+name = "ProcessAndProcessAndProcess1185_822757D0"
+
+
+# Process a very frequently-used structure (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and twenty-fifth form). It takes a structure and checks its state, with no external sub-operations. This is a frequently-called helper in the 0x8227E process cluster. 132 lines. 0 callees. 18 callers.
+[functions."0x8227EE80"]
+name = "ProcessAndProcessAndProcess1225_8227EE80"
+
+
+# Process a structure by dispatching by type code (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and twenty-fifth form). It takes a structure, dispatches by type code (DispatchByTypeCode), and drives sub-operations (ProcessAndProcessAndProcess1250, ProcessAndProcessAndProcess1323) based on the result. Part of the 0x82277 process cluster. 114 lines. 3 callees. 4 callers (sub_821AB648, sub_82A3CCE8, sub_82B91F58, sub_82B92008).
+[functions."0x82277FF8"]
+name = "ProcessAndProcessAndProcess1325_82277FF8"
+
+
+# Process a large data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and ninety-fourth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess551, ProcessAndProcessAndProcess555, ProcessAndProcessAndProcess876, sub_821BC370, sub_821C4AB0, sub_822150E0, sub_82242720, sub_8226E048, sub_8228E688) based on the result. Part of the 0x82242 process cluster. 325 lines. 9 callees. 0 callers.
+[functions."0x82242C18"]
+name = "ProcessAndProcessAndProcess1474_82242C18"
+
+
+# Process a large data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and ninety-fifth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess1026, ProcessAndProcessAndProcess1066, ProcessAndProcessAndProcess1155, ProcessAndProcessAndProcess1168, ProcessAndProcessAndProcess1402, ProcessAndProcessAndProcess1403, ProcessAndProcessAndProcess1462, ProcessAndProcessAndProcess609, ProcessAndProcessAndProcess677, ProcessAndProcessAndProcess678, ProcessAndProcessAndProcess899, ProcessAndProcessAndProcess957, ProcessAndProcessAndProcess1465, sub_821EFC78, sub_8226E130, sub_8229B7F0, sub_82A497A8) based on the result. Part of the 0x8226E process cluster. 331 lines. 17 callees. 1 caller (ProcessAndProcessAndProcess1416).
+[functions."0x8226E6E8"]
+name = "ProcessAndProcessAndProcess1475_8226E6E8"
+
+
+# Process a very large data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and ninety-sixth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess531, ProcessAndProcessAndProcess549, ProcessAndProcessAndProcess551, ProcessAndProcessAndProcess552, sub_82273D90) based on the result. Part of the 0x82274 process cluster. 754 lines. 5 callees. 2 callers (including ProcessAndProcessAndProcess1479).
+[functions."0x822742A0"]
+name = "ProcessAndProcessAndProcess1476_822742A0"
+
+
+# Process a large structure by decrementing a refcount atomically (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and ninety-seventh form). It takes a structure, decrements a refcount atomically (DecrementRefcountAtomic), and drives sub-operations (ProcessAndProcessAndProcess551, ProcessAndProcessAndProcess899, ProcessAndProcessAndProcess905, ProcessAndProcessAndProcess956, sub_82A83778, sub_82A83CB0, sub_82A84280) based on the result. Part of the 0x82275 process cluster. 279 lines. 8 callees. 1 caller (ProcessAndProcessAndProcess1481).
+[functions."0x82275490"]
+name = "ProcessAndProcessAndProcess1477_82275490"
+
+
+# Process a very large data structure by constructing a refcounted object (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and ninety-eighth form). It takes a structure, constructs a refcounted object (ConstructRefCounted), destructs a refcounted object (DestructRefCounted), copies memory (MemCpy), and drives many sub-operations (ProcessAndProcessAndProcess1026, ProcessAndProcessAndProcess1051, ProcessAndProcessAndProcess1075, ProcessAndProcessAndProcess1077, ProcessAndProcessAndProcess1195, ProcessAndProcessAndProcess1322, ProcessAndProcessAndProcess504, ProcessAndProcessAndProcess533, ProcessAndProcessAndProcess551, ProcessAndProcessAndProcess643, ProcessAndProcessAndProcess825, ProcessAndProcessAndProcess885, ProcessAndProcessAndProcess905, ProcessAndProcessAndProcess959, sub_8217DD18, sub_82191C50, sub_821AD488, sub_821B6AC8, sub_821E5978, sub_8229F5A8, sub_822A22F0, sub_822AA2F0, sub_82A687B8) based on the result. Part of the 0x82276 process cluster. 809 lines. 26 callees. 1 caller (ProcessAndProcessAndProcess1465).
+[functions."0x82276700"]
+name = "ProcessAndProcessAndProcess1478_82276700"
+
+
+# Process a very large data structure by incrementing a refcount atomically (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and ninety-ninth form). It takes a structure, increments a refcount atomically (IncrementRefcountAtomic), and drives many sub-operations (ProcessAndProcessAndProcess1021, ProcessAndProcessAndProcess1072, ProcessAndProcessAndProcess1167, ProcessAndProcessAndProcess533, ProcessAndProcessAndProcess551, ProcessAndProcessAndProcess643, ProcessAndProcessAndProcess653, ProcessAndProcessAndProcess675, ProcessAndProcessAndProcess678, ProcessAndProcessAndProcess792, ProcessAndProcessAndProcess805, ProcessAndProcessAndProcess806, ProcessAndProcessAndProcess907, ProcessAndProcessAndProcess955, ProcessAndProcessAndProcess956, sub_821D8310, ProcessAndProcessAndProcess1476, sub_822792D0) based on the result. Part of the 0x82277 process cluster. 877 lines. 19 callees. 1 caller (ProcessAndProcessAndProcess1462).
+[functions."0x82277240"]
+name = "ProcessAndProcessAndProcess1479_82277240"
+
+
+# Process a large structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundredth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess533, ProcessAndProcessAndProcess643, ProcessAndProcessAndProcess675, ProcessAndProcessAndProcess895) based on the result. Part of the 0x8227A process cluster. 284 lines. 4 callees. 1 caller (ProcessAndProcessAndProcess1462).
+[functions."0x8227A300"]
+name = "ProcessAndProcessAndProcess1480_8227A300"
+
+
+# Process a structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and first form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess1022, ProcessAndProcessAndProcess1158, ProcessAndProcessAndProcess501, ProcessAndProcessAndProcess510, ProcessAndProcessAndProcess1477) based on the result. Part of the 0x8227D process cluster. 139 lines. 5 callees. 1 caller (ProcessAndProcessAndProcess1459).
+[functions."0x8227D988"]
+name = "ProcessAndProcessAndProcess1481_8227D988"
+
+
+# Process a very large data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and second form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess1019, ProcessAndProcessAndProcess1046, ProcessAndProcessAndProcess603, ProcessAndProcessAndProcess791, ProcessAndProcessAndProcess806, ProcessAndProcessAndProcess897, FastHelper, ProcessAndProcessAndProcess952, ProcessAndProcessAndProcess1486) based on the result. Part of the 0x8227F process cluster. 697 lines. 9 callees. 3 callers (including ProcessAndProcessAndProcess1448).
+[functions."0x8227F0B0"]
+name = "ProcessAndProcessAndProcess1482_8227F0B0"
+
+
+# Process a very large data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and thirty-fifth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess1171, ProcessAndProcessAndProcess510, ProcessAndProcessAndProcess533, ProcessAndProcessAndProcess549, ProcessAndProcessAndProcess551, ProcessAndProcessAndProcess552, ProcessAndProcessAndProcess619, ProcessAndProcessAndProcess803, ProcessAndProcessAndProcess804) based on the result. Part of the 0x8226E process cluster. 805 lines. 9 callees. 1 caller (ProcessAndProcessAndProcess1475).
+[functions."0x8226E130"]
+name = "ProcessAndProcessAndProcess1535_8226E130"
+
+
+# Process a structure by freeing size-bucketed memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and thirty-sixth form). It takes a structure and frees size-bucketed memory (Free_SizeBucketed). This is a frequently-called helper in the 0x82275 process cluster. 76 lines. 1 callee. 11 callers.
+[functions."0x82275238"]
+name = "ProcessAndProcessAndProcess1536_82275238"
+
+
+# Process a structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and seventy-fifth form). It takes a structure, checks its state, and drives sub-operations (sub_82170F28, sub_82171198, ProcessAndProcessAndProcess1773, sub_82CABD60) based on the result. Part of the 0x82278 process cluster. 49 lines. 4 callees. 0 callers.
+[functions."0x82278A90"]
+name = "ProcessAndProcessAndProcess1775_82278A90"
+
+
+# Process a structure by constructing a 16-byte object (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and one hundred and fifty-eighth form). It takes a structure and constructs a 16-byte object (Construct16Byte). This is a frequently-called helper in the 0x82275 process cluster. 109 lines. 1 callee. 3 callers.
+[functions."0x822752B0"]
+name = "ProcessAndProcessAndProcess1858_822752B0"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and two hundred and seventy-seventh form). It takes a structure and drives a sub-operation (sub_82CA3FC8). This is a frequently-called helper in the 0x82260 process cluster. 9 lines. 1 callee. 54 callers.
+[functions."0x82260900"]
+name = "ProcessAndProcessAndProcess1977_82260900"
+
+
+# Process a structure by checking its state and driving many sub-operations (two thousand four hundred and sixty-fifth form). It takes a structure (a: field at a->0) and a structure (b: field at b->0); it checks the structure's state, and drives many sub-operations (ConstructRefCounted, DestructRefCounted, CopyAssign_RefCounted2, ProcessAndProcessAndProcess2119, and more) based on the result. This is the "process this data" routine (two thousand four hundred and sixty-fifth form), part of the 0x82265 process cluster. 87 lines. 4 callees. 6 callers (sub_829F8158, sub_82267168, sub_829F99D8, and more).
+[functions."0x822651E0"]
+name = "ProcessAndProcessAndProcess2464_822651E0"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand four hundred and ninety-eighth form). It takes a value (a); it checks the value's state, and drives sub-operations (ProcessAndCallMethods, ProcessAndCheckMethod, and more) based on the result. This is the "process this data" routine (two thousand four hundred and ninety-eighth form), part of the 0x82260 process cluster. 69 lines. 2 callees. 1 caller (sub_82260790).
+[functions."0x82260638"]
+name = "ProcessAndProcessAndProcess2497_82260638"
+
+
+# Process a structure by checking its state and driving sub-operations (two thousand four hundred and ninety-ninth form). It takes a value (a), a structure (b: field at b->4), and a value (c); it checks the structure's state, and drives sub-operations (DestructRefCounted, Free_SizeBucketed_Thunk, and more) based on the result. This is the "process this data" routine (two thousand four hundred and ninety-ninth form), part of the 0x82260 process cluster. 129 lines. 2 callees. 2 callers (sub_829F9128 and ProcessAndProcessAndProcess506).
+[functions."0x822606B0"]
+name = "ProcessAndProcessAndProcess2498_822606B0"
+
+
+# Process a structure by setting its vtable and driving sub-operations (two thousand four hundred and fiftieth form). It takes a structure (a) and a value (b); it sets the structure's vtable pointers, and drives sub-operations (ProcessAndProcessAndProcess2497, Free_Thunk, and more) based on the result. This is the "process this data" routine (two thousand four hundred and fiftieth form), part of the 0x82260 process cluster. 70 lines. 2 callees. 0 callers (vtable-dispatched).
+[functions."0x82260790"]
+name = "ProcessAndProcessAndProcess2499_82260790"
+
+
+# The main per-frame game loop. 512-byte stack frame. Processes timing, calls all major per-frame subsystems (notifications, player update, state update, callbacks, yield). 1052 lines. 20+ callees. Called once per frame.
+[functions."0x82276C30"]
+name = "ProcessGameFrame_82276C30"
+
+
+# Function-pointer-table entries (found by scanning the decrypted XEX image for
+# data words in the code range that are not registered function starts). The
+# dispatcher can only call registered starts, so these mid-function pointer
+# targets are seeded as functions here (scanner sizes them). First hit:
+# [FATAL] Call to invalid or unregistered function at 0x82CD8650 (2026-09-19).
+[functions."0x82267568"]
+name = "RetAddr_82267568"
+
+[functions."0x82267C88"]
+name = "RetAddr_82267C88"

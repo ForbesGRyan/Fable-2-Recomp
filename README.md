@@ -3,6 +3,9 @@ First and for most this project was made to test the capabilities of local and o
 
 Recompilation of Fable 2 (Xbox 360, title ID 4D5307F1) using the [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk) v0.10.0. Guest PPC code is statically recompiled to C++ at build time by `rexglue codegen`, driven by `fable_2_manifest.toml`.
 
+# Important Note:
+**This project does not condone Piracy, any mentions or links will result in removal and an instant ban from this repo!**
+
 # Current and planned features
 
 Original GOTY USA/Europe and German GOTY dumps are supported by the default
@@ -12,7 +15,7 @@ Original GOTY USA/Europe and German GOTY dumps are supported by the default
 [x] Guild chest fully unlocked\
 [x] Uncapped framerate / increased framerate\
 [ ] Higher Resolution support\
-[ ] Built in Debug Menu
+[x] Built in Debug Menu
   - [x] Enabling custom lua to run in game
 
 [x] Keyboard / Mouse Support\
@@ -23,9 +26,18 @@ Original GOTY USA/Europe and German GOTY dumps are supported by the default
 [x] Hero / Dog Texture bug fix (upstream renderer, verified on German GOTY)\
 [ ] Vulkan support\
 [ ] Linux Builds\
-[ ] Custom commands to aid in debugging\
-[ ] Improved Graphics rendering
-[ ] Custom menu(s) / modifying menus for extra functionality (like closing the game)
+[x] Custom commands to aid in debugging\
+[ ] Improved Graphics rendering\
+[ ] Custom menu(s) / modifying menus for extra functionality (like closing the game)\
+[x] Supporting other languages
+  - [x] Germany
+  - [x] France
+  - [x] Italy
+  - [x] Russia
+  - [x] Spain
+
+[x] Custom Launcher
+  - [x] Built in ISO extractor
 
 ## Windows launcher
 
@@ -34,32 +46,38 @@ output resolution, internal render scale, anisotropic filtering, FXAA, VSync,
 window/fullscreen mode and a 30/60/120/144/165/240/unlimited FPS limit. It keeps its preferences
 in `launcher-settings.toml` and writes `fable_2.toml`, preserving other settings
 and a one-time backup. Preferences survive the runtime rewriting its config.
-The game-folder selection starts empty and remembers only the user's saved
-location. Game files can live separately; the launcher uses `--game_data_root`.
-Both applications are named Fable 2 Recompiled and use new project-owned icons.
+It can also extract the game straight from a disc image: the **Extract from
+ISO** button opens a raw `.iso`, pulls out just `default.xex` first, checks its
+SHA-256 against the supported-version list, and only once it matches does it
+extract the rest of the disc (`default.xex` and `data/`) into the launcher's own
+folder, with a live progress screen and a Stop button. It reads Xbox 360 GDFX
+discs with the shared [X360Extract](tools/x360extract/) library, so its output
+matches the `x360extract` tool byte for byte — making the launcher the simplest
+way to get the game files in place, with no separate extractor tool.
 
-Build with the .NET 8 SDK using `build.cmd launcher`, or
-`build.cmd launcher-self-contained` to bundle the desktop runtime. Place
-`out\tests\launcher-build\Fable2Launcher.exe` beside `fable_2.exe` and its generated
-`fable2_build.json`. See [launcher details](launcher/README.md).
-For the source-built audio fallback, working FPS limit and matched renderer,
-use `build.cmd -release fable_2`; see [build instructions, tests and known
-limits](docs/RUNTIME_FIXES.md). Remaster assets and save editing are not included.
+The game-folder selection defaults to the launcher's own folder on first launch
+and then remembers the user's saved location. Game files can live separately;
+the launcher uses `--game_data_root`. Both applications are named Fable 2
+Recompiled and use new project-owned icons.
+
+
 
 
 
 # Notes for running the game
-- **How to extract:** rip the disc to an ISO, then open it with **[XboxImageExtractor](https://github.com/dromex1/XboxImageExtractor)** — a GUI tool for Xbox 360 game images. It lists the image's filesystem; select `default.xex`, `data`, and `$SystemUpdate` and extract them into the project root (`data` and `$SystemUpdate` extract as folders). You can also grab `nxeart` and anything else the tool lists.
-- **You must supply the game content yourself** (it is not in the repo): rip the Fable 2 GOTY (USA/EU) disc (the one with SHA-256 above) and put `default.xex`, `data/`, `nxeart/`, and `$SystemUpdate/` in the project root. The build does not copy this into the build directories   
+- **How to extract (built-in, recommended):** the launcher has an **Extract from ISO** button. Click **Extract from ISO** and pick your disc image (`.iso`). It first checks the iso against the supported-version list, and only once that matches does it extract disc (`default.xex` and `data/`) into the launcher's own folder. No separate tool is required.
+- **How to extract (external GUI tool):** alternatively, rip the disc to an ISO and open it with **[XboxImageExtractor](https://github.com/dromex1/XboxImageExtractor)** — a GUI tool for Xbox 360 game images. It lists the image's filesystem; select `default.xex` and `data` and extract them into the project root (`data` extract as folders).
+- **You must supply the game content yourself** (it is not in the repo): rip the Fable 2 GOTY (USA/EU) disc (the one with SHA-256 above) and put `default.xex` and `data/` in the project root. The build does not copy this into the build directories   
 - **Saves live in `<build dir>\saves\`** — back that folder up to keep your progress, and copy it between build trees (Debug/Release) or machines to carry a save over.
 - The `--game_data_root <path>` override still points the content root at a different tree (e.g. to run from a shared content copy without staging); saves/cache still land next to the exe.
+- Although this was made for the US / Europe GOTY version I have been able to run the following regions: Germany, France, Italy, Russia, and Spain. Your milage may very if you use those regions.
 
 
 ## Running
 
 To run the game you must:
 1) Extract a downloaded copy release of the game 
-2) Extract the "data" and "default.xex" from your copy of the game, See "How to extract" for more info on that
+2) Extract the "data" and "default.xex" from your copy of the game — easiest with the launcher's **Extract from ISO** button, or an external GUI tool (see "How to extract")
 3) Run the fable.exe program and if no errors pop up then the game should launch and you are good to go
   - If an error pops up about the hash being wrong try to extract a different version of the game and then try again.
 
@@ -72,6 +90,7 @@ Optional command-line overrides (all normal `--cvar value` args):
 | `--update_data_root <path>` | Optional update content root |
 | `--window_width` / `--window_height` / `--fullscreen` | Presentation options |
 | `--keyboard_gamepad_map <map>` | Host keyboard -> guest gamepad button map (see below) |
+| `--skipHash` | Skip the `default.xex` SHA-256 integrity check. The hash is still written to the log, but a mismatch no longer blocks launch (useful for a modified or non-catalogue XEX) |
 
 ### Experimental native renderer
 
@@ -304,9 +323,10 @@ game recreates it with defaults on launch if it is ever missing. Loaded in
 - The `[patches]` section holds runtime toggles for the recomp-level
   (mid-asm hook) patches, consulted by the hook bodies on every call
   (`src/core/fable2_hooks.cpp`) — flip one and relaunch to A/B a patch with no
-  rebuild. Currently: `fps_60` (60 FPS hook; `true` = main loop ~60/s,
-  `false` = original 30/s). Guest-image data patches are a different file:
-  `fable2_patches.toml` (see above).
+  rebuild. This includes `high_tick_rate` and `higher_hf_tick_rate` (Xenia
+  "High Tick Rate" / "Higher HF Tick Rate"; turn both on together), which
+  also drive the guest-image data writes below. There is no separate patch
+  file.
 
 
 
@@ -322,22 +342,30 @@ keeps working; the keyboard just adds buttons. It is wired up in
 The mapping is the `keyboard_gamepad_map` cvar, format `Key:Button,Key:Button,...`. Its default is no longer hardcoded in the binary: it comes from `[input] keyboard_gamepad_map` in `fable2_config.toml` (see User config above), which you can edit to remap permanently. The command line and the F3 console still override it per-launch / live.
 
 - **Key** — a host key name understood by `rex::ui::ParseVirtualKey`
-  (`E`, `Space`, `LeftShift`, `F1`, ...).
+  (`E`, `Space`, `LeftShift`, `F1`, ...), or a mouse button: `LMB` (left),
+  `RMB` (right), `MMB` (middle), and `XMB1`/`XMB2` (side buttons). Mouse
+  button names are case-insensitive; a held mouse button behaves exactly like
+  a held key.
 - **Button** — a guest gamepad input: `A`, `B`, `X`, `Y`, `LB`/`RB` (shoulders),
   `LT`/`RT` (triggers), `Up`/`Down`/`Left`/`Right` (dpad), `Pause` (Start),
   `Select` (Back), `L3`/`R3` (thumb clicks), and `StickUp`/`StickDown`/
   `StickLeft`/`StickRight` (left thumbstick, full deflection while held).
 
-The default layout is:
+The default layout (mouse buttons plus keyboard) is:
 
 | Key(s) | Guest input |
 |---|---|
-| `E` / `2` / `1` / `3` | `A` / `B` / `X` / `Y` |
+| `LMB` | `X` |
+| `RMB` | `Y` |
+| `MMB` / `B` | `B` |
+| `Shift` / `E` | `A` |
 | `W` `A` `S` `D` | Left stick (up / left / down / right) |
+| `Q` / `R` | Left / Right trigger |
+| `Z` / `Tab` | Left / Right shoulder |
+| Arrow keys | Dpad up / down / left / right |
 | `Escape` | Pause (Start) |
 | `M` | Select (Back) |
-| `Q` / `Tab` | Left / Right trigger |
-| `F1` `F2` `F3` `F4` | Dpad up / down / left / right |
+
 
 Remap at launch without recompiling, e.g.
 
@@ -400,19 +428,16 @@ string-build + `RunScript` call in `src/core/fable2_f5_lua.h`.\
 
 # Notes for dev who want to work on the build:
 
-## Guest-image patches (fable2_patches.toml)
+## Guest-image patches
 
 Data patches for the loaded `default.xex` guest image (Xenia game-patches
-format), applied before the guest module launches: `Fable2App::OnPostLoadXexImage()`
-→ `fable2::patches::Load()` + `ApplyAll()` (code in `src/core/fable2_patches.{h,cpp}`).
-Same lifecycle as the user config: staged by the build, recreated with the
-built-in defaults if missing, and a broken file falls back to the built-ins
-(dialog + log) so it never blocks launch. Each `[[patch]]` has an `enabled`
-toggle (default true) — flip it in the file and relaunch to A/B a patch with
-no rebuild. **Scope: data patches only** — code-region ops are inert in this
-recomp (guest `.text` is never executed); code patches are mid-asm hooks
-instead. Full details, the current patch list, and how code patches work:
-`docs/patches.md`.
+ops), applied before the guest module launches: `Fable2App::OnPostLoadXexImage()`
+→ `fable2::patches::ApplyAll()` (code in `src/core/fable2_patches.{h,cpp}`).
+There is no patch file: each patch is switched on by a `[patches]` key in
+`fable2_config.toml` (currently `high_tick_rate` and `higher_hf_tick_rate`).
+**Scope: data patches only** — code-region ops are inert in this recomp
+(guest `.text` is never executed); code patches are mid-asm hooks instead.
+Full details: `docs/patches.md`.
 
 ## Guest function-call tracing (fable2_func_trace.log)
 
@@ -558,8 +583,9 @@ Commands: `ping`, `info`, `auth`, `press` (`input`, `hold_ms`, `value`),
 `release`, `stick` (`input` = `StkLx`/`StkLy`/`StkRx`/`StkRy`, `value`,
 `hold_ms`), `state` (sticky baseline: `buttons[]`, `triggers{LT,RT}`,
 `stk{lx,ly,rx,ry}`), `clear`, `script` (atomic timed sequence), `get_state`,
-`game_state` (current boot/menu state, see below), `cvar` (get/set any cvar
-by name), `enable`/`disable`. Input names match the
+`game_state` (current boot/menu state, see below), `screenshot` (`path`; save
+the current game frame as a PNG, see below), `cvar` (get/set any
+cvar by name), `enable`/`disable`. Input names match the
 keyboard-gamepad vocabulary (`A`/`B`/`X`/`Y`, `LB`/`RB`, `LT`/`RT`,
 `Up`/`Down`/`Left`/`Right`, `Start`/`Back`, `L3`/`R3`, stick direction
 shorthands). `StkLy` positive = forward (Fable 2 convention). `script` is a
@@ -600,6 +626,27 @@ its exact timestamp. State changes are logged to the in-game logger
 (`REXSYS_INFO`, same channel as the remote control) on transition only, and
 every sample is written to `fable2_state_probe.log` when
 `FABLE2_STATE_PROBE=1` is set.
+
+### Screenshot
+
+`screenshot` saves the **current game frame** as a PNG so the AI harness can
+see what the game is showing:
+
+```
+python tools\fable2_control.py screenshot shots/after_jump.png
+> {"cmd":"screenshot","path":"C:/shots/after_jump.png"}
+< {"ok":true,"path":"C:/shots/after_jump.png","width":1280,"height":720,"bytes":2765798,"avg_luma":120}
+```
+
+`path` (required, UTF-8) is where the PNG is written; parent directories are
+created automatically. The frame is read **in-process from the renderer's guest
+output texture** — the exact frame the game just rendered, in GPU memory at the
+guest's native resolution (1280x720 for Fable 2) — not from the desktop. So the
+picture is the complete game frame even while other windows cover it or the game
+is unfocused, and occluding windows never appear in it. Works with both the D3D12
+and Vulkan GPU plugins (each implements `CaptureGuestOutput`). Each capture
+blocks the connection for a few hundred milliseconds. Implementation:
+`src/diagnostics/fable2_frame_capture.h`.
 
 Config (`[remote]` in `fable2_config.toml`): `enabled` (default `true`),
 `host` (`127.0.0.1`; `0.0.0.0` exposes it on all interfaces), `port`

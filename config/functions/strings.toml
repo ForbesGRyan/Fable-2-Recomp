@@ -1,0 +1,1006 @@
+# strings functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# SDK C-runtime ctype predicate: returns bit 0 (the _UPPER flag) of the
+# 256-entry u16 character-type table. Table base is runtime-loaded from
+# global 0x82CCC8C4 (entry = *(base + c*2), zero-extended 16-bit). One of
+# 9 uniform siblings in the 0x82CA6AB0-0x82CA6BB0 block, each extracting a
+# different bit/mask of the same u16 entry: bit0 (this one, sub_82CA6AD0),
+# bits 0|1|8 (sub_82CA6AB0: andi 259, sub_82CA6B90: andi 263), and single
+# bits 24/26/27/28/29/30 (sub_82CA6B30/BB0/B70/B50/B10/AF0 — note: beyond
+# the 16-bit load, so these read zero in the current table layout). The
+# _UPPER meaning of bit 0 is pinned by its only non-cluster consumer,
+# ToLower_SdkRuntime_82CA4288, which gates an A-Z -> a-z fold on it.
+# 2 call sites: ToLower_SdkRuntime_82CA4288 and the dispatch table
+# sub_82A25230 (which routes to the sibling predicates by index).
+[functions."0x82CA6AD0"]
+name = "Ctype_IsUpper_82CA6AD0"
+
+
+# SDK C-runtime tolower, in classic CRT shape:
+# if (0 <= c < 256 && Ctype_IsUpper(c)) return sub_821EE9E8(c); else return c
+# where sub_821EE9E8 is plain ASCII fold (A-Z -> a-z, else c unchanged;
+# 22 callers image-wide, so it is also the general tolower). The ctype
+# guard is what makes this the locale-aware variant. 2 call sites, both
+# string processing: sub_82448030 is a CASE-INSENSITIVE FNV-1 string hash
+# (hash = tolower(byte) ^ (hash * 16777619), 16777619 = 0x01000193 = the
+# 32-bit FNV prime) and sub_83002B80 converts a character to a 0-25 letter
+# index (result - 96, 'a' = 97). Named ToLower_SdkRuntime (not bare
+# "tolower") to keep the guest symbol distinct from host libc, matching the
+# MemCpy_SdkRuntime convention.
+[functions."0x82CA4288"]
+name = "ToLower_SdkRuntime_82CA4288"
+
+
+# ---------------------------------------------------------------------------
+# A signed-byte strcmp (169 callers), two vtable methods (a slot-3 product
+# write and a global-callback accumulator), and a value/state processor.
+# ---------------------------------------------------------------------------
+
+# A signed-byte string compare (strcmp with sign-extended bytes). Args: str1
+# (r3), str2 (r4). Loop: load *str1 as a SIGNED byte (lbz then extsb) into r10;
+# if *str1 != 0 go to compare; else (str1 hit its 0 terminator) load *str2 and
+# if *str2 == 0 return 0 (both empty / equal), else fall through to compare
+# (where 0 < *str2 so str1 is shorter). Compare: load *str2 as a signed byte
+# into r11; if r10 < r11 return -1, if r10 > r11 return 1, else advance both
+# and loop. Returns -1 (str1 < str2), 0 (equal), 1 (str1 > str2). The sign-
+# extension (extsb) makes this a SIGNED byte compare (bytes >= 0x80 sort as
+# negative), distinct from an unsigned strcmp. 169 call sites. Named
+# StrCmp_Signed to convey the signed-byte ordering and to keep the guest symbol
+# distinct from host libc.
+[functions."0x8226D7A8"]
+name = "StrCmp_Signed_8226D7A8"
+
+
+# The game's PRIMARY 32-bit string hash -- FNV-1 (case-SENSITIVE). 2167 call
+# sites, making it one of the hottest functions in the binary.
+
+# Args: str (r3, a null-terminated byte string), seed (r4, the initial hash
+# value). First scans str to find its length (stop at the 0 byte); if the string
+# is empty, return immediately (returning the seed). Otherwise run the FNV-1
+# loop over each byte: hash = (hash * 0x01000193) ^ byte, where 0x01000193
+# (16777619) is the FNV-1 32-bit prime. Returns the 32-bit FNV-1 hash. The
+# callers pass seed = 0x811C9DC5 (the standard FNV-1 32-bit offset basis), so
+# in practice this is the canonical FNV-1 32 hash of a string. This is the
+# case-SENSITIVE variant; the case-insensitive FNV-1 is sub_82448030. Named
+# FNV1Hash to convey the exact algorithm.
+[functions."0x821F3C28"]
+name = "FNV1Hash_821F3C28"
+
+
+# A string setter / copy-constructor for the 0x822F/0x821A small-buffer object
+# (same class as LoadFrom_Source_822F2398 / WriteRange_AtPos_821A8F68).
+
+# 330 callers (sub_82AB77A8, sub_82A665B8, sub_82370060, ...) -- a major string-
+# setting operation. Args: obj (r3), src (r4, a null-terminated byte string).
+# Initializes the object: obj->20 = 0 (length), obj->24 = 15 (the max inline
+# size, matching the < 16 inline threshold of the small-buffer indirection), and
+# clears the inline byte at obj->4. Computes strlen(src) by scanning to the 0
+# byte, then copies the string in via WriteRange_AtPos_821A8F68(obj, src,
+# strlen). Returns void. So it resets this object and makes it hold a copy of
+# the C string. Named for the mechanism: set this (small-buffer) object to a
+# string.
+[functions."0x822F2020"]
+name = "SetString_822F2020"
+
+
+# A name-hash initializer: computes the FNV-1 hash of a fixed global string and
+# stores it in obj->0.
+
+# Arg: obj (r3). Loads a fixed global string (via a pointer at ~0x81FF7B98),
+# copies it into a temporary small-buffer on the stack via SetString_822F2020,
+# resolves the buffer (inline vs external per the small-buffer indirection), and
+# computes its FNV-1 32 hash via FNV1Hash_821F3C28 (seed = 0x811C9DC5, the offset
+# basis). Stores the hash in obj->0. If the temp buffer was external it frees it
+# (Free_SizeBucketed_Thunk_8221BE68). Finally clears bit 0 of obj->4 (obj->4 &=
+# 0x1FFFFFFF). Returns void. 3 callers (sub_8236E1B0, sub_8236D6A8, 
+# sub_8236E348). So it initializes obj->0 to the FNV-1 hash of a known global
+# name and clears a flag bit in obj->4. Named for the mechanism: initialize the
+# name hash from a global string.
+[functions."0x8236D358"]
+name = "InitNameHash_8236D358"
+
+
+# A case-INSENSITIVE string compare (stricmp). 211 call sites.
+
+# Args: str1 (r3), str2 (r4). Walks both strings byte-by-byte (lbzu
+# pre-increment). At each step compute diff = str1byte - str2byte; if str2byte is
+# the 0 terminator, return (0 if the strings are equal, else the running diff);
+# if diff == 0 continue. On the FIRST difference, fold both bytes to lowercase
+# (if a byte is in 'A'..'Z', OR in bit 5 / 32) and recompute diff; if the
+# folded diff is 0 (they differ only by case) keep scanning, else return the
+# signed folded difference. So it returns 0 when the strings are equal ignoring
+# case, and a nonzero signed value otherwise. Named StrCmpIgnoreCase to convey
+# the case-insensitive ordering (and keep the guest symbol distinct from host
+# libc); the signed-byte variant is StrCmp_Signed_8226D7A8.
+[functions."0x82CA6320"]
+name = "StrCmpIgnoreCase_82CA6320"
+
+
+# A case-INSENSITIVE FNV-1 32 string hash -- the ToLower-per-byte sibling of
+# FNV1Hash_821F3C28.
+
+# Args: str (r3, null-terminated), seed (r4, initial hash). Scans str for its
+# length (stop at 0); if empty, return the seed. Otherwise run the FNV-1 loop
+# over each byte, but FIRST lowercase it via ToLower_SdkRuntime_82CA4288, then
+# hash = lowercased_byte ^ (hash * 0x01000193), where 0x01000193 (16777619) is
+# the FNV-1 32-bit prime. Returns the 32-bit case-insensitive FNV-1 hash. The
+# case-SENSITIVE variant is FNV1Hash_821F3C28. 2 callers (sub_821BC7E8,
+# sub_82C67878). Named to convey the exact algorithm + case-insensitivity.
+[functions."0x82448030"]
+name = "FNV1Hash_CaseInsensitive_82448030"
+
+
+# A string/buffer load into obj with a conditional FAST and SLOW path, selected by
+# a field on a control object (r4->20).
+
+# Args: obj (r3, the destination small-buffer object), control (r4, ->20 selects the
+# path), source (r5, the source small-buffer object). If control->20 == 0 (fast path):
+# just LoadFrom_Source_822F2398(obj, source). Otherwise (slow path): resolve the
+# source buffer via the small-buffer indirection (source->24 >= 8 ? *source->4 : 
+# &source->4), build a local buffer, and copy through ClampAndUpdate_822F6380 plus
+# sub_8217AA20 / sub_8217AB30 / sub_822F5208 / sub_822F6CB0, freeing temporaries via
+# Free_SizeBucketed_Thunk_8221BE68. 6 callers (sub_823735B0, sub_82B4FBD0, 
+# sub_823728E0, sub_82B41738, sub_825F2E10, sub_8260B9E0). The exact semantics of the
+# control object and the slow-path transform aren't fully resolvable, so the name
+# states the observable structure: load a string/buffer, fast path when control->20
+# is 0, otherwise the slower multi-step path.
+[functions."0x823725E8"]
+name = "LoadString_FastOrSlow_823725E8"
+
+
+# A ctype predicate: look up a character in the u16 ctype table and return a specific
+# bit (bit 2 / 0x4) -- a member of the 0x82CA6AB0-0x82CA6BB0 ctype cluster.
+
+# Arg: code (r3, a character/code). Loads the table base from a global (~0x82CA70C8),
+# then loads the u16 entry table[code] (lhzx at base + code*2), and returns bit 2 of it
+# (r3 = entry & 0x4). So it's a "is this char [property]" test where the property is
+# bit 2 of the ctype table. Sibling sub_82CA6AF0 returns a different bit (the cluster
+# has one function per ctype bit, e.g. bit 0 = _UPPER). 48 callers (sub_82A256D0,
+# sub_82A17518, sub_82F6DF40, ...), each loading a byte from a string and testing it. The
+# exact property bit 2 denotes isn't resolvable without the table definition, so the name
+# states the mechanism: a ctype predicate returning bit 2 of the table entry.
+[functions."0x82CA6B10"]
+name = "Ctype_Pred_Bit2_82CA6B10"
+
+
+# A ctype predicate (a sibling of the 0x82CA6AB0-0x82CA6BB0 char-classification cluster): look up
+# the u16 char table and return bit 3 (0x8) of the entry.
+
+# Arg: c (r3, a char). Computes the table index as (c * 2) (a u16 per character), loads the u16
+# entry from the global char-classification table (a fixed base near the .data region, the same
+# table the 0x82CA6AB0-BB0 ctype siblings use), masks it to bit 3 (0x8) (rlwinm ... 28,28), and
+# returns that single bit. So it's a character-classification predicate: "does char c have the
+# bit-3 class set?". 5 lines, 0 external callees (all inline table lookup). 13 callers
+# (sub_82C47A50, sub_83045EC0, sub_82B47610, ...). Siblings in the same cluster:
+# Ctype_Pred_Bit2_82CA6B10 (bit 2), and the bit-0 (_UPPER) predicates; the "Bit3" identifies which
+# class bit this one returns. The exact class (bit 3's meaning in the table) isn't resolvable from
+# the body alone.
+[functions."0x82CA6B50"]
+name = "Ctype_Pred_Bit3_82CA6B50"
+
+
+# A line-length scan (strcspn-like): scan a string for a line ending ('\n' = 10, '\r' = 13, or
+# null) and return the length of the line.
+
+# Arg: obj (r3, ->0 = a string base, ->32 = a byte, ->36 = an offset into the string). Computes
+# the start as (obj->0 + obj->36) and scans forward byte-by-byte (sign-extended) until it hits a
+# null, a newline (10), or a carriage return (13). It then returns the length of the line (the
+# offset from the start to the line ending, i.e. r10 - start). If the line is empty, it returns 0
+# (subf. ... beqlr). 117 lines, 0 external callees (all inline byte scanning). Many callers
+# (sub_825F45A8, sub_826939A0, sub_82466098, ...). A string-line scanner ("how long is this line
+# before the next newline?"), likely part of a text/log/line-based reader. The string's context
+# isn't resolvable, so the name states the mechanism: scan a line and return its length.
+[functions."0x82B477F0"]
+name = "ScanLineLength_82B477F0"
+
+
+# A character-skip scan (the sibling of ScanLineLength_82B477F0): walk a string (from obj->0 +
+# obj->36), advancing past characters that have the bit-3 ctype class (Ctype_Pred_Bit3_82CA6B50) or
+# a newline, stopping at null.
+
+# Arg: obj (r3, ->0 = a string base, ->36 = an offset). Computes the start as (obj->0 + obj->36)
+# and scans forward: for each byte (sign-extended), if it has the bit-3 character class
+# (Ctype_Pred_Bit3_82CA6B50, sub_82CA6B50) or is a newline (10), it advances; it stops at a null
+# byte. So it's a "skip the leading characters of the bit-3 class" routine (e.g. skip leading
+# whitespace / separators). 142 lines, 1 callee (Ctype_Pred_Bit3_82CA6B50). 8 callers (sub_82359BE8,
+# sub_82B478C0, sub_826939A0, ...). The bit-3 ctype class's exact meaning (whitespace, separators,
+# ...) and the string's context aren't resolvable from the body alone, so the name states the
+# mechanism: skip characters matching the bit-3 ctype class.
+[functions."0x82B47610"]
+name = "SkipCtypeChars_82B47610"
+
+
+# A quote-parity scan: walk a string (from obj->0 + obj->36, for a given length), count the
+# quotes (double-quote " = 34, apostrophe ' = 39), and store the parity (odd/even) in obj->32.
+
+# Args: obj (r3, ->0 = a string base, ->32 = a byte flag, ->36 = an offset), length (r4). Scans the
+# (length) bytes starting at (obj->0 + obj->36); for each byte, if it's a double-quote (34) or an
+# apostrophe (39), it toggles the parity (recomputes (32 - clz(obj->32 & 0xFF)) & 1 -- an odd/even
+# quote-count). It stores the resulting parity in obj->32. So it's a "count the quotes and store
+# the parity" routine (a quote-balance / unterminated-string detector for a text/log/line reader).
+# 62 lines, 0 external callees (all inline byte scanning). Many callers (sub_82B3BAC0, sub_82607260,
+# sub_82B475A0, ...). The string's context (a log line, a quoted string, ...) isn't resolvable,
+# so the name states the mechanism: scan for quotes and store the parity.
+[functions."0x82B47A40"]
+name = "ScanQuoteParity_82B47A40"
+
+
+# A clamped range write / update: grow the object if needed (sub_82CD12C8), clamp the write
+# length (to the available space and a max), then write the range.
+
+# Args: obj (r3, ->20 = a size, ->24 = a field), pos (r4, the write position), len (r5, the
+# requested length), max (r6, a max length), (r7). If obj->20 < pos, it grows the object by
+# calling sub_82CD12C8 (a grow/extend helper). It then clamps the write length: to (obj->20 -
+# pos) (the available space) and to max (whichever is smaller). It then writes the range (calling
+# sub_822F85C8 -- CompareU16_822F85C8 -- to compare/write the 16-bit data). So it's a "write a
+# range, growing and clamping as needed" routine. 107 lines. Many callers, in the 0x82C7 cluster
+# (sub_82C71F00, sub_82C7EF10, sub_82C70750, ...). The object class (a string/buffer with a size
+# field) and the exact write semantics aren't resolvable, so the name states the mechanism: a
+# clamped range write.
+[functions."0x82377FD8"]
+name = "WriteRangeClamped_82377FD8"
+
+
+# An error / exception handler: check a bound, and if the value is out of range, build an error
+# message (SetString + a format) and raise it (sub_822F1F00).
+
+# Args: obj (r3, ->8 = a value/bound), value (r4). Computes a bound (0x1FFF3FFF, a 0x1FFF-style
+# limit) and checks (obj->8 - bound) >= value; if it passes, it returns normally (in range). If it
+# fails (out of range), it builds an error message: SetString_822F2020 (a global error string),
+# sub_826C3EF0 (a format op), and sub_826C3FA8 (a further format op), then stores a global error
+# code and calls sub_822F1F00 (the exception raiser). So it's an "assert / raise on
+# out-of-range" routine. 81 lines. 4 callers (sub_82A0F0A0, sub_82A0F290, sub_825180F0,
+# sub_82461990). The exact error message and the bound's meaning aren't resolvable from the body
+# alone, so the name states the mechanism: raise if out of range.
+[functions."0x82461DA0"]
+name = "RaiseIfOutOfRange_82461DA0"
+
+
+# A line / value parser: skip the leading characters (SkipCtypeChars_82B47610), then inspect the
+# current character (a ctype-bit-2 class or a minus sign '-' = 45) and parse a value.
+
+# Args: obj (r3, ->0 = a string base, ->36 = an offset), (r4). Calls SkipCtypeChars_82B47610 (sub
+# _82B47610) to skip the leading characters of the bit-3 ctype class. It then reads the current
+# character (obj->0 + obj->36), and if it has the bit-2 ctype class (Ctype_Pred_Bit2_82CA6B10,
+# sub_82CA6B10) or is a minus sign (45), it parses the (possibly signed) value (checking the
+# following character too, and calling sub_82B47AB0, sub_82B47C70, sub_82B47D68, sub_82CA6AB0 --
+# the 0x82B47 line/number-parse helpers). So it's a "parse a value from the line" routine (likely
+# a signed integer/float from a log/property line). 111 lines. 9 callers (sub_825F5238, sub_82B47148,
+# sub_82B473F0, ...). The value type and the line's context (a log, a config, a save) aren't
+# resolvable, so the name states the mechanism: parse a value from the line.
+[functions."0x82B46D40"]
+name = "ParseLineValue_82B46D40"
+
+
+# A string insert / append: if len is -1, compute strlen(src); check the object's capacity (obj->6);
+# then copy the string in (MemCpy) and update the region (ProcessIndexedRegion / ProcessIndexedRegion2).
+
+# Args: obj (r3, ->0 = a data pointer, ->6 = a u16 capacity), src (r4), len (r5). If len is -1, it
+# computes the length of src (a strlen: walk to the null byte). Otherwise it uses len as the length.
+# It then compares the object's capacity (obj->6, a u16) to the length; if there's room, it copies the
+# string (MemCpy_SdkRuntime_82CA2C60, sub_82CA2C60) and updates the indexed region (ProcessIndexedRegion
+# _82BA9068, ProcessIndexedRegion2_82BA8F18, GetSingleton_82BA8718 -- the 0x82BA8 indexed-region
+# subsystem). So it's a "insert / append a string into the region" routine. 135 lines. Many callers (all
+# in the 0x82BA/0x82BB region: sub_82BBE220, sub_82BB0D78, sub_82BAA310, ...). The region object's
+# meaning (a string buffer / log) isn't resolvable, so the name states the mechanism: insert a string.
+[functions."0x82BA8850"]
+name = "StringInsert_82BA8850"
+
+
+# A validation + error: check a value (src->8 against a threshold), and (if it is invalid) build an error string
+# (SetString_822F2020 + a format, sub_826C3EF0) and raise an error (sub_822F1F00); splice a list (List_SpliceNode2
+# _8292CC88) in a path.
+
+# Args: obj (r3), src (r4, ->8 = a value), value (r5), (r6), (r7), (more). Checks the value (src->8) against a
+# threshold (0x20000000 | 52427): if src->8 < the threshold, it takes one path; otherwise it builds an error string
+# (SetString_822F2020, sub_822F2020, with a string at a fixed .data address, and a format via sub_826C3EF0, sub
+# _826C3EF0) and raises an error (sub_822F1F00, an error / raise function). In a path it also splices a list (List
+# _SpliceNode2_8292CC88, sub_8292CC88) and calls sub_82171810, sub_8234D600, sub_82370EF8, and sub_826C3FA8. So it's
+# a "validate a value (check it against a threshold) and raise an error (build an error string and raise) if it is
+# invalid" routine (a validated operation with an error path, part of the 0x82370 cluster). 329 lines, 8 callees
+# (SetString_822F2020, sub_822F1F00, List_SpliceNode2_8292CC88, sub_826C3EF0, sub_826C3FA8, sub_82171810, sub
+# _8234D600, sub_82370EF8). 2 callers (sub_8236F398, sub_8236FF20). The value's meaning (src->8 = a value, an index
+# / count) and the error's meaning (a particular error / assertion) aren't resolvable, so the name states the
+# mechanism: raise an error if the value is invalid.
+[functions."0x82370060"]
+name = "RaiseIfInvalid_82370060"
+
+
+# A float value parse (the callee of ParseNumberValue_82B47AB0): store a constant (out->4 = a constant), and (if
+# count >= 4) loop (processing bytes, with a float computation, parsing a floating-point number from a string).
+
+# Args: out (r3, ->4 = a float), (r4, a pointer), count (r5), (more). It stores a constant (out->4 = a constant, a
+# float, from a fixed .data address). If count is < 4 (a short value), it takes one path (a small number). If count
+# is >= 4, it loops (processing bytes, reading from a string (r4, a pointer), with a float computation -- a
+# floating-point number parse, accumulating a value from the bytes, with a loop over the digits, and a float
+# conversion). So it's a "parse a floating-point number (store a constant, and (if the value is long) loop over the
+# digits, accumulating a float)" routine (a float value parse, part of the 0x82B47 cluster, the callee of ParseNumber
+# Value_82B47AB0 -- a number parser). 439 lines, no direct callees (pure computation, float ops and a loop which the
+# callee scan does not count). 1 caller: ParseNumberValue_82B47AB0 (sub_82B47AB0, a number parser, which calls this to
+# parse a floating-point number). The value's meaning (a floating-point number, a parsed float) and the string's
+# meaning (a number string, a decimal number with a fractional part) aren't resolvable, so the name states the
+# mechanism: parse a floating-point number (store a constant, and (if the value is long) loop over the digits,
+# accumulating a float).
+[functions."0x82B47F98"]
+name = "ParseFloatValue_82B47F98"
+
+
+# A getter (a string length, the UTF-16 variant of StrLen_822F1DE0 / the sibling of StrLen_822F1DE0): scan a UTF-16
+# string (a 2-byte character loop, looking for a null terminator), and return the length (in characters, minus 1).
+
+# Args: a string (r3, a pointer to a UTF-16 string, a 2-byte character array). It scans the string (a loop: it reads a
+# 16-bit value (a UTF-16 character, lhz, a 16-bit load) from the string, advances by 2 bytes (a UTF-16 character
+# stride, addi r11, r11, 2), and continues until it finds a null terminator (a 16-bit zero, a UTF-16 null character)).
+# It then computes the length (in bytes, r11 - r3, the difference between the end and the start, a length in bytes),
+# divides by 2 (a length in characters, srawi r11, r11, 1, a right shift by 1, a division by 2, converting bytes to
+# UTF-16 characters), and returns the length minus 1 (addi r3, r11, -1, a length minus 1, a particular convention, a
+# one-based / a zero-based offset). So it's a "get a string length (scan a UTF-16 string (a 2-byte character loop,
+# looking for a null terminator) and return the length (in characters, minus 1))" routine (a string length getter, the
+# UTF-16 variant of StrLen_822F1DE0, part of the 0x8217A cluster, a sibling of StrLen_822F1DE0). ~20 lines, no direct
+# callees (pure data manipulation). 10+ callers: sub_82C72640, sub_82BFD228, sub_82BF1CA0, sub_82B39260, sub_82C75340,
+# sub_82B4DA88, sub_822F8620, sub_82CBD5A0, sub_82C7F458, sub_82CFA1B0 (a widely-called string length getter, part of
+# the game's string subsystem). The string's meaning (a string, a particular UTF-16 string, a particular text) isn't
+# resolvable, so the name states the mechanism: a string length getter (scan a UTF-16 string (a 2-byte character loop,
+# looking for a null terminator) and return the length (in characters, minus 1)). The "UTF16" refers to the 2-byte
+# character stride (a UTF-16 string, as opposed to StrLen_822F1DE0's byte-wise scan, a UTF-8 / a byte string).
+[functions."0x8217AB30"]
+name = "StrLenUTF16_8217AB30"
+
+
+# A thunk (a string comparison, the callee of StrCmpIgnoreCase_82CA6320): dereference b->0 (and if it is zero, use a
+# default, a constant from a fixed .data address, a default string), and dereference a->0, then call a string
+# comparison (StrCmpIgnoreCase_82CA6320, on the dereferenced values, a case-insensitive string comparison).
+
+# Args: (r3), a (r4, r9, ->0 = a value), b (r5, ->0 = a value), (more). It dereferences b->0 (a value, a pointer): if
+# b->0 is non-zero, it reads b->0->0 (a dereference, a string, a particular string); if b->0 is zero (a null state),
+# it uses a default (a constant, from a fixed .data address, a default string, a particular string). It dereferences
+# a->0 (a value, a pointer): if a->0 is non-zero, it reads a->0->0 (a dereference, a string, a particular string); if
+# a->0 is zero, it uses the default. It calls a string comparison (StrCmpIgnoreCase_82CA6320, sub_82CA6320, a case-
+# insensitive string comparison, on the dereferenced values, comparing the two strings, case-insensitively). So it's a
+# "thunk (a string comparison: dereference b->0 (and if it is zero, use a default), dereference a->0, and call a string
+# comparison (on the dereferenced values, a case-insensitive string comparison))" routine (a string comparison thunk,
+# part of the 0x82C1D cluster, a callee of StrCmpIgnoreCase_82CA6320). ~30 lines, 1 callee (StrCmpIgnoreCase_82CA6320
+# , sub_82CA6320, a case-insensitive string comparison). 0 callers: it is registered in the function table but not
+# called from any recompiled guest function (a registered-but-uncalled function, part of the 0x82C1D cluster, a string
+# comparison thunk). The values' meaning (a value, a string, a particular string, a key / a value) aren't resolvable,
+# so the name states the mechanism: a string comparison thunk (dereference both values (using a default if zero) and
+# call a string comparison (a case-insensitive string comparison)).
+[functions."0x82C1DC98"]
+name = "StrCmpThunk_82C1DC98"
+
+
+# A return address (a return address, with a constant, the sibling of ReturnPointer_82C3BE78 / ConstructString_8217AB58):
+# return a pointer (a return address, a particular return / a
+# particular pointer, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, from a fixed .data address + 19868, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result).
+
+# Args: (more). It returns a pointer (a
+# return address, a
+# particular return / a
+# particular pointer, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, from a fixed .data address + 19868, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result). So it's a "return address (a
+# return address, with a
+# constant: return a pointer (a return address, a
+# particular return / a
+# particular pointer, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, from a fixed .data address + 19868, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result))" routine (a return address routine, part of the 0x82C2E cluster, a sibling of
+# ReturnPointer_82C3BE78 and ConstructString_8217AB58). 10
+# lines, 0 callees. No
+# direct callers (it's called via a vtable / it is registered-but-uncalled, part of the game's subsystems). The
+# pointer's meaning (r3, a pointer, a
+# particular value, a
+# particular size / a
+# particular allocation, from a fixed .data address + 19868, a
+# particular value) isn't resolvable, so the name states the mechanism: a return address (with a
+# constant) (return a pointer (a return address, a
+# particular return / a
+# particular pointer, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, from a fixed .data address + 19868, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result)). The "2" distinguishes it from ReturnPointer_82C3BE78.
+[functions."0x82C2EDE8"]
+name = "ReturnPointer2_82C2EDE8"
+
+
+# A construct (a construct, with a store and a call, the sibling of Construct8_82A3B330 / ConstructString_8217AB58,
+# the caller of sub_82A3B330): construct an object (a construct, a
+# particular construct, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a store) store a value (a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, obj->0 = r10, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, obj->544 = -1, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, obj->548 = 1, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result), and (in a call) call a process (sub_82A3B330, on a
+# value (obj + 16, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular call / a
+# particular process, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result).
+
+# Args: obj (r3, r31, ->0 = a field, a value, ->16 = a field, a value, ->544 = a field, a value, ->548 = a field, a
+# value, ->549 = a byte, ->550 = a byte, ->552 = a field, a value, ->556 = a field, a value, ->560 = a field, a
+# value, ->564 = a field, a value, a
+# particular object), (more). It constructs an object (a
+# construct, a
+# particular construct, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result). In the store, it stores a value (a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, obj->0 = r10, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, obj->544 = -1, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, obj->548 = 1, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result). In the call, it calls a process (sub_82A3B330, on a
+# value (obj + 16, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular call / a
+# particular process, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result). So it's a "construct an object (a
+# construct, with a
+# store and a
+# call: construct an object (a construct, a
+# particular construct, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a store) store a value (a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, obj->0 = r10, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, obj->544 = -1, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, obj->548 = 1, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result), and (in a call) call a process (sub_82A3B330, on a
+# value (obj + 16, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular call / a
+# particular process, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result))" routine (a construct routine, part of the 0x82814 cluster, a sibling of
+# Construct8_82A3B330 and ConstructString_8217AB58, a caller of sub_82A3B330). 92
+# lines, 1 callee (sub_82A3B330). 2 callers: sub_8281AE60, sub_8281A568 (processes, which
+# call this to construct the object, a
+# particular size / a
+# particular allocation, a
+# particular operation). The object's class (obj, r31, ->0 = a field, a value, ->16 = a field, a value, ->544 = a
+# field, a value, ->548 = a field, a value, ->549 = a byte, ->550 = a byte, ->552 = a field, a value, ->556 = a
+# field, a value, ->560 = a field, a value, ->564 = a field, a value, a
+# particular object, a
+# particular value /
+# a particular state) isn't resolvable, so the name states the mechanism: a construct (with a
+# store and a
+# call) (construct an object (a construct, a
+# particular construct, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a store) store a value (a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, obj->0 = r10, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, obj->544 = -1, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result, obj->548 = 1, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result), and (in a call) call a process (sub_82A3B330, on a
+# value (obj + 16, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular call / a
+# particular process, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result)). The "82814A38" refers to the address (a
+# particular address, a
+# particular size / a
+# particular allocation).
+[functions."0x82814A38"]
+name = "Construct8_82814A38"
+
+
+# A string operation (a string operation, with a loop and a check, the sibling of StringCopyN_822CD828 / Construct9
+# _82A3B330): do a string operation (a
+# string operation, a particular string operation, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a loop) loop over a range (a loop, a particular loop / a
+# particular range, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, over n, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result), and (in a check) check a value (a value, a
+# particular value, a
+# particular size / a
+# particular allocation, src->0, a
+# particular value, a
+# particular state / a
+# particular result), and (in a copy) copy a value (a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, dst->0 = src->0, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result), and store a value (dst->0 = 0, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result).
+
+# Args: dst (r3, r11, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular string), src (r4, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular string), n (r5, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), (more). It does a string operation (a
+# string operation, a
+# particular string operation, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result). In the loop, it loops over a range (a
+# loop, a
+# particular loop / a
+# particular range, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, over n, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result). In the check, it checks a value (a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, src->0, a
+# particular value, a
+# particular state / a
+# particular result). In the copy, it copies a value (a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, dst->0 = src->0, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result). It stores a value (dst->0 = 0, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result). So it's a "string operation (a
+# string operation, with a
+# loop and a
+# check: do a string operation (a
+# string operation, a particular string operation, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a loop) loop over a range (a loop, a
+# particular loop / a
+# particular range, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, over n, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result), and (in a check) check a value (a value, a
+# particular value, a
+# particular size / a
+# particular allocation, src->0, a
+# particular value, a
+# particular state / a
+# particular result), and (in a copy) copy a value (a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, dst->0 = src->0, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result), and store a value (dst->0 = 0, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result))" routine (a string operation routine, part of the 0x822CD cluster, a sibling of
+# StringCopyN_822CD828 and Construct9_82A3B330). 56
+# lines, 0 callees. 10 callers: sub_82E7DCA0, sub_82E7D8F8, sub_82D3AE00, sub_82C5BCC0, sub_82D51970, sub_82BA1048,
+# sub_827FFE08, sub_8231AB20, sub_82BF9040, sub_82D114F8 (processes, which
+# call this to do the string operation, a
+# particular size / a
+# particular allocation, a
+# particular operation). The string's meaning (dst, r11, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular string; src, r4, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular string; n, r5, a value, a
+# particular value, a
+# particular size / a
+# particular allocation) isn't resolvable, so the name states the mechanism: a string operation (with a
+# loop and a
+# check) (do a string operation (a
+# string operation, a
+# particular string operation, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a loop) loop over a range (a loop, a
+# particular loop / a
+# particular range, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, over n, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result), and (in a check) check a value (a value, a
+# particular value, a
+# particular size / a
+# particular allocation, src->0, a
+# particular value, a
+# particular state / a
+# particular result), and (in a copy) copy a value (a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, dst->0 = src->0, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result), and store a value (dst->0 = 0, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result)). The "822CD828" refers to the address (a
+# particular address, a
+# particular size / a
+# particular allocation).
+[functions."0x822CD828"]
+name = "StringCopyN_822CD828"
+
+
+# Validates a size/count and raises a descriptive error when it is out of range. It checks the value
+# at b->8 against a 32766 upper bound; when it exceeds that it builds an error message (SetString_822F2020
+# with a "range" string from a .data table), assembles an error struct (sub_826C3EF0 / sub_826C3FA8), and
+# dispatches the failure (sub_823702B8 / sub_82171810 / the 0x82C70 log helpers), seeding the payload
+# through sub_822F1F00. This is the "size too big" guard for the 0x8236F/0x82371 size-handling cluster.
+# Part of the 0x8236F cluster (sibling of ProcessSize_82BC9EA0's error-raise family). 329 lines, 8 callees.
+# 2 callers: sub_8236E5E0, sub_82371CD8.
+[functions."0x8236F5A8"]
+name = "RaiseRangeError_8236F5A8"
+
+
+# Populates an object's fields one by one through vtable calls. It walks the 4-byte-aligned fields of the
+# object (obj+0, obj+4, obj+8, ...) and for each issues a vcall-triple (VcallTriple_AllSuccess_82C011E8)
+# that takes the object, a constant string/key from a .data table, and the destination field slot, so the
+# named value is written into that field. The longer runs go through VcallChain_AllSuccess_82C14F38 and
+# ProcessVcallSequence3_82C14D70. Net effect: "fill this record with its per-field string values." Called
+# only by sub_82C21E90. Part of the 0x82C21 vcall / element cluster (sibling of ConstructSmallStruct_82C21A70
+# / VcallTriple_AllSuccess_82C011E8).
+# 115 lines, 3 callees (ProcessVcallSequence3_82C14D70, VcallChain_AllSuccess_82C14F38,
+# VcallTriple_AllSuccess_82C011E8). 1 caller: sub_82C21E90.
+[functions."0x82C21AE0"]
+name = "PopulateViaVcalls_82C21AE0"
+
+
+# Compares two bounded byte strings and returns the first non-zero signed difference (0 when they match).
+# It takes two pointers (a, b) and a length (n). When n <= 0 it returns 0 immediately. Otherwise it loops up
+# to n bytes, loading a[i] and b[i] as unsigned bytes, computing the signed difference (a[i] - b[i]), and
+# stopping early as soon as the difference is non-zero and a[i] is non-zero (an actual mismatch rather than
+# a terminator) - returning that difference. If the loop runs to the end without a mismatch it returns 0.
+# This is the bounded, strcmp-style "compare up to n bytes, return the sign of the first difference" routine
+# for the 0x82CA3 string-compare cluster, used by 10 callers across the 0x821D/0x82319/0x824E3/0x825F3/0x8269E/
+# 0x82844/0x82AAA/0x82B73/0x82BF7/0x8301D range. Part of the 0x82CA3 string cluster. 56 lines, 0 direct
+# callees (pure byte-compare loop). 10 callers.
+[functions."0x82CA3920"]
+name = "StringCompare_82CA3920"
+
+
+# Sizes a bit array to hold a string and installs the string's bytes into it. It takes a bit-array object
+# (obj) and a source byte string (a). It first scans (a) to measure its length (the run of non-zero bytes,
+# counting up to the first zero). It then grows the bit array to accommodate obj->4 + length bytes through
+# GrowBitArray_821F1248, copies the string bytes into the new region (MemCpy_Vectorized_822085D0), and
+# zero-fills any remainder (MemSet_SdkRuntime_82CA3190). This is the "reserve space in the bit/pool array for
+# this string and copy it in" routine for the 0x82B3A bit-pool cluster, used by 3 callers (sub_821DA550 /
+# sub_821EC668 / sub_82B3ABF0). It is the string-sizing sibling of GrowBitArray_821F1248. 98 lines, 3
+# callees (GrowBitArray_821F1248, MemCpy_Vectorized_822085D0, MemSet_SdkRuntime_82CA3190). 3 callers.
+[functions."0x82B3AB48"]
+name = "GrowBitArrayForString_82B3AB48"
+
+
+# A comparator that compares two 12-byte structures, memcmp-style, with a signed length tail. It takes two
+# structures (a and b: each with a 12-byte body and a tail field at ->12). It compares the two bodies byte-by-byte
+# (looping up to 12 bytes), computing the first difference (a[i] - b[i]). When the bodies differ it returns 0 (not
+# equal). When all 12 bytes match it compares the tail fields (a->12 and b->12), computing their difference and
+# returning the sign (a leading-zero count shifted right - negative, zero, or positive). This is the "compare these
+# two 12-byte structures" routine for the 0x82C00 compare cluster, called only by sub_82C02FC8. Part of the 0x82C00
+# compare cluster (sibling of CompareStringsSigned_82C16660 / StringCompare_82CA3358). 50 lines, 0 callees. 1
+# caller: sub_82C02FC8.
+[functions."0x82C00EE0"]
+name = "Compare12ByteStructs_82C00EE0"
+
+
+# A thunk that forwards to the UTF-16 string-length routine. It takes a string (a) and computes its length in UTF-16
+# code units (StrLenUTF16_8217AB30(a)), returning the result. It is a one-line pass-through wrapper around
+# StrLenUTF16_8217AB30 (the UTF-16 string-length function). This is the "compute this UTF-16 string's length (via the
+# UTF-16 strlen)" thunk for the 0x822F8 string cluster, used by 3 callers (sub_82EE5018 and the 0x82BF0BB / 0x82BF0CE
+# range). Part of the 0x822F8 string cluster (sibling of StrLenUTF16_8217AB30). 7 lines, 1 callee. 3 callers.
+[functions."0x822F8620"]
+name = "StrLenUTF16_Thunk_822F8620"
+
+
+# A thunk that forwards to the character-property check routine. It takes a character (a) and checks its property
+# (sub_82CA6BD0(a)), which itself forwards to the character-classification function (sub_82CB1328(a, 8)) with the
+# constant 8 (the property / class selector). It is a one-line pass-through wrapper around sub_82CA6BD0 (the character
+# -property check function). This is the "check this character's property (via the character-classification function)"
+# thunk for the 0x82BF2 character cluster, called only by sub_82BF0BB0 (the UTF-16 string-processing function). Part of
+# the 0x82BF2 character cluster (sibling of the 0x82CA6/0x82CB1 character-classification cluster). 5 lines, 1 callee.
+# 1 caller: sub_82BF0BB0.
+[functions."0x82BF2340"]
+name = "CharProperty_Check_Thunk_82BF2340"
+
+
+# A thunk that forwards to the character-classification function with the constant 8 (the property selector). It takes a
+# character (a) and checks its property (sub_82CB1328(a, 8)) - passing the character and the constant 8 (the property /
+# class selector) to the character-classification function. It is a one-line pass-through wrapper around sub_82CB1328
+# (the character-classification function), setting up the constant argument (8). This is the "check this character's
+# property (property 8, via the character-classification function)" thunk for the 0x82CA6 character cluster, used by 10
+# callers (the 0x82BF2 and 0x82F71/0x82F75/0x82F82/0x82F83 range). Part of the 0x82CA6 character cluster (sibling of 
+# sub_82CB1328 / CharProperty_Check_Thunk_82BF2340). 7 lines, 1 callee. 10 callers.
+[functions."0x82CA6BD0"]
+name = "CharProperty_Check8_82CA6BD0"
+
+
+# A lookup that checks a character's property bitfield. It takes a character (a, a 16-bit value) and a property mask (b,
+# a 16-bit value). When the character (a) is invalid (a == 0xFFFF, a >= 256, i.e. not a 7-bit ASCII character), it
+# returns 0. Otherwise it looks up the character's property bitfield in the lookup table (the .data entry at the fixed
+# address, indexed by a * 2), and returns the AND of the property bitfield with the mask (b). This is the "when this
+# character is valid (0-255), look up its property bitfield in the table and return the AND with this mask" routine for
+# the 0x82CB1 character-property cluster, used by 5 callers (CharProperty_Check8_82CA6BD0 and the 0x82CA6/0x82CD2 range).
+# Part of the 0x82CB1 character-property cluster (sibling of CharProperty_Check8_82CA6BD0). 33 lines, 0 callees. 5
+# callers.
+[functions."0x82CB1328"]
+name = "CharProperty_Lookup_82CB1328"
+
+
+# A thunk that forwards to the value resolver with a fixed argument. It sets r8 to 0 and unconditionally tail-calls
+# ProcessAndResolveValue3 (sub_82CA9D38), passing the first three arguments through unchanged (a 3-line forward, no logic of its own).
+# This is the "resolve this value" thunk, part of the 0x82CA9 resolve cluster. 3 lines. 1 callee (ProcessAndResolveValue3). 3 callers
+# (incl ProcessAndFormatString).
+[functions."0x82CA9E78"]
+name = "ResolveValue_Thunk_82CA9E78"
+
+
+# An appender that appends a UTF-16 string. It takes a destination (a null-terminated UTF-16 buffer) and a source (a UTF-16 string).
+# It first advances the destination pointer to the end of the existing string (looping over 16-bit code units until a null
+# terminator), then copies 16-bit code units from the source to the destination until the source's null terminator. This is the
+# "append this UTF-16 string" routine (an wcscat-style helper), a leaf function (no callees) used by the string formatter, part of the
+# 0x82CAA string cluster (sibling of CopyAndZeroPadUtf16_82CAAAC8). 35 lines. 0 callees. 1 caller (ProcessAndFormatString).
+[functions."0x82CAAB28"]
+name = "AppendUtf16String_82CAAB28"
+
+
+# A function that erases a byte from a buffer (a string structure). It takes a structure (a: fields at a->0 (a pointer) and a->4 (a halfword length)), an offset (b), and a count (c). It clamps the offset to the length. When c is -1 it
+# computes (the length minus the offset). It then stores the new length into a->4 and memmoves (MemMove_SdkRuntime_82CAA2E0, with a->0, a->0+the offset, and the new length). It then stores a NUL byte at a->0+the new length. This is the
+# "erase a byte from this buffer" routine, part of the 0x82BA8 process cluster. 68 lines. 1 callee (MemMove_SdkRuntime). 3 callers (sub_82BAA238, sub_82BAA3D0, and sub_82BBE220).
+[functions."0x82BA8938"]
+name = "EraseByteFromBuffer_82BA8938"
+
+
+# A wrapper that initializes a string with an offset. It takes a value (a) and a value (b). It adds 12 to b and calls ProcessAndInitializeString (ProcessAndInitializeString_82BA8798, with a and b+12). This is the "initialize a string with an
+# offset" routine, part of the 0x82BAA process cluster. 34 lines. 1 callee (ProcessAndInitializeString). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82BAA0D8"]
+name = "InitializeStringWithOffset_82BAA0D8"
+
+
+# ===========================================================================
+# Lua script system (found 2026-07 via the player-coordinate utility hunt)
+#
+# The in-game Lua 5.1 (LuaPlus) script API is built at load time by
+# ScriptApi_RegisterGlobalTable: for each entry it materializes a native
+# code address (r4 at the ProcessAndResolveTypedField call), a name string
+# (r5 at the ProcessAndCopyReferenceAndHash call), hashes it, then appends
+# the pair. `python tools/dump_lua_api.py` replays this to extract the
+# full name -> native-function table.
+# ===========================================================================
+
+# Builds the global script-function table: 19 (name, native fn) pairs.
+# Pattern per entry: addi r4,<fn> ; bl ProcessAndResolveTypedField(0x8219ab28)
+# ; addi r29,<name str> ; mr r5,r29 ; bl ProcessAndCopyReferenceAndHash
+# (0x824ef160) ; bl ProcessAndHashString(0x82A1EC08) ; bl
+# ProcessAndAppendElement(0x82229208). Subtables (Debug., Player., ...) are
+# attached via ScriptApi_AddTableEntry_825B7858. Extracted table
+# (see tools/dump_lua_api.py; guest = file offset + 0x82000000):
+#   0x821C21F8 GetRandomNumber           0x821F6CE0 GetTickRate
+#   0x82447918 GetSquaredDistanceBetweenEntityAndLODCentre
+#   0x8249BA10 GetRandomFloat            0x825B9018 CreateEntityAtEntitysPosition
+#   0x825B90D8 GetPlayerEntityWithIndex  0x825B9210 GetNearestPlayerTo
+#   0x825B9308 FNVHash                   0x825B9388 StartPubGame
+#   0x825B9580 GetSquaredDistanceBetweenPositionAndLODCentre
+#   0x825B9608 GetCurrentCamera          0x825B96B8 LogAIBehaviourEvent
+#   0x825B9750 LogEvent                  0x825B97D8 CreateEntityFromLimbo
+#   0x826064D0 IsEntityToCallFunction    0x8266F570 PutEntityInLimbo
+#   0x8279DCD8 IsEntityWithinDistanceOfLODCentre
+#   0x82806168 RunScript  <- injection point for external Lua scripts
+#   0x828BE3F0 GetCurrentWorldFrame
+[functions."0x825AF6D0"]
+name = "ScriptApi_RegisterGlobalTable_825AF6D0"
+
+
+# Formats the script-load error message: "Lua <type> script \"<name>\" has
+# an error in it". References the format fragments "Lua serialise script "
+# (0x820C2388), "Lua save load system script " (0x820C23A0), "Lua general
+# script " (0x820C23C0), "Lua AI script " (0x820C23D8), "Lua quest script "
+# (0x820C23F8), "Lua Camera script " (0x820C2414), "Lua script " (0x820C2448).
+# r3 = string object (CopyAssign'd), r4 = context. Part of the C++ script
+# loader core's error path (the loader itself is the caller).
+[functions."0x825ADB40"]
+name = "LuaScriptError_FormatMessage_825ADB40"
+
+
+# Registers the string-name table for combat/action effect types.
+# Interns the type names (ACTION, STRIKE_START, STRIKE_END, STRIKE,
+# HIT_DIRECTION, STANCE, PARTICLE, SOUND, SPEECH, CAMERA_SHAKE,
+# CONTROL_RUMBLE, EARTHQUAKE, SHOOT, THROW, POUND, CREATE_ENTITY,
+# DESTROY_ENTITY, COMBAT, UNSHEATHE, INSTANT_KILL, InterruptKORecoverAttack,
+# TROLL_FOOTSTEP, ...) via LookupString2_8246C010 from the 0x820B/0x820C
+# data pages. Backs the ScriptEnum-style action-type constants used by
+# script code (e.g. EScriptableAction tables).
+[functions."0x82514818"]
+name = "RegisterActionEffectTypeStrings_82514818"

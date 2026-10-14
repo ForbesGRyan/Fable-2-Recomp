@@ -13,6 +13,7 @@ Examples:
   python tools/fable2_control.py get-state
   python tools/fable2_control.py cvar mouse_look_scale
   python tools/fable2_control.py cvar set mouse_look_scale 512
+  python tools/fable2_control.py screenshot shot.png
   python tools/fable2_control.py script --file repro.json
   python tools/fable2_control.py raw '{"cmd":"info"}'
 
@@ -138,6 +139,12 @@ def main() -> int:
                    help="current boot/menu state (PreMainMenu / PressAScreen / "
                         "MainMenuMovie / MainMenu / ?)")
 
+    sp = sub.add_parser("screenshot",
+                        help="save the current game frame as a PNG (reads the "
+                             "renderer's guest output, so it works even when "
+                             "other windows cover the game)")
+    sp.add_argument("path", help="output PNG path (parent dirs are created)")
+
     sp = sub.add_parser("cvar", help="get or set a cvar by name")
     sp.add_argument("name")
     sp.add_argument("value", nargs="?", default=None)
@@ -177,6 +184,9 @@ def main() -> int:
         req = {"cmd": "get_state"}
     elif args.command == "game-state":
         req = {"cmd": "game_state"}
+    elif args.command == "screenshot":
+        req = {"cmd": "screenshot", "path": args.path}
+
     elif args.command == "cvar":
         req = {"cmd": "cvar", "name": args.name}
         if args.value is not None:

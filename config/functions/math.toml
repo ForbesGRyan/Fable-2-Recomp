@@ -1,0 +1,438 @@
+# math functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# A vtable method (0 DIRECT callers -- reached only via virtual dispatch) that
+# delegates to a sub-object's vtable slot 3 and returns a boolean. Args: obj
+# (r3), arg1 (r4). Loads the sub-object at obj->16, builds a 2-word arg block
+# on the stack {arg1, 0}, and calls sub_obj->vtable[3](sub_obj, &argblock, 4)
+# (vtable = *(sub_obj->0); slot at vtable offset 12 / index 3). Reduces the
+# call's result to a 0/1 boolean via a clz-based bit test and returns it. The
+# interface method (slot 3) is not resolvable without the vtable, so the name
+# states the mechanism: a delegating vtable method over the +16 sub-object that
+# returns a bool.
+[functions."0x82C01E78"]
+name = "SubObject_VcallSlot3_Bool_82C01E78"
+
+
+# Conditionally delegates to a sub-object's vtable slot 3 and stores a 32-bit
+# result. Args: obj (r3), dest (r4). Reads a flag byte at obj->5 and, when a
+# clz-based bit test on it is set, loads the sub-object at obj->0, builds a
+# 2-word arg block {dest, 0} on the stack, and calls
+# sub_obj->vtable[3](sub_obj, &argblock, 4) (same vtable slot 3 / offset 12 as
+# SubObject_VcallSlot3_Bool_82C01E78). Stores the call's 32-bit result into
+# *dest. 17 callers (sub_82C680F8, sub_82372108, sub_82A4AF78, ...). The
+# interface method (slot 3) isn't resolvable without the vtable, so the name
+# states the mechanism: a flag-gated vtable-slot-3 delegate over the +0
+# sub-object that writes a u32 result.
+[functions."0x82C842C8"]
+name = "SubObject_VcallSlot3_GatedStore32_82C842C8"
+
+
+# A float-to-int conversion + process: if a pair field matches, scale a float by an integer,
+# convert the result to an int (fctiwz), and process it (sub_823F9AE0).
+
+# Args: obj (r3, ->36/->40 = a pair, ->44 = a float), (r4). If obj->40 == obj->36, it does a
+# float-to-int conversion: loads obj->44 (a float) and obj->36 (extended to a double), multiplies
+# them, converts the product to an int (fctiwz, with the standard NaN/overflow saturation), and
+# calls sub_823F9AE0 with that int (+ 1). So it's a "scale a float to an int and process" routine
+# (a normalized-value -> index/count conversion). 94 lines. Many callers, in the 0x82BB/0x82BA/
+# 0x82BC cluster plus ProcessFlags_82284750 (sub_82284750). The float's meaning (a scale factor,
+# a probability, a normalized coordinate) and sub_823F9AE0's role aren't resolvable, so the name
+# states the mechanism: float-to-int conversion and process.
+[functions."0x82284810"]
+name = "FloatToIntProcess_82284810"
+
+
+# A hash computation: compute a hash of the data (a loop mixing the data's bytes with a seed), then use the
+# hash (via obj->16).
+
+# Args: obj (r3, ->16 = a hash-table / bucket), len (r4), seed (r5), data (r6), (more). Computes a hash of the
+# data: it walks the data bytes (a loop, mixing each byte with the seed via a sequence of shifts, adds, and
+# XORs -- r6 = r6 ^ (byte + (seed >> 5) + (seed >> 30))), producing a 32-bit hash. It then uses the hash: it
+# loads obj->16 (a hash-table / bucket base) and its ->0 and ->8 fields, and (later in the body) calls sub
+# _82BCD7B0 (a sibling in the 0x82BC cluster) to look up / insert the hashed entry. So it's a "compute a hash
+# of the data and use it (a hash-table lookup/insert)" routine. 164 lines, 1 callee (sub_82BCD7B0). Many
+# callers (sub_82BDDB88, sub_8219CDA8, sub_82BC7328, ...). The data's type (a string / buffer) and the hash
+# table's meaning aren't resolvable, so the name states the mechanism: compute a hash.
+[functions."0x8227BA30"]
+name = "ComputeHash_8227BA30"
+
+
+# A block-size computation: clamp a value (against obj->12), then compute a size (integer arithmetic, shifts,
+# divisions, and squares), with traps (twllei) on a zero-division.
+
+# Args: obj (r3, ->8, ->12, ->16, ->28 = parameters), value (r4), (more). Clamps the value: if value < obj->12,
+# it uses obj->12 (a minimum). It then computes a size: it reads the object's parameters (obj->8, obj->16, obj->28,
+# a shift amount), and performs a sequence of integer operations (shifts, multiplications/squares, subtractions, and
+# divisions). It traps (twllei r8, 0 and twllei r6, 0) on a zero-division (a guard against dividing by zero). So it's
+# a "compute a block size (clamp the value, and compute the size via integer arithmetic)" routine (a size /
+# layout computation, part of the 0x829FD cluster). 65 lines, no callees (pure integer arithmetic). 2 callers: sub
+# _83231240, Heap_CarveBlock_83231058 (sub_83231058, a heap block carver). The object's class (->8, ->12, ->16, ->28
+# = parameters, a shift amount) and the size's meaning (a heap block size / layout) aren't resolvable, so the name
+# states the mechanism: compute a block size.
+[functions."0x829FD1C8"]
+name = "ComputeBlockSize_829FD1C8"
+
+
+# A floating-point computation (a periodic / wrapped value): compute a wrapped value from a float (fabs, an integer
+# conversion (fctidz/fcfid), the fractional part, and a series of fsel selects, against two float constants).
+
+# Args: (r3), (r4), value (f1), (more). Computes a wrapped value from the input (value, in f1): it converts the value
+# to an integer and back (fctidz/fcfid, an integer part / floor), computes the absolute value (fabs), the fractional
+# part (value - floor), and two constants (loaded from fixed .data addresses, 0x82...3248 and 0x82...3288). It then
+# applies a series of fsel (floating-point select) operations (picking a result based on the sign of intermediate
+# values), and returns the result in f1. So it's a "compute a wrapped value (a periodic / wrapped floating-point
+# value, using fabs, the fractional part, and selects against two constants)" routine (a floating-point math helper,
+# part of the 0x8222C cluster). 35 lines, no callees (pure floating-point arithmetic). Many callers (sub_8249A300,
+# sub_82F11B70, sub_82F7F4A8, ... -- many in the 0x82F/0x830 rendering / math region). The exact computation (the two
+# float constants at 0x82...3248 and 0x82...3288, and the wrap period) aren't resolvable from the code alone, so the
+# name states the mechanism: compute a wrapped value (a periodic / wrapped float).
+[functions."0x8222C3E8"]
+name = "ComputeWrapped_8222C3E8"
+
+
+# A complex computation (a clamped / min-max computation): compute clamped values from the object's fields (obj->0,
+# obj->20), a, and b (subtractions, andc, additions, and min/max comparisons), and store the results (out->0 and
+# out2->0).
+
+# Args: obj (r3, ->0, ->20), a (r4), b (r5), out (r6, ->0), out2 (r7, ->0), (r8), (more). It computes clamped values
+# from the object's fields (obj->0, a count, and obj->20, a base), a, and b: it performs a sequence of subtractions
+# (obj->0 - 1, b - obj->0, a + obj->0 - 1), andc (bitwise-and-not, a clamp / mask), additions (obj->20 + obj->0 - 1,
+# a + ...), and min/max comparisons (comparing the computed values and storing the min / max to out->0 and out2->0).
+# So it's a "compute clamped values (a complex min-max computation, with subtractions, andc, and additions) and store
+# the results" routine (a clamped computation, part of the 0x83230 cluster). 70 lines, no callees (pure integer
+# arithmetic). 2 callers (sub_83230C88, sub_83230D00). The object's class (->0 = a count, ->20 = a base, an object
+# with a count and a base) and the values' meaning (clamped / min-max values, an index / range computation) aren't
+# resolvable, so the name states the mechanism: a clamped computation (min-max, with subtractions, andc, and
+# additions).
+[functions."0x83230A48"]
+name = "ComputeClamped_83230A48"
+
+
+# A complex computation (with 128-bit vector ops): compute a value (loading global floats, 128-bit vector operations
+# -- vspltisw, vcfux, lvlx, vspltw, stvx128, a SIMD computation), and store the result (a float, to out->0).
+
+# Args: out (r3, ->0 = a float), (more). It computes a value: it loads global floats (from fixed .data addresses,
+# 0x82...-27456 and 0x82...-12, constants), and performs a sequence of 128-bit vector operations (vspltisw, vcfux, lvlx
+# , vspltw, stvx128 -- a SIMD computation, with a 128-bit load/store and a splat / shuffle). It stores the result (a
+# float, to out->0). So it's a "compute a value (a complex SIMD computation, loading global floats and 128-bit vector
+# operations) and store the result (a float)" routine (a complex computation with vector ops, part of the 0x83211
+# cluster). 173 lines, no direct callees (pure computation, 128-bit vector ops which the callee scan does not count).
+# 1 caller: sub_832351B0. The value's meaning (a computed float, a particular math / transformation) and the global
+# floats' meaning (constants, a particular computation) aren't resolvable from the code alone, so the name states the
+# mechanism: a complex computation (with 128-bit vector ops) and store the result.
+[functions."0x832119D8"]
+name = "ComputeVector_832119D8"
+
+
+# A process (a clamped computation, the sibling of ComputeClamped_83230A48 / the callee of Heap_CarveBlock_83231058
+# ): compute a clamped value (ComputeClamped_83230A48, on a value, with a constant), and (if the result is non-zero)
+# process (a computation with obj->0 and constants, 0x10000 and 0x1000, a size / a block-size computation).
+
+# Args: obj (r3, r31, ->0 = a value), (r4), (r5), value (r6, r8), (more). It computes a clamped value (ComputeClamped
+# _83230A48, sub_83230A48, a clamped computation, on the value (r6 = value) and a constant (r7 = stack[80], a
+# min/max), with a result at stack[80]). If the result (stack[80]) is zero (an empty / a zero), it takes one path. If
+# the result is non-zero, it processes: it loads a value (r10 = obj->0, a value), compares it against constants (0x100
+# 00 = 1 << 16, and 0x1000 = 1 << 12, a size / a block-size check), and (depending on the comparison) computes a value
+# (a size, a block-size computation, with a 4-byte stride, r6 = 4). So it's a "process (a clamped computation: compute
+# a clamped value, and (if the result is non-zero) compute a size / a block size (with obj->0 and constants))" routine
+# (a clamped computation, part of the 0x83230 cluster, a sibling of ComputeClamped_83230A48, a callee of
+# Heap_CarveBlock_83231058). 92 lines, 2 callees (ComputeClamped_83230A48, sub_82CC0CA0). 1 caller: Heap_CarveBlock_8
+# 3231058 (sub_83231058, a heap block carver, which calls this to compute a clamped value / a block size). The
+# object's class (obj, r31, ->0 = a value, an object with a value) and the value's meaning (a value, a size / a block
+# size, a particular dimension) aren't resolvable, so the name states the mechanism: a clamped computation (compute a
+# clamped value and (if the result is non-zero) compute a size / a block size). The "2" distinguishes it from Compute
+# Clamped_83230A48.
+[functions."0x83230D00"]
+name = "ComputeClamped2_83230D00"
+
+
+# A compute (a math function, a special-function approximation, the sibling of the math cluster): take the magnitude
+# (fabs, a float absolute value, of the input), load a table of float constants (from a fixed .data address, a table of
+# polynomial coefficients, a set of 12 constants), and perform a polynomial evaluation (a Horner's method, a series of
+# float multiplications and additions, with float-to-int conversions, a special-function approximation, a math
+# function, computing a particular value from the input).
+
+# Args: a float (f1, a value, a particular input). It takes the magnitude (fabs f0, f1, a float absolute value, a
+# magnitude, handling both positive and negative inputs, a particular convention). It loads a table of float constants
+# (from a fixed .data address, a table of polynomial coefficients, 12 constants: f13, f11, f10, f9, f8, f7, f6, f5, f4,
+# f3, f2, f1, a set of coefficients, a particular set of magic constants). It performs a polynomial evaluation (a
+# Horner's method: it computes f12 = f13 + f0, a coefficient (a float), and f13 = table[8] * f12, a multiplication (a
+# float), and f13 = fctid(f13), a conversion (a float to int, a rounding), and f11 = f13 - f11, a subtraction (a float),
+# and f13 = fctidz(f13), a conversion (a float to int, a rounding toward zero), a series of float operations, a
+# polynomial evaluation, a special-function approximation, computing a particular value from the input). So it's a
+# "compute (a math function: take the magnitude, load a table of float constants, and perform a polynomial evaluation
+# (a Horner's method, a special-function approximation, computing a particular value from the input))" routine (a math
+# function, a special-function approximation, part of the 0x82239 cluster, a sibling of the math cluster). 125 lines,
+# no direct callees (pure data manipulation). 10+ callers: sub_826E2A28, sub_821DAF50, sub_82A27648, sub_82F51298,
+# sub_82FD34B8, sub_82AA5FC8, sub_82FB79E8, sub_82A77DC8, sub_823997D0, sub_82BD1290 (a widely-called math function,
+# part of the game's math subsystem). The input's meaning (a float, a value, a particular input, a particular quantity)
+# and the output's meaning (a float, a value, a particular output, a particular quantity) aren't resolvable, so the
+# name states the mechanism: a math function (take the magnitude, load a table of float constants, and perform a
+# polynomial evaluation (a Horner's method, a special-function approximation)).
+[functions."0x82239E88"]
+name = "ComputeSpecialFunction_82239E88"
+
+
+# A compute (a math function, a special-function approximation, the sibling of ComputeSpecialFunction_82239E88): take
+# the magnitude (fabs, a float absolute value, of the input), load a table of float constants (from a fixed .data
+# address, a table of polynomial coefficients, a set of constants), and perform a polynomial evaluation (a Horner's
+# method, a series of float multiplications and additions, with float-to-int conversions, a special-function
+# approximation, a math function, computing a particular value from the input).
+
+# Args: a float (f1, a value, a particular input). It takes the magnitude (fabs f0, f1, a float absolute value, a
+# magnitude, handling both positive and negative inputs, a particular convention). It loads a table of float constants
+# (from a fixed .data address, a table of polynomial coefficients, a set of constants: f30, f11, f12, f10, f9, f8, f7,
+# f6, f5, f4, f3, f2, f31, a set of coefficients, a particular set of magic constants). It performs a polynomial
+# evaluation (a Horner's method: it computes f13 = f11 * f0, a multiplication (a float), and f11 = fctid(f13), a
+# conversion (a float to int, a rounding), and continues (a series of float operations, a polynomial evaluation, a
+# special-function approximation, computing a particular value from the input). So it's a "compute (a math function:
+# take the magnitude, load a table of float constants, and perform a polynomial evaluation (a Horner's method, a
+# special-function approximation, computing a particular value from the input))" routine (a math function, a
+# special-function approximation, part of the 0x82239 cluster, a sibling of ComputeSpecialFunction_82239E88). 124
+# lines, no direct callees (pure data manipulation). 10+ callers: sub_8322AF80, sub_824D8638, sub_82FD3088, sub
+# _82DBB8D0, sub_821BE068, sub_829C1A80, sub_827ECDA0, sub_8294C460, sub_8322AFE8, sub_82ED1E88 (a widely-called math
+# function, part of the game's math subsystem). The input's meaning (a float, a value, a particular input, a particular
+# quantity) and the output's meaning (a float, a value, a particular output, a particular quantity) aren't resolvable,
+# so the name states the mechanism: a math function (take the magnitude, load a table of float constants, and perform
+# a polynomial evaluation (a Horner's method, a special-function approximation)). The "2" distinguishes it from
+# ComputeSpecialFunction_82239E88.
+[functions."0x82239F68"]
+name = "ComputeSpecialFunction2_82239F68"
+
+
+# A process (a vector hash/computation, with vector operations and constants, the sibling of ProcessVector2_8223BD98
+# / the caller of sub_8223BB38): load vector constants (from a fixed .data address, a set of vector constants, a
+# particular set of magic constants, a vector of constants), and perform a vector hash/computation (vector permutes,
+# a vector XOR, a SIMD computation, a particular hash / a particular comparison, a particular vector operation).
+
+# Args: obj (r3, an object), a (r4, a value), b (r5, a value), c (v2, a vector, a particular value), (more). It loads
+# vector constants (from a fixed .data address, a set of vector constants, a particular set of magic constants, a
+# vector of constants: lvx128 v0, r11, a vector constant, and vpermwi128 v6, v0, 228, a vector permute, a particular
+# permutation, and vpermwi128 v5, v0, 177, a vector permute, a particular permutation, and vpermwi128 v4, v0, 78, a
+# vector permute, a particular permutation). It loads another vector constant (lvx128 v0, r8, a vector constant, a
+# particular value). It performs a vector hash/computation (a vector XOR, vxor v2, v6, v0, a vector XOR, a particular
+# operation, a particular hash / a particular comparison, and vxor v31, v5, v0, a vector XOR, a particular operation, a
+# particular hash / a particular comparison, and vxor v30, v4, v0, a vector XOR, a particular operation, a particular
+# hash / a particular comparison, a SIMD computation, a particular vector operation). So it's a "process (a vector
+# hash/computation: load vector constants (from a fixed .data address, a set of vector constants, a particular set of
+# magic constants, a vector of constants), and perform a vector hash/computation (vector permutes, a vector XOR, a
+# SIMD computation, a particular hash / a particular comparison, a particular vector operation))" routine (a vector
+# hash/computation, part of the 0x8222E cluster, a sibling of ProcessVector2_8223BD98). 150 lines, no direct callees
+# (pure data manipulation, with vector operations). 10+ callers: sub_8223BB38, sub_829BEB18, sub_82A0B288, sub
+# _826EBE68, sub_826E8078, sub_821D3000, sub_82A9C2F8, sub_829BEFA8, sub_8223D148, sub_822AA498 (a widely-called
+# vector hash/computation, part of the game's vector/SIMD subsystem). The object's class (obj, an object, a particular
+# structure, a hash / a value object) and the vector's meaning (a vector, a particular value, a particular quantity)
+# aren't resolvable, so the name states the mechanism: a vector hash/computation (load vector constants (from a fixed
+# .data address, a set of vector constants, a particular set of magic constants, a vector of constants), and perform a
+# vector hash/computation (vector permutes, a vector XOR, a SIMD computation, a particular hash / a particular
+# comparison)).
+[functions."0x8222E6C0"]
+name = "ComputeVectorHash_8222E6C0"
+
+
+# A compute (a complex computation, with a count and a constant, the sibling of DispatchVcallType_82188680):
+# (if a count, obj->9, is zero, a particular count / a particular state) return (a no-op / a return, a particular
+# state), and (otherwise) compute a complex computation (a count, obj->9, a count, a particular count / a particular
+# value, a constant, from a fixed .data address, a particular value, a particular result, a particular size / a
+# particular allocation, using a base (obj->4, a base, a particular value, a particular source), and a byte (obj->4->31
+# , a byte, a particular value, a particular state, a particular flag)).
+
+# Args: a (r3, a value), obj (r4, ->4 = a base, ->9 = a count, a particular structure, a particular compute object),
+# (more). It checks a count (r11, obj->9, a count, a particular count / a particular value): if it is zero (a
+# particular count / a particular state, a particular value), it returns (a no-op / a return, a particular state, a
+# particular result). If it is non-zero (a particular count / a particular state, a particular value), it computes a
+# complex computation (a count, obj->9, a count, a particular count / a particular value, a constant, from a fixed
+# .data address, a particular value, a particular result, a particular size / a particular allocation: it reads a base
+# (r19, obj->4, a base, a particular value, a particular source), and a byte (r11, r19->31, a byte, a particular value
+# , a particular state, a particular flag), and (if the byte is non-zero, a particular state, a particular flag), it
+# loads a constant (f13, a constant, from a fixed .data address, a particular value, a particular constant), and
+# (r22, a constant, from a fixed .data address, a particular value, a particular constant), and (r23, a constant, from a
+# fixed .data address, a particular value, a particular constant), and (r24, a constant, from a fixed .data address, a
+# particular value, a particular constant), and performs a complex computation (a count, obj->9, a count, a particular
+# count / a particular value, a constant, from a fixed .data address, a particular value, a particular result, a
+# particular size / a particular allocation, using a base (r19, obj->4, a base, a particular value, a particular
+# source), and a byte (r11, r19->31, a byte, a particular value, a particular state, a particular flag))). So it's a
+# "compute (a complex computation, with a count and a constant: (if a count, obj->9, is zero, a particular count / a
+# particular state) return (a no-op / a return, a particular state), and (otherwise) compute a complex computation (a
+# count, obj->9, a count, a particular count / a particular value, a constant, from a fixed .data address, a particular
+# value, a particular result, a particular size / a particular allocation, using a base (obj->4, a base, a particular
+# value, a particular source), and a byte (obj->4->31, a byte, a particular value, a particular state, a particular
+# flag)))" routine (a compute, part of the 0x82188 cluster, a sibling of DispatchVcallType_82188680). 409 lines, no
+# direct callees (pure computation, using constants from fixed .data addresses). No direct callers (it's called via a
+# vtable / it is registered-but-uncalled, part of the game's subsystems). The object's class (obj, r4, ->4 = a base,
+# ->9 = a count, a particular structure, a particular compute object, a particular range / a particular source) and the
+# count's meaning (a count, obj->9, a particular count / a particular value) aren't resolvable, so the name states the
+# mechanism: a complex computation (with a count and a constant) ((if a count, obj->9, is zero, a particular count / a
+# particular state) return (a no-op / a return, a particular state), and (otherwise) compute a complex computation (a
+# count, obj->9, a count, a particular count / a particular value, a constant, from a fixed .data address, a particular
+# value, a particular result, a particular size / a particular allocation, using a base (obj->4, a base, a particular
+# value, a particular source), and a byte (obj->4->31, a byte, a particular value, a particular state, a particular
+# flag))).
+[functions."0x821888C0"]
+name = "ComputeFromCount_821888C0"
+
+
+# Computes a hash for a (indexed) string / pointer value. It resolves the source via
+# GetIndexedPointer_82BC5448, scans the byte sequence to measure its length (walking until it hits
+# a non-zero byte), then hashes that slice with ComputeHash_8227BA30. The hashed value plus a
+# 4-byte descriptor is staged on the stack and handed to ProcessDispatchLoop_8229A518 for the
+# actual lookup / dispatch. Widely used (10 callers) across the 0x82BBx/0x82BCx/0x82BDx string-key
+# container cluster.
+# Part of the 0x82BC5 cluster (sibling of GetIndexedPointer_82BC5448). 85 lines, 3 callees
+# (ComputeHash_8227BA30, GetIndexedPointer_82BC5448, ProcessDispatchLoop_8229A518).
+# 10 callers (the 0x82BBx/0x82BCx/0x82BDx cluster).
+[functions."0x82BC5EB0"]
+name = "ComputeStringHash_82BC5EB0"
+
+
+# Tests whether a float value is within a tolerance of a reference, and flags the result. It stages the
+# incoming float (f1) on the stack, does a 16-byte vector copy of the payload at obj+64, then computes
+# the absolute difference abs(stored_float - f1) and compares it against a tolerance constant loaded from
+# a .data table. When the difference is below the tolerance it marks obj->548 = 1 (an "equal within
+# epsilon" flag); otherwise the comparison path returns a 0/1 result. This is the epsilon-compare step in
+# the named-value decode pipeline (its only caller is ProcessNamedValue_82815CB0). Part of the 0x82816
+# cluster. 229 lines, 0 direct callees (pure float / vector math). 1 caller: ProcessNamedValue_82815CB0.
+[functions."0x82816098"]
+name = "FloatToleranceTest_82816098"
+
+
+# The twin of FloatToleranceTest_82816098 - an epsilon-compare of a float value against a reference,
+# reading the reference from a different stack slot (r1-12 instead of r1-16). Same shape: stage the
+# incoming float (f1), copy the 16-byte payload at obj+64, compute abs(reference - f1), compare it to the
+# tolerance constant from the .data table, and when the difference is below the tolerance set obj->548 = 1
+# (an "equal within epsilon" flag). Both variants are called from ProcessNamedValue_82815CB0 to test two
+# different fields of a named value. Part of the 0x82816 cluster.
+# 229 lines, 0 direct callees (pure float / vector math). 1 caller: ProcessNamedValue_82815CB0.
+[functions."0x82816208"]
+name = "FloatToleranceTest2_82816208"
+
+
+# The third member of the float epsilon-compare trio (FloatToleranceTest_82816098 / _2_82816208 /
+# _3_82816378), reading the reference float from the third stack slot (r1-8). Same body as its siblings:
+# stage f1, copy the 16-byte payload at obj+64, compute abs(reference - f1), compare against the
+# tolerance constant, and set obj->548 = 1 when the difference is within epsilon. ProcessNamedValue_82815CB0
+# calls all three to test three separate fields of a named value.
+# Part of the 0x82816 cluster (sibling of FloatToleranceTest_82816098 / FloatToleranceTest2_82816208).
+# 229 lines, 0 direct callees (pure float / vector math). 1 caller: ProcessNamedValue_82815CB0.
+[functions."0x82816378"]
+name = "FloatToleranceTest3_82816378"
+
+
+# Computes a 32-bit hash over a word array. It takes an output slot (a), a source buffer (b), and a byte
+# length (n). It folds a fixed hash prime (a .data constant OR'd with 0xE8D5, giving the game's FNV-style
+# mixing constant) into a running hash: for each 4-byte word of the buffer it multiplies by the prime,
+# rotates one byte to the high end (value << 8), XORs the byte back in, multiplies again, and XORs the
+# result into the accumulator (a classic Jenkins / FNV-multiply-mix). When the length is a multiple of four
+# the whole buffer is processed; the leftover trailing bytes are handled through sub_82A2DCC8. This is the
+# "hash a byte buffer into a 32-bit key" routine for the 0x82227 hash cluster, used by 10 callers (the
+# 0x82A1E/0x82A20/0x82A24/0x82A28/0x82A2B/0x82A2E/0x82A36/0x82BF4 range). Part of the 0x82227 hash cluster
+# (sibling of ComputeHash_8227BA30 / HashNamedEntry_82188B88). 217 lines, 1 callee (sub_82A2DCC8). 10
+# callers.
+[functions."0x82227EA0"]
+name = "ComputeStringHash_82227EA0"
+
+
+# Computes a FNV-style hash over the non-NUL prefix of a string. It takes a string pointer (a). It first scans
+# forward to the first zero byte to find the hashable prefix length, and bails early if the prefix is empty. It
+# then folds the prefix into a running hash: starting from a .data seed, for each byte it multiplies by the
+# 0x01000193 (16777619) FNV prime and XORs in the byte (hash = (hash * prime) ^ byte), iterating over the
+# prefix. The resulting hash is returned in r3. This is the "hash this string's bytes with an FNV-style
+# multiply-xor fold" routine for the 0x82C81 hash cluster, called only by sub_82C822D8. Part of the 0x82C81
+# hash cluster (sibling of ComputeStringHash_82227EA0 / StringCompare_82CA3920). 46 lines, 0 direct callees
+# (pure hash math). 1 caller: sub_82C822D8.
+[functions."0x82C81DF8"]
+name = "ComputeFNVHash_82C81DF8"
+
+
+# A processor that lazily computes a cached flag and stores it back into the structure. It takes a structure
+# (a: a sub-object at a->28, a virtual method at a->32, a target at a->40) and a value (b). It checks the
+# cached flag slot (a->28->52): when it is already populated it takes the populated path. When it is empty it
+# reads the bit index (a->28->36), forms a bit mask (1 << bit index), and performs a virtual call through the
+# method pointer (a->32) passing (a->40, 1, the mask) to compute the flag. It stores the computed value back
+# into the cache slot (a->28->52). This is the "compute this flag via the virtual method if it is not already
+# cached, then store it" routine for the 0x82B53 flag cluster, called only by sub_82B53A40 (a sibling of
+# ProcessTypeDispatch_82B49D50). Part of the 0x82B53 flag cluster (sibling of sub_82B52500 / sub_82B537C0 /
+# sub_82B53A40). 192 lines, 1 callee. 1 caller: sub_82B53A40.
+[functions."0x82B538F0"]
+name = "ComputeAndCacheFlag_82B538F0"
+
+
+# A hasher that computes a 32-bit hash from two 16-bit halves. It takes a 32-bit value (two 16-bit halves: high at bits 16-31, low at bits 0-15),
+# a value (b), and a mode (c). When the mode is 1 it reads a byte from b, adds it to the low half (modulo 65521), then adds the result to the
+# high half (modulo 65521), and returns the combined (high << 16) | low. When b is zero and the mode is not 1 it returns 1. This is the
+# "compute this hash (second form)" routine, a leaf function (no callees), part of the 0x82B57 hash cluster (sibling of ComputeHash_8227BA30).
+# 424 lines. 0 callees. 2 callers.
+[functions."0x82B57438"]
+name = "ComputeHash2_82B57438"
+
+
+# A function that computes the difference between two fields. It takes a structure (a: two 64-bit fields at a->16 and a->24), reads both fields, and
+# returns a->24 minus a->16. This is the "compute this field difference" routine, a leaf function (no callees), called only via the vtable (0
+# direct callers), part of the 0x82B4D compute cluster. 12 lines. 0 callees. 0 direct callers (vtable dispatch).
+[functions."0x82B4DD70"]
+name = "ComputeFieldDifference_82B4DD70"
+
+
+# A thunk that adds an offset to a pointer. It takes a pointer and returns the pointer plus 12. This is the "add this offset to the pointer" thunk,
+# part of the 0x82BF2 offset cluster. 8 lines. 0 callees. 1 caller (ProcessAndConstructWithFlag2_82BEDAB0).
+[functions."0x82BF2D58"]
+name = "AddOffset12_Thunk_82BF2D58"
+
+
+# An offsetter that adds an offset (768). It takes a value (a) and returns a plus 768. This is the "add this offset" routine, part of the 0x82BAA process cluster. 8 lines. 0 callees (leaf function). 0 callers
+# (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82BAA168"]
+name = "AddOffset768_82BAA168"
+
+
+# An offsetter that adds an offset to the data. It takes a value (a). It adds 592 to a and returns it. This is the "add this offset" routine, part of the 0x82BAA process cluster. 8 lines. 0
+# callees (leaf function). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82BAA160"]
+name = "AddOffset592_82BAA160"
+
+
+# An offsetter that adds an offset to the data. It takes a value (a). It adds 8 to a and returns it. This is the "add this offset" routine, part of the 0x82D79 process cluster. 8 lines. 0 callees
+# (leaf function). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82D79B50"]
+name = "AddOffset8_82D79B50"
+
+
+# A compute function that returns a boolean bit from a global field (offset 19764). It reads the field from a .data structure, counts the leading zeros (cntlzw), rotates the count left by 27 (equivalent to taking bit 5), and XORs the result with 1.
+# This is the "compute a bit from this global field" routine, part of the 0x82C13 process cluster. 16 lines. 0 callees (leaf function). 1 caller (ProcessAndJumpTo_82BFFB38).
+[functions."0x82C13078"]
+name = "ComputeGlobalField19764Bit_82C13078"
+
+
+# A function that adds an offset (852) to a value. It takes a value (a) and returns a+852. This is the "add offset 852 to this value" routine, part of the 0x822D3 process cluster. 8 lines. 0 callees (leaf function). 0 callers (unresolved —
+# body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x822D3D78"]
+name = "AddOffset852_822D3D78"
+
+
+# Multiply-and-add in place on a 12-byte structure (a simple arithmetic routine). It takes a structure (a: fields at a->0, a->4, and a->8); it computes (a->0 * a->8) + a->4 and stores the result in a->8. This is a "multiply and add in place" routine. 20 lines. 0 callees. 1 caller (sub_82C60180).
+[functions."0x82C627E0"]
+name = "MultiplyAndAddInPlace_82C627E0"
+
+
+# Compute a floating-point time difference and convert to an integer (a time-to-integer routine). It takes a floating-point value (a: f1); it compares a to a global threshold, and — if below — computes the difference from the threshold, otherwise computes the sum with another global, then converts the result to an integer. This is a "compute time difference as integer" routine. 39 lines. 0 callees. 1 caller (sub_82C60180).
+[functions."0x82C60140"]
+name = "ComputeTimeDifferenceAsInteger_82C60140"
+
+
+# Interpolate between two floating-point arrays and store the result (a float interpolation routine). It takes a structure (a: fields at a->8, a->36, a->40, a->16, a->20, and a->12); if the count (a->8) is positive, it iterates over the range [a->36, a->40) and computes a weighted sum of two float arrays (a->16 and a->20), storing the interpolated result in a->12. This is a "interpolate float array" routine. 292 lines. 0 callees. 1 caller (sub_82C60180).
+[functions."0x82C62548"]
+name = "InterpolateFloatArray_82C62548"
+
+
+# Atomically add a delta to a global value (an atomic add routine). It takes a value (a, an index) and a value (b, a delta); it atomically adds the delta to the global value using atomic operations. This is an "add atomic" routine. 43 lines. 0 callees. 6 callers (sub_82CDD088, sub_82CDC2F0, sub_82CDA840, sub_82CDB3C0, sub_82CE2618, and sub_82CE3CF0).
+[functions."0x82CDD5D8"]
+name = "AddAtomic_82CDD5D8"
+
+
+# Normalize a vector by dividing its components by its magnitude (a vector normalization routine). It takes a pointer (a) and a float (b, a threshold); it normalizes the vector by dividing its components by its magnitude, and returns the normalized vector. This is a "normalize vector" routine. 68 lines. 0 callees. 12 callers (many from the 0x822*, 0x824*, 0x825*, 0x826*, 0x827*, and 0x829* clusters).
+[functions."0x82260BC8"]
+name = "NormalizeVector_82260BC8"

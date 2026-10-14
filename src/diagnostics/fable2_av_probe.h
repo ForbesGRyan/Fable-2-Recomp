@@ -273,19 +273,23 @@ struct Registrar {
   Registrar() {
     state().module_base = reinterpret_cast<u64>(GetModuleHandleA(nullptr));
     char dir[MAX_PATH] = {0};
-    if (GetModuleFileNameA(nullptr, dir, MAX_PATH)) {
-      char* cut = nullptr;
-      for (char* p = dir + strlen(dir) - 1; p >= dir; --p) {
-        if (*p == '\\' || *p == '/') {
-          cut = p;
-          break;
-        }
-      }
-      if (cut) *(cut + 1) = 0;
-      char path[MAX_PATH + 32];
-      snprintf(path, sizeof(path), "%sfable2_av_probe.log", dir);
-      state().log = fopen(path, "a");
-    }
+    // Release build: don't create the AV-probe log file. Every write path
+    // (log_line/handler) no-ops when state().log is null, so the VEH handler
+    // stays installed but purely silent.
+    // if (GetModuleFileNameA(nullptr, dir, MAX_PATH)) {
+    //   char* cut = nullptr;
+    //   for (char* p = dir + strlen(dir) - 1; p >= dir; --p) {
+    //     if (*p == '\\' || *p == '/') {
+    //       cut = p;
+    //       break;
+    //     }
+    //   }
+    //   if (cut) *(cut + 1) = 0;
+    //   char path[MAX_PATH + 32];
+    //   snprintf(path, sizeof(path), "%sfable2_av_probe.log", dir);
+    //   state().log = fopen(path, "a");
+    // }
+    (void)dir;
     // FIRST priority so we run before guest SEH can swallow the AV.
     AddVectoredExceptionHandler(1, handler);
     log_line("av probe installed base=0x%llX",

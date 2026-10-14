@@ -25,7 +25,7 @@
 
 #include <rex/ppc/func.h>
 
-extern "C" void __imp__ProcessAndProcessAndProcess523_82B9BF90(PPCContext& __restrict ctx,
+extern "C" void __imp__GpuProgressCheck_82B9BF90(PPCContext& __restrict ctx,
                                                                uint8_t* base);
 
 namespace fable2::limiter_yield {
@@ -73,8 +73,8 @@ inline void YieldOnce() {
 
 }  // namespace fable2::limiter_yield
 
-extern "C" void ProcessAndProcessAndProcess523_82B9BF90(PPCContext& __restrict ctx,
+extern "C" void GpuProgressCheck_82B9BF90(PPCContext& __restrict ctx,
                                                         uint8_t* base) {
-  __imp__ProcessAndProcessAndProcess523_82B9BF90(ctx, base);
+  __imp__GpuProgressCheck_82B9BF90(ctx, base);
   if (fable2::limiter_yield::Mode() != 0) fable2::limiter_yield::YieldOnce();
 }

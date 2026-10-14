@@ -10,6 +10,10 @@ rem
 rem Usage:
 rem   build.cmd                  build fable_2_codegen (runs codegen from fable_2_manifest.toml)
 rem   build.cmd fable_2          build the full recompiled executable
+rem   build.cmd launcher         build the launcher, self-contained by default
+rem                              (bundles the .NET 8 Desktop Runtime, so users don't need to install .NET)
+rem   build.cmd launcher-dev     build the small framework-dependent launcher
+rem                              (needs the .NET 8 Desktop Runtime installed)
 rem   build.cmd <other target>   build any other CMake target
 rem   build.cmd -release [t]     build as Release (-O3) instead of Debug
 rem   build.cmd -r [t]           (same, short form)
@@ -23,12 +27,13 @@ setlocal
 cd /d "%~dp0"
 
 rem The launcher only needs the .NET SDK, not the much larger C++ toolchain.
+rem Self-contained is the default so the shipped exe needs no .NET install.
 if /i "%~1"=="launcher" (
     call "%~dp0launcher\build-launcher.cmd" || exit /b 1
     exit /b 0
 )
-if /i "%~1"=="launcher-self-contained" (
-    call "%~dp0launcher\build-launcher.cmd" self-contained || exit /b 1
+if /i "%~1"=="launcher-dev" (
+    call "%~dp0launcher\build-launcher.cmd" dev || exit /b 1
     exit /b 0
 )
 rem LLVM: prefer clang++ already on PATH, else the default install location

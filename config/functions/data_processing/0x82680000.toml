@@ -1,0 +1,69 @@
+# data-processing region 0x82680000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# A constant-return stub: returns the integer 4 (a 2-insn function: li r3,4; blr).
+# 0 direct callers, so it is almost certainly a VIRTUAL method (invoked through a
+# vtable) -- likely a property/type-code/size accessor whose value is the constant
+# 4. The exact meaning of 4 needs the vtable + class. Named for what it does: a
+# stub returning the constant 4.
+[functions."0x826A0520"]
+name = "Stub_Return4_826A0520"
+
+
+# A remove-and-free tree-node wrapper: remove obj->4 from the tree, then free it and
+# clear the slots.
+
+# Arg: obj (r3, an 8-byte object: obj->4 = the tree node, obj->8 = a related field). 
+# Calls Tree_RemoveNode_826A4A20(obj, obj->4, &out1, &out2) to detach the node from the
+# tree (the two out pointers are stack slots receiving the removal result), then frees
+# the node via Free_SizeBucketed_Thunk_8221BE68(obj->4), then sets obj->4 = 0 and obj->8
+# = 0. Returns void. So it's a detach-and-destroy of the node stored in obj->4. 20
+# callers (sub_832AB150, sub_8281FB68, sub_82441E90, sub_832AF290, sub_82724AE8, ...). 
+# The node/tree class isn't resolvable, so the name states the mechanism: remove the
+# node from the tree and free it.
+[functions."0x826A4978"]
+name = "RemoveAndFreeNode_826A4978"
+
+
+# A trivial constant-return stub: always returns 16.
+
+# Args: (none used). Sets r3 = 16 and returns. 2 lines. 0 direct callers -- so it's most likely a
+# virtual method reached via a vtable (a "get the size / count / type" getter that always yields
+# 16, e.g. a 16-byte element size), or otherwise-dead code. The constant 16's meaning (an element
+# size, a count, a type tag, ...) can't be determined from the body alone. The name states the
+# mechanism: a stub that returns the constant 16.
+[functions."0x8269B5F8"]
+name = "ReturnConstant16_8269B5F8"
+
+
+# An allocator that allocates the data (twentieth form). It takes a value (a), a value (b), a structure (c: field at c->4), and a structure (d: field at d->0). It allocates the data (a, b, c, and d). This is the "allocate this data" routine (twentieth form), part of the 0x826A0 allocate cluster. 131 lines. 6 callees (Allocate_OrDbgBreak, SetString, ProcessAndFreeAndProcess9, sub_822F1F00, sub_826C3EF0, and sub_826C3FA8). 12 callers (sub_8268D3A0, sub_828559D0, sub_825D3100, sub_824F4148, sub_825DF908, sub_8282A360, sub_823CA178, sub_82826880, sub_829FB280, sub_8269E208, sub_828837B0, and sub_8219AF38).
+[functions."0x826A03A8"]
+name = "ProcessAndAllocateAndProcess20_826A03A8"
+
+
+# Return the constant value 5 (a trivial constant-return function). It takes no arguments and simply returns 5. This is a "return constant 5" routine. 4 lines. 0 callees. 0 callers.
+[functions."0x8269B5C8"]
+name = "ReturnConstant5_8269B5C8"
+
+
+# Return the constant value 6 (a trivial constant-return function). It takes no arguments and simply returns 6. This is a "return constant 6" routine. 4 lines. 0 callees. 0 callers.
+[functions."0x8269B5C0"]
+name = "ReturnConstant6_8269B5C0"
+
+
+# Process a value (seven hundred and thirty-sixth form). It takes a value and checks its state, with no external sub-operations. Part of the 0x8269B process cluster. 8 lines. 0 callees. 0 callers.
+[functions."0x8269B628"]
+name = "ProcessAndProcessAndProcess736_8269B628"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and fiftieth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x8269B process cluster. 8 lines. 0 callees. 0 callers.
+[functions."0x8269B5F0"]
+name = "ProcessAndProcessAndProcess1650_8269B5F0"
+
+
+# Process a structure by checking its state (two thousand four hundred and ninety-first form). It takes a structure (a: field at a->16); it checks the structure's state, and returns the structure's field based on the result. This is the "process this data" routine (two thousand four hundred and ninety-first form), part of the 0x826B4 process cluster. 5 lines. 0 callees. 12 callers.
+[functions."0x826B4B60"]
+name = "ProcessAndProcessAndProcess2540_826B4B60"

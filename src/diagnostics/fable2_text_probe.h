@@ -255,14 +255,14 @@ inline void run(const uint8_t* base, PPCContext& ctx, int64_t now_us) {
 
 }  // namespace fable2::textprobe
 
-extern "C" void ProcessAndProcessAndProcess508_822A2948(PPCContext& ctx, uint8_t* base) {
+extern "C" void UITextContainer_ProcessChildren(PPCContext& ctx, uint8_t* base) {
   const int64_t now_us =
       std::chrono::duration_cast<std::chrono::microseconds>(
           std::chrono::steady_clock::now().time_since_epoch())
           .count();
   fable2::textprobe::run(base, ctx, now_us);
-  if (fable2::uir::hook("ProcessAndProcessAndProcess508_822A2948", ctx, base)) return;
-  __imp__ProcessAndProcessAndProcess508_822A2948(ctx, base);
+  if (fable2::uir::hook("UITextContainer_ProcessChildren", ctx, base)) return;
+  __imp__UITextContainer_ProcessChildren(ctx, base);
 }
 
 // Second probe point: vtable-slot-1 thunk of the font-module text item base

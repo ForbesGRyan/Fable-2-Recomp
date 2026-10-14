@@ -1,0 +1,3101 @@
+# data-processing region 0x82A00000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# A large (364-line) tree-node processor: the slow-path handler called by
+# Tree_FindNode_82A120B0, with a fast path (sub_82A128B0) and a validated slow path.
+
+# Args: (r3), obj (r4, an object with ->4 and ->8 fields), plus r5 and r6. If obj->8 ==
+# 0 (fast path): call sub_82A128B0(obj->4, r6, 1) and return. Otherwise (slow path):
+# validate (obj->4 != 0 and a pointer-equality check on r5, else `trap 22`) and perform
+# the heavier node processing (sub_823D4F20, sub_82498700, sub_82A126D0, sub_82A128B0).
+# 1 caller: Tree_FindNode_82A120B0. The node/tree class and the exact processing aren't
+# resolvable, so the name states the observable role: process a tree node (fast or slow
+# path). It is the deep handler behind the Tree_FindNode walk.
+[functions."0x82A122F8"]
+name = "ProcessTreeNode_82A122F8"
+
+
+# A large (329-line) node string-processing handler in the 0x82A1 tree cluster -- the
+# fast-path / deep handler behind ProcessTreeNode_82A122F8.
+
+# Args: (r3), obj (r4, ->8 = a size/length field), plus r5, r6, r7. Compares obj->8 to
+# a constant (0x01555554): if below it, one path (loc_82A12928). Otherwise: build a local
+# string via SetString_822F2020 (from a global string), convert it via sub_826C3EF0, then
+# further process it via sub_822F1F00 and sub_826C3FA8, and (in the longer path) call
+# sub_82171810, sub_827C6448, sub_827C64C0, and sub_82A12B90. 2 callers (ProcessTreeNode_
+# 82A122F8, sub_82A126D0). The node class and the exact string transform aren't fully
+# resolvable, so the name states the observable role: process a node's string (a
+# build/convert/format path selected by obj->8).
+[functions."0x82A128B0"]
+name = "ProcessNodeString_82A128B0"
+
+
+# A circular linked-list destroy: detach the list rooted at obj->4, walk it freeing each
+# node (Free_SizeBucketed_Thunk), then clear the container's flag.
+
+# Arg: obj (r3, ->4 = the head of a circular doubly-linked list, ->8 = a count/flag). Detaches
+# the list (head->0 = head, head->4 = head, obj->8 = 0). Then walks the circular list (each
+# node's ->0 is the next node) freeing every node via Free_SizeBucketed_Thunk_8221BE68 until
+# it returns to the head. Returns void. 66 lines. 135 callers (sub_8290F760, sub_82882DB8,
+# sub_8266CFD8, ...) -- a high-value list-destructor. The list element class isn't
+# resolvable, so the name states the mechanism: destroy (free all nodes of) a circular
+# linked list.
+[functions."0x82A0F5C0"]
+name = "DestroyCircularList_82A0F5C0"
+
+
+# A very large (533-line) structure-processing operation: make a vcall on the source, copy
+# variable-length byte data, and orchestrate a long sequence of build/teardown operations
+# (DestroyCircularList, Construct16SelfRef, Free, plus the 0x82A0F/0x82A11/0x82A1B node ops).
+
+# Args: obj (r3), src (r4, ->0 = a vtable object, ->4/->12 = data, ->20 = a size), (r5).
+# Makes a vcall on src (vtable slot 2, offset 8). If src->20 >= 4, copies a variable-length
+# byte array from src->12 (byte-by-byte to the stack). Then it branches into a long sequence
+# of sub-operations: DestroyCircularList_82A0F5C0, Free_SizeBucketed_Thunk_8221BE68,
+# Construct16SelfRef_821EE1B8, sub_82A0F0A0, sub_82A0F6B8, sub_82A118B0, sub_82A1B480, and
+# sub_8322EFB0. So it's a top-level "process the data structure" routine (parse + build /
+# teardown). 533 lines. 1 caller: sub_832206E8 (a sibling, also in the TODO). The data-structure
+# class and the exact operation sequence aren't resolvable, so the name states the mechanism:
+# a large structure-processing routine.
+[functions."0x82A0DD10"]
+name = "ProcessDataStructure_82A0DD10"
+
+
+# A trivial constant-return stub: always returns 0x8000 (32768).
+
+# Args: (none used). Loads 0 into r3, ORs in 0x8000 (32768), and returns. 3 lines. 0 direct
+# callers -- so it's most likely a virtual method reached via a vtable (a type-ID / flag getter
+# that always yields 0x8000, the high bit of a 16-bit type/flag word), or otherwise-dead code. The
+# constant 0x8000's meaning (a type tag, a capability bit, a default value, ...) can't be
+# determined from the body alone. The name states the mechanism: a stub that returns the constant
+# 0x8000.
+[functions."0x82A11FF0"]
+name = "ReturnConstant0x8000_82A11FF0"
+
+
+# A trivial constant-return stub: always returns 512.
+
+# Args: (none used). Sets r3 = 512 and returns. 2 lines. 0 direct callers -- so it's most likely a
+# virtual method reached via a vtable (a "get the size / capacity / default" getter that always
+# yields 512, e.g. a default buffer/capacity size), or otherwise-dead code. The constant 512's
+# meaning (a default capacity, an element count, a type tag, ...) can't be determined from the body
+# alone. The name states the mechanism: a stub that returns the constant 512.
+[functions."0x82A145E8"]
+name = "ReturnConstant512_82A145E8"
+
+
+# A trivial constant-return stub: always returns 64.
+
+# Args: (none used). Sets r3 = 64 and returns. 2 lines. 0 direct callers -- so it's most likely a
+# virtual method reached via a vtable (a "get the size / capacity / default" getter that always
+# yields 64, e.g. a 64-byte element/capacity size), or otherwise-dead code. Part of a small cluster
+# of adjacent constant-return stubs (sub_82A145F0 returns 16384; siblings ReturnConstant512_82A145E8,
+# ReturnConstant16_8269B5F8, ReturnConstant8_826EB210). The constant 64's meaning (an element size,
+# a count, a type tag, ...) can't be determined from the body alone. The name states the mechanism:
+# a stub that returns the constant 64.
+[functions."0x82A145D0"]
+name = "ReturnConstant64_82A145D0"
+
+
+# A trivial constant-return stub: always returns 128.
+
+# Args: (none used). Sets r3 = 128 and returns. 2 lines. 0 direct callers -- most likely a virtual
+# method reached via a vtable (a "get the size / capacity / default" getter that always yields 128,
+# e.g. a 128-byte element/capacity size), or otherwise-dead code. Part of the small cluster of
+# adjacent constant-return stubs (sub_82A145D0 = 64, this one = 128, sub_82A145E8 = 512,
+# sub_82A145F0 = 16384; siblings ReturnConstant512_82A145E8, etc.). The constant 128's meaning (an
+# element size, a count, a type tag, ...) can't be determined from the body alone. The name states
+# the mechanism: a stub that returns the constant 128.
+[functions."0x82A145D8"]
+name = "ReturnConstant128_82A145D8"
+
+
+# A trivial constant-return stub: always returns 256.
+
+# Args: (none used). Sets r3 = 256 and returns. 2 lines. 0 direct callers -- most likely a virtual
+# method reached via a vtable (a "get the size / capacity / default" getter that always yields 256,
+# e.g. a 256-byte element/capacity size), or otherwise-dead code. Part of the small cluster of
+# adjacent constant-return stubs (sub_82A145D0 = 64, sub_82A145D8 = 128, this one = 256,
+# sub_82A145E8 = 512, sub_82A145F0 = 16384; siblings ReturnConstant512_82A145E8, etc.). The constant
+# 256's meaning (an element size, a count, a type tag, ...) can't be determined from the body alone.
+# The name states the mechanism: a stub that returns the constant 256.
+[functions."0x82A145E0"]
+name = "ReturnConstant256_82A145E0"
+
+
+# A float-data processor (the sibling of CompareFloatCounts_82A0B5C8): compute 16-byte-stride counts
+# from the object, build a 3-float payload (Construct3FloatPayload_82A0C0A0) and 16-byte arrays
+# (ConstructArray16_82512640), and free intermediates.
+
+# Args: obj (r3, ->4 = a base, ->8 = an end, ->12 = another end), (r4), (r5), (r6). Calls
+# Construct3FloatPayload_82A0C0A0 (sub_82A0C0A0, the 3-float payload builder). It then computes two
+# 16-byte-stride counts: ((obj->12 - obj->4) >> 4) and ((obj->8 - obj->4) >> 4) (each >> 4 divides a byte
+# span into 16-byte elements). It processes the float data, allocating 16-byte arrays (ConstructArray16
+# _82512640, sub_82512640) and freeing intermediates (Free_SizeBucketed_Thunk_8221BE68, sub_8221BE68), and
+# calling sub_82A0F950 and sub_82A97648 (siblings in the 0x82A0B/0x82A97 clusters). So it's a "process the
+# float data (build the payload and arrays)" routine (part of the float-data / animation-data cluster).
+# 447 lines. 1 caller: CompareFloatCounts_82A0B5C8 (sub_82A0B5C8). The data's class (animation/float
+# samples) and the field semantics aren't resolvable, so the name states the mechanism: process the float
+# data. The "2" distinguishes it from ProcessFloatData_832206E8 (sub_832206E8).
+[functions."0x82A0BAA0"]
+name = "ProcessFloatData2_82A0BAA0"
+
+
+# A dispose / destroy (with an optional free): set a vtable / type pointer, run the 20-byte destructor
+# (Destruct20Byte_832156E0), and free the object (Free_SizeBucketed_Thunk_8221BE68) if a flag is set.
+
+# Args: obj (r3, ->0 = a vtable / type pointer), flag (r4, bit 0 = an "owned / free" flag). Sets obj->0 to a
+# fixed global (a vtable / type pointer, 0x82CCC8C0 + 7072). It then runs the 20-byte destructor
+# (Destruct20Byte_832156E0, sub_832156E0). If the flag's bit 0 is set (the object is owned), it frees the
+# object (Free_SizeBucketed_Thunk_8221BE68, sub_8221BE68); otherwise it leaves the memory (a
+# destruct-but-don't-free path). So it's a "dispose the object (set the type, run the destructor, free if
+# owned)" routine. 56 lines, 2 callees (Destruct20Byte_832156E0, Free_SizeBucketed_Thunk_8221BE68). 0 direct
+# callers (reached via a dispatch / vcall, likely a type's destructor or dispose method). The object's class
+# (a 20-byte object, ->0 = a vtable) and the free flag's meaning aren't resolvable, so the name states the
+# mechanism: dispose the object (with an optional free). The "4" distinguishes it from Dispose_82B39A30,
+# Dispose2_8233DD70, and Dispose3_8233E380.
+[functions."0x82A146C0"]
+name = "Dispose4_82A146C0"
+
+
+# A dispose / destroy (with an optional free) -- the sibling of Dispose4_82A146C0 (a different type
+# pointer): set a vtable / type pointer, run the 20-byte destructor (Destruct20Byte_832156E0), and free the
+# object (Free_SizeBucketed_Thunk_8221BE68) if a flag is set.
+
+# Args: obj (r3, ->0 = a vtable / type pointer), flag (r4, bit 0 = an "owned / free" flag). Sets obj->0 to a
+# fixed global (a vtable / type pointer, 0x82CCC8C0 + 7096 -- a different type than Dispose4_82A146C0's 7072).
+# It then runs the 20-byte destructor (Destruct20Byte_832156E0, sub_832156E0). If the flag's bit 0 is set
+# (the object is owned), it frees the object (Free_SizeBucketed_Thunk_8221BE68, sub_8221BE68); otherwise it
+# leaves the memory (a destruct-but-don't-free path). So it's a "dispose the object (set the type, run the
+# destructor, free if owned)" routine. 56 lines, 2 callees (Destruct20Byte_832156E0, Free_SizeBucketed_Thunk
+# _8221BE68). 0 direct callers (reached via a dispatch / vcall, likely a type's destructor / dispose method).
+# A structural sibling of Dispose4_82A146C0 (sub_82A146C0) -- same shape, different type pointer (7096 vs
+# 7072). The object's class (a 20-byte object, ->0 = a vtable) and the free flag's meaning aren't resolvable,
+# so the name states the mechanism: dispose the object (with an optional free). The "5" distinguishes it from
+# Dispose_82B39A30, Dispose2_8233DD70, Dispose3_8233E380, and Dispose4_82A146C0.
+[functions."0x82A14720"]
+name = "Dispose5_82A14720"
+
+
+# A dispose / destroy (with an optional free) -- the sibling of Dispose4_82A146C0 and Dispose5_82A14720 (a
+# different type pointer, 7120): set a vtable / type pointer, run the 20-byte destructor (Destruct20Byte
+# _832156E0), and free the object (Free_SizeBucketed_Thunk_8221BE68) if a flag is set.
+
+# Args: obj (r3, ->0 = a vtable / type pointer), flag (r4, bit 0 = an "owned / free" flag). Sets obj->0 to a
+# fixed global (a vtable / type pointer, 0x82CCC8C0 + 7120 -- a different type than Dispose4_82A146C0's 7072
+# and Dispose5_82A14720's 7096). It then runs the 20-byte destructor (Destruct20Byte_832156E0, sub_832156E0).
+# If the flag's bit 0 is set (the object is owned), it frees the object (Free_SizeBucketed_Thunk_8221BE68, sub
+# _8221BE68); otherwise it leaves the memory (a destruct-but-don't-free path). So it's a "dispose the object
+# (set the type, run the destructor, free if owned)" routine. 56 lines, 2 callees (Destruct20Byte_832156E0, Free
+# _SizeBucketed_Thunk_8221BE68). 0 direct callers (reached via a dispatch / vcall, likely a type's destructor /
+# dispose method). A structural sibling of Dispose4_82A146C0 (sub_82A146C0) and Dispose5_82A14720 (sub_82A14720)
+# -- same shape, different type pointer (7120 vs 7072 / 7096). The object's class (a 20-byte object, ->0 = a
+# vtable) and the free flag's meaning aren't resolvable, so the name states the mechanism: dispose the object
+# (with an optional free). The "6" distinguishes it from Dispose_82B39A30, Dispose2_8233DD70, Dispose3_8233E380,
+# Dispose4_82A146C0, and Dispose5_82A14720.
+[functions."0x82A14780"]
+name = "Dispose6_82A14780"
+
+
+# A dispose / destroy (with an optional free) -- the sibling of Dispose4_82A146C0, Dispose5_82A14720, and
+# Dispose6_82A14780 (a different type pointer, 7264): set a vtable / type pointer, run the 20-byte destructor
+# (Destruct20Byte_832156E0), and free the object (Free_SizeBucketed_Thunk_8221BE68) if a flag is set.
+
+# Args: obj (r3, ->0 = a vtable / type pointer), flag (r4, bit 0 = an "owned / free" flag). Sets obj->0 to a
+# fixed global (a vtable / type pointer, 0x82CCC8C0 + 7264 -- a different type than Dispose4_82A146C0's 7072,
+# Dispose5_82A14720's 7096, and Dispose6_82A14780's 7120). It then runs the 20-byte destructor (Destruct20Byte
+# _832156E0, sub_832156E0). If the flag's bit 0 is set (the object is owned), it frees the object (Free_Size
+# Bucketed_Thunk_8221BE68, sub_8221BE68); otherwise it leaves the memory (a destruct-but-don't-free path). So
+# it's a "dispose the object (set the type, run the destructor, free if owned)" routine. 56 lines, 2 callees
+# (Destruct20Byte_832156E0, Free_SizeBucketed_Thunk_8221BE68). 0 direct callers (reached via a dispatch / vcall,
+# likely a type's destructor / dispose method). A structural sibling of Dispose4_82A146C0 (sub_82A146C0), Dispose
+# 5_82A14720 (sub_82A14720), and Dispose6_82A14780 (sub_82A14780) -- same shape, different type pointer (7264 vs
+# 7072 / 7096 / 7120). The object's class (a 20-byte object, ->0 = a vtable) and the free flag's meaning aren't
+# resolvable, so the name states the mechanism: dispose the object (with an optional free). The "7" distinguishes
+# it from Dispose_82B39A30, Dispose2_8233DD70, Dispose3_8233E380, Dispose4_82A146C0, Dispose5_82A14720, and
+# Dispose6_82A14780.
+[functions."0x82A149C0"]
+name = "Dispose7_82A149C0"
+
+
+# A dispose / destroy (with an optional free) -- the sibling of Dispose4-7 (a different type pointer, 6724):
+# set a vtable / type pointer, run the 20-byte destructor (Destruct20Byte_832156E0), and free the object
+# (Free_SizeBucketed_Thunk_8221BE68) if a flag is set.
+
+# Args: obj (r3, ->0 = a vtable / type pointer), flag (r4, bit 0 = an "owned / free" flag). Sets obj->0 to a
+# fixed global (a vtable / type pointer, 0x82CCC8C0 + 6724 -- a different type than Dispose4_82A146C0's 7072,
+# Dispose5_82A14720's 7096, Dispose6_82A14780's 7120, and Dispose7_82A149C0's 7264). It then runs the 20-byte
+# destructor (Destruct20Byte_832156E0, sub_832156E0). If the flag's bit 0 is set (the object is owned), it frees
+# the object (Free_SizeBucketed_Thunk_8221BE68, sub_8221BE68); otherwise it leaves the memory (a destruct-but-
+# don't-free path). So it's a "dispose the object (set the type, run the destructor, free if owned)" routine. 56
+# lines, 2 callees (Destruct20Byte_832156E0, Free_SizeBucketed_Thunk_8221BE68). 0 direct callers (reached via a
+# dispatch / vcall, likely a type's destructor / dispose method). A structural sibling of Dispose4_82A146C0, Dispose
+# 5_82A14720, Dispose6_82A14780, and Dispose7_82A149C0 -- same shape, different type pointer (6724). The object's
+# class (a 20-byte object, ->0 = a vtable) and the free flag's meaning aren't resolvable, so the name states the
+# mechanism: dispose the object (with an optional free). The "8" distinguishes it from Dispose_82B39A30, Dispose2
+# _8233DD70, Dispose3_8233E380, Dispose4_82A146C0, Dispose5_82A14720, Dispose6_82A14780, and Dispose7_82A149C0.
+[functions."0x82A12000"]
+name = "Dispose8_82A12000"
+
+
+# A dispose / destroy (with an optional free) -- the sibling of Dispose4-8 (a different type pointer, 7192):
+# set a vtable / type pointer, run the 20-byte destructor (Destruct20Byte_832156E0), and free the object
+# (Free_SizeBucketed_Thunk_8221BE68) if a flag is set.
+
+# Args: obj (r3, ->0 = a vtable / type pointer), flag (r4, bit 0 = an "owned / free" flag). Sets obj->0 to a
+# fixed global (a vtable / type pointer, 0x82CCC8C0 + 7192 -- a different type than Dispose4_82A146C0's 7072,
+# Dispose5_82A14720's 7096, Dispose6_82A14780's 7120, Dispose7_82A149C0's 7264, and Dispose8_82A12000's 6724).
+# It then runs the 20-byte destructor (Destruct20Byte_832156E0, sub_832156E0). If the flag's bit 0 is set (the
+# object is owned), it frees the object (Free_SizeBucketed_Thunk_8221BE68, sub_8221BE68); otherwise it leaves the
+# memory (a destruct-but-don't-free path). So it's a "dispose the object (set the type, run the destructor, free if
+# owned)" routine. 56 lines, 2 callees (Destruct20Byte_832156E0, Free_SizeBucketed_Thunk_8221BE68). 0 direct
+# callers (reached via a dispatch / vcall, likely a type's destructor / dispose method). A structural sibling of
+# Dispose4_82A146C0, Dispose5_82A14720, Dispose6_82A14780, Dispose7_82A149C0, and Dispose8_82A12000 -- same shape,
+# different type pointer (7192). The object's class (a 20-byte object, ->0 = a vtable) and the free flag's meaning
+# aren't resolvable, so the name states the mechanism: dispose the object (with an optional free). The "9"
+# distinguishes it from Dispose_82B39A30, Dispose2_8233DD70, Dispose3_8233E380, Dispose4_82A146C0, Dispose5
+# _82A14720, Dispose6_82A14780, Dispose7_82A149C0, and Dispose8_82A12000.
+[functions."0x82A148A0"]
+name = "Dispose9_82A148A0"
+
+
+# A dispose / destroy (with an optional free) -- the sibling of Dispose4-9 (a different type pointer, 7216):
+# set a vtable / type pointer, run the 20-byte destructor (Destruct20Byte_832156E0), and free the object
+# (Free_SizeBucketed_Thunk_8221BE68) if a flag is set.
+
+# Args: obj (r3, ->0 = a vtable / type pointer), flag (r4, bit 0 = an "owned / free" flag). Sets obj->0 to a
+# fixed global (a vtable / type pointer, 0x82CCC8C0 + 7216 -- a different type than Dispose4_82A146C0's 7072,
+# Dispose5_82A14720's 7096, Dispose6_82A14780's 7120, Dispose7_82A149C0's 7264, Dispose8_82A12000's 6724, and
+# Dispose9_82A148A0's 7192). It then runs the 20-byte destructor (Destruct20Byte_832156E0, sub_832156E0). If the
+# flag's bit 0 is set (the object is owned), it frees the object (Free_SizeBucketed_Thunk_8221BE68, sub_8221BE68);
+# otherwise it leaves the memory (a destruct-but-don't-free path). So it's a "dispose the object (set the type, run
+# the destructor, free if owned)" routine. 56 lines, 2 callees (Destruct20Byte_832156E0, Free_SizeBucketed_Thunk
+# _8221BE68). 0 direct callers (reached via a dispatch / vcall, likely a type's destructor / dispose method). A
+# structural sibling of Dispose4_82A146C0, Dispose5_82A14720, Dispose6_82A14780, Dispose7_82A149C0, Dispose8
+# _82A12000, and Dispose9_82A148A0 -- same shape, different type pointer (7216). The object's class (a 20-byte
+# object, ->0 = a vtable) and the free flag's meaning aren't resolvable, so the name states the mechanism: dispose
+# the object (with an optional free). The "10" distinguishes it from Dispose_82B39A30, Dispose2_8233DD70, Dispose3
+# _8233E380, Dispose4_82A146C0, Dispose5_82A14720, Dispose6_82A14780, Dispose7_82A149C0, Dispose8_82A12000, and
+# Dispose9_82A148A0.
+[functions."0x82A14900"]
+name = "Dispose10_82A14900"
+
+
+# A dispose / destroy (with an optional free) -- the sibling of Dispose4-10 (a different type pointer, 7240):
+# set a vtable / type pointer, run the 20-byte destructor (Destruct20Byte_832156E0), and free the object
+# (Free_SizeBucketed_Thunk_8221BE68) if a flag is set.
+
+# Args: obj (r3, ->0 = a vtable / type pointer), flag (r4, bit 0 = an "owned / free" flag). Sets obj->0 to a
+# fixed global (a vtable / type pointer, 0x82CCC8C0 + 7240 -- a different type than Dispose4_82A146C0's 7072,
+# Dispose5_82A14720's 7096, Dispose6_82A14780's 7120, Dispose7_82A149C0's 7264, Dispose8_82A12000's 6724,
+# Dispose9_82A148A0's 7192, and Dispose10_82A14900's 7216). It then runs the 20-byte destructor (Destruct20Byte
+# _832156E0, sub_832156E0). If the flag's bit 0 is set (the object is owned), it frees the object (Free_Size
+# Bucketed_Thunk_8221BE68, sub_8221BE68); otherwise it leaves the memory (a destruct-but-don't-free path). So it's
+# a "dispose the object (set the type, run the destructor, free if owned)" routine. 56 lines, 2 callees
+# (Destruct20Byte_832156E0, Free_SizeBucketed_Thunk_8221BE68). 0 direct callers (reached via a dispatch / vcall,
+# likely a type's destructor / dispose method). A structural sibling of Dispose4-10 -- same shape, different type
+# pointer (7240). The object's class (a 20-byte object, ->0 = a vtable) and the free flag's meaning aren't
+# resolvable, so the name states the mechanism: dispose the object (with an optional free). The "11" distinguishes
+# it from Dispose_82B39A30, Dispose2_8233DD70, Dispose3_8233E380, and Dispose4-10.
+[functions."0x82A14960"]
+name = "Dispose11_82A14960"
+
+
+# A dispose / destroy (with an optional free) -- the sibling of Dispose4-11 (a different type pointer, 7168):
+# set a vtable / type pointer, run the 20-byte destructor (Destruct20Byte_832156E0), and free the object
+# (Free_SizeBucketed_Thunk_8221BE68) if a flag is set.
+
+# Args: obj (r3, ->0 = a vtable / type pointer), flag (r4, bit 0 = an "owned / free" flag). Sets obj->0 to a
+# fixed global (a vtable / type pointer, 0x82CCC8C0 + 7168 -- a different type than the other Dispose variants).
+# It then runs the 20-byte destructor (Destruct20Byte_832156E0, sub_832156E0). If the flag's bit 0 is set (the
+# object is owned), it frees the object (Free_SizeBucketed_Thunk_8221BE68, sub_8221BE68); otherwise it leaves the
+# memory (a destruct-but-don't-free path). So it's a "dispose the object (set the type, run the destructor, free if
+# owned)" routine. 56 lines, 2 callees (Destruct20Byte_832156E0, Free_SizeBucketed_Thunk_8221BE68). 0 direct
+# callers (reached via a dispatch / vcall, likely a type's destructor / dispose method). A structural sibling of
+# Dispose4-11 -- same shape, different type pointer (7168). The object's class (a 20-byte object, ->0 = a vtable)
+# and the free flag's meaning aren't resolvable, so the name states the mechanism: dispose the object (with an
+# optional free). The "12" distinguishes it from Dispose_82B39A30, Dispose2_8233DD70, Dispose3_8233E380, and
+# Dispose4-11.
+[functions."0x82A14840"]
+name = "Dispose12_82A14840"
+
+
+# A value store (the sibling of SetValue_8236FCE8 / SetValue2_8236EC48): compute counts ((obj->12 - obj->4) >> 2,
+# a capacity, and (obj->8 - obj->4) >> 2, a used count), and (if there is room) store a value (a float, obj->8->0 =
+# the value) and advance the write pointer (obj->8 += 4).
+
+# Args: obj (r3, ->4 = a base, ->8 = a write pointer, ->12 = an end), value (r4, a float source), (more). Computes
+# the capacity ((obj->12 - obj->4) >> 2, a count of 4-byte elements) and the used count ((obj->8 - obj->4) >> 2).
+# If the used count is less than the capacity (there is room), it stores the value: obj->8->0 = the value (a float,
+# loaded from the source), and advances the write pointer (obj->8 += 4). If there is no room, it takes another path
+# (a grow / full condition, calling sub_82A0A040, a sibling in the 0x82A0A cluster). So it's a "store a value into a
+# 4-byte-stride array (with a bounds check, advancing the write pointer)" routine (a value setter for a growing /
+# ring buffer, part of the 0x82A09 cluster). 87 lines, 1 callee (sub_82A0A040). 2 callers (sub_832402B8, sub
+# _83221378). The buffer's class (->4 = a base, ->8 = a write pointer, ->12 = an end, a 4-byte-stride array of
+# floats) and the value's meaning aren't resolvable, so the name states the mechanism: store a value (with a bounds
+# check). The "3" distinguishes it from SetValue_8236FCE8 and SetValue2_8236EC48.
+[functions."0x82A09FB0"]
+name = "SetValue3_82A09FB0"
+
+
+# A constant stub: return the constant 8192 (0x2000, a power of 2 -- a capacity / size / max).
+
+# Args: (none). Returns the constant 8192 (li r3, 8192; blr). 2 lines (to the next function), no callees (a constant
+# return). A sibling of the ReturnConstant* constant stubs (e.g., ReturnConstant2/8/16/64/128/256/512/0x8000) and a
+# likely virtual "capacity / size / max" getter (a method that returns a fixed constant, 8192). It is registered (in
+# the function table, fable_2_init.cpp / fable_2_register.cpp) but has no direct callers in the recompiled code (a
+# registered-but-uncalled constant stub, likely invoked only from code outside the traced region, or unused). The
+# constant's meaning (8192, a capacity / size / max -- a power of 2, a buffer size / block count / max count) isn't
+# resolvable from the code alone, so the name states the mechanism: return the constant 8192. The "8192" distinguishes
+# it from the other ReturnConstant* stubs.
+[functions."0x82A145F8"]
+name = "ReturnConstant8192_82A145F8"
+
+
+# A process (with a copy of records): copy a 32-byte record (from src to a stack buffer), and (depending on obj->4)
+# process (copy records via CopyRecords_82A13CA0 / CopyArray24_82A13FE0, grow via AllocateChecked5_824709C0, and free
+# via Free_SizeBucketed_Thunk_8221BE68).
+
+# Args: obj (r3, ->4 = a count), (r4), src (r6, a 32-byte record: ->0, ->4, ->8, ->12, ->16, ->24, ->32, ->36), (more)
+# . It copies a 32-byte record (from src to a stack buffer, at stack[80], copying src->0, src->4, src->8, src->12, src
+# ->16, src->24, src->32, src->36, a 32-byte record, including two floats). If obj->4 (a count) is 0, it takes one
+# path (an empty state). Otherwise it processes: it copies records (CopyRecords_82A13CA0, sub_82A13CA0, a copy loop
+# for 32-byte records, and CopyArray24_82A13FE0, sub_82A13FE0, a 24-byte array copy), grows (AllocateChecked5_824709C
+# 0, sub_824709C0, a size-checked allocation of 40-byte elements), and frees (Free_SizeBucketed_Thunk_8221BE68, sub
+# _8221BE68, a size-bucketed free). It also calls sub_82A97648 (a sibling in the 0x82A97 cluster). So it's a "process
+# (copy a 32-byte record, and (depending on the count) copy records, grow, and free)" routine (a process with a copy
+# of records, part of the 0x82A13 cluster). 391 lines, 5 callees (CopyRecords_82A13CA0, CopyArray24_82A13FE0, Allocat
+# eChecked5_824709C0, Free_SizeBucketed_Thunk_8221BE68, sub_82A97648). 1 caller: sub_8323FF48. The object's class
+# (->4 = a count, an object with a count) and the record's meaning (a 32-byte record, a data record / node / value)
+# aren't resolvable, so the name states the mechanism: process (copy a record, and (depending on the count) copy
+# records, grow, and free).
+[functions."0x82A13D30"]
+name = "ProcessCopyRecords_82A13D30"
+
+
+# A process (with a validation and a detach): validate (child != 0 and child != parent, a trap if invalid), and (if a
+# match, r8 == parent->4->0) detach (a chain-root find via FindChainRoot2_823D4F20 and a dispose via Dispose14_82A121
+# D8).
+
+# Args: obj (r3, r28), parent (r4, r31, ->4 = a node), child (r5), (r6), (more). It validates: it checks that the
+# child is non-zero (child != 0) and that the child is not the parent (child != parent); if either fails, it raises
+# an error (a trap, 22). If the match (r8, a value, == parent->4->0, the parent's node's field), it processes: it
+# finds a chain root (FindChainRoot2_823D4F20, sub_823D4F20, a chain-root finder, on the parent's node) and disposes
+# (Dispose14_82A121D8, sub_82A121D8, a dispose, on the child). It also calls sub_8247E028 (a sibling in the 0x8247E
+# cluster). So it's a "process (validate a child, and (if a match) detach it: find a chain root and dispose it)"
+# routine (a process with a validation and a detach, part of the 0x82A12 cluster). 137 lines, 3 callees (FindChainRoo
+# t2_823D4F20, sub_8247E028, Dispose14_82A121D8). 1 caller: sub_82A12668. The object's class (obj, r28, a node) and
+# the parent's class (parent, r31, ->4 = a node, an object with a nested node) and the child's meaning (a child
+# object, a node to detach) aren't resolvable, so the name states the mechanism: process (validate a child and (if a
+# match) detach it: find a chain root and dispose it).
+[functions."0x82A12580"]
+name = "ProcessDetach_82A12580"
+
+
+# A process (a vector/SIMD computation): load a float constant (from a fixed .data address), perform a vector/SIMD
+# computation (many vector operations, lvlx, a vector load, and float stores to the stack), and return a computed
+# value (a vector result, stored to the stack).
+
+# Args: (r3, a pointer), (many -- a large number of float and vector arguments), (more). It loads a float constant
+# (from a fixed .data address, a magic constant, a particular value) and performs a vector/SIMD computation (many
+# vector operations, lvlx, a vector load, and float stores to the stack -- a complex vector computation, with a
+# 16-byte vector, a 128-bit SIMD operation, and float arithmetic). It stores the computed value (a vector result, a
+# float, to the stack, a return value). So it's a "process (a vector/SIMD computation: load a float constant, perform
+# a vector computation (many vector operations), and return the computed value)" routine (a vector/SIMD computation,
+# part of the 0x82A3B cluster). 118 lines, no direct callees (pure vector/SIMD computation, which the callee scan does
+# not count). 1 caller: sub_82A3B330 (a sibling in the 0x82A3B cluster). The value's meaning (a vector result, a
+# computed float / vector, a particular value) and the constant's meaning (a magic constant, a particular value) are
+# n't resolvable, so the name states the mechanism: a vector/SIMD computation (load a float constant, perform a vector
+# computation, and return the computed value).
+[functions."0x82A3B1E8"]
+name = "ProcessVector_82A3B1E8"
+
+
+# A constant stub: return a constant (0x00010000, 65536).
+
+# Args: none. It loads a constant (0x00010000, 65536, a power of two, a particular size / a count / a flag) into r3
+# (the return value register) and returns (blr, a return, returning the constant). So it's a "return a constant (0x00
+# 010000, 65536)" routine (a constant stub, part of the 0x82A14 cluster, a sibling of ReturnConstant8192_82B5C730
+# / ReturnConstant0x8000_82364B18). 4 lines, no direct callees (a trivial constant stub). 0 callers: it is registered
+# in the function table but not called from any recompiled guest function (a registered-but-uncalled function, part of
+# the 0x82A14 cluster, a constant stub). The constant's meaning (0x00010000, 65536, a particular size / a count / a
+# flag) isn't resolvable, so the name states the mechanism: a constant stub returning 0x00010000. The "0x10000"
+# distinguishes it from the other constant stubs (ReturnConstant2_822490B8, ReturnConstant8_82A141C8,
+# ReturnConstant16_82C1D8E0, ReturnConstant64_83233840, ReturnConstant128_83233860, ReturnConstant256_83233880,
+# ReturnConstant0x8000_82364B18, ReturnConstant8192_82B5C730).
+[functions."0x82A14660"]
+name = "ReturnConstant_0x10000_82A14660"
+
+
+# A 16-byte constructor (the sibling of Construct16Byte_82275368): initialize the object's fields (obj->4/->8/->12 = 0
+# , three zeros, a 16-byte object), compute a count ((value->8 - value->4) / 12, a range divided by 12, a block count
+# / a stride), and (if the count is non-zero) call a process (sub_8282EFD8, on the object, a setup / a grow).
+
+# Args: obj (r3, r31, ->4 = a field, ->8 = a field, ->12 = a field), value (r4, r29, ->4 = a field, ->8 = a field),
+# (more). It initializes the object's fields (obj->4 = 0, a field, a count / a size, obj->8 = 0, a field, a count / a
+# size, obj->12 = 0, a field, a count / a size, three zeros, a 16-byte object). It computes a count (a range (value
+# ->8 - value->4, a range, a size), divided by 12 (a stride, a 12-byte element size), a block count / a stride). If the
+# count is zero (an empty state), it returns zero. If the count is non-zero, it calls a process (sub_8282EFD8, on the
+# object, r3 = obj, a setup / a grow, part of the 0x8282E cluster). So it's a "construct a 16-byte object (initialize
+# the fields, obj->4/->8/->12 = 0, compute a count, (value->8 - value->4) / 12, and (if the count is non-zero) call a
+# process (on the object, a setup / a grow))" routine (a 16-byte constructor, part of the 0x82A11 cluster, a sibling
+# of Construct16Byte_82275368). 117 lines, 1 callee (sub_8282EFD8, sub_8282EFD8, a setup / a grow process). 2 callers:
+# sub_82A10DA8, sub_82A10E80 (siblings in the 0x82A10 cluster). The object's class (obj, ->4 = a field, ->8 = a field,
+# ->12 = a field, a 16-byte object, a particular structure) and the value's meaning (a value, a range, a particular
+# argument) aren't resolvable, so the name states the mechanism: a 16-byte constructor (initialize the fields, compute
+# a count, and (if the count is non-zero) call a process). The "2" distinguishes it from Construct16Byte_82275368.
+[functions."0x82A11180"]
+name = "Construct16Byte2_82A11180"
+
+
+# A process (a vector hash, with a vector operation and a counter increment, the caller of ComputeVectorHash_8222E6C0
+# ): load vector constants (a vector constant, from the stack, and a vector constant, from obj->80, a particular value
+# ), call a vector hash (ComputeVectorHash_8222E6C0, on the vectors, a SIMD computation, a particular hash / a
+# particular comparison), and increment a counter (obj->172, a counter, a particular count / a particular statistic).
+
+# Args: obj (r3, r31, ->80 = a vector, a particular value, ->172 = a counter, a particular count / a particular
+# statistic), a (r4, a value), b (r5, a value), (more). It loads a float constant (from a fixed .data address, a magic
+# constant, a particular value). It loads a vector constant (from the stack, a vector constant, a particular value: lvl
+# x v0, r10, a vector constant, from the stack, and vspltw v2, v0, 0, a vector splat, a particular value). It loads a
+# vector constant (from obj->80, a vector constant, a particular value: lvx128 v1, r31 + 80, a vector constant, from obj
+# , a particular value). It calls a vector hash (ComputeVectorHash_8222E6C0, sub_8222E6C0, a vector hash/computation,
+# on the vectors (v2, a vector constant, from the stack, and v1, a vector constant, from obj), a SIMD computation, a
+# particular hash / a particular comparison, a particular vector operation). It increments a counter (obj->172, a
+# counter, a particular count / a particular statistic: it reads the counter (r11, obj->172, a counter, a particular
+# count), and stores it (r11 + 1, an increment, a particular count, a particular statistic)). So it's a "process (a
+# vector hash: load vector constants (a vector constant, from the stack, and a vector constant, from obj->80, a
+# particular value), call a vector hash (ComputeVectorHash_8222E6C0, on the vectors, a SIMD computation, a particular
+# hash / a particular comparison), and increment a counter (obj->172, a counter, a particular count / a particular
+# statistic))" routine (a vector hash process, part of the 0x82A0B cluster, a caller of ComputeVectorHash_8222E6C0). 74
+# lines, 1 callee (sub_8222E6C0, ComputeVectorHash_8222E6C0, a vector hash/computation). 4 callers: sub_8321ED18, sub
+# _8321F668, sub_8321F790, sub_8321FC38 (siblings in the 0x8321E/0x8321F clusters). The object's class (obj, ->80 = a
+# vector, a particular value, ->172 = a counter, a particular count / a particular statistic, a hash / a value object)
+# and the value's meaning (a value, a particular argument) aren't resolvable, so the name states the mechanism: a
+# vector hash process (load vector constants (a vector constant, from the stack, and a vector constant, from obj->80, a
+# particular value), call a vector hash (ComputeVectorHash_8222E6C0, on the vectors), and increment a counter (obj
+# ->172, a counter, a particular count / a particular statistic)).
+[functions."0x82A0B288"]
+name = "ProcessVectorHash_82A0B288"
+
+
+# A process (a copy, with a 24-byte element stride, the callee of ProcessFloat_83234418 / the sibling of CopyRecords
+# 20_82A13138): (if a size, obj->4, is 0, a null state) take one path, and (otherwise) compute a count (a 24-byte
+# element stride, (obj->12 - obj->4) / 24, a size, a 24-byte element, a particular count), and (if a count (obj->8 -
+# obj->4) / 24 is >= the first count, a below/above-threshold check) take one path, and (otherwise) copy a 24-byte
+# element (r6->0, a value, to obj->8, a base, a 24-byte element, a particular copy).
+
+# Args: obj (r3, ->4 = a size, ->8 = a base, ->12 = a base, a particular structure), index (r4, r6, ->0 = a value, ->4
+# = a float, a 24-byte element, a particular value), (more). It checks a size (obj->4, a size, a particular size / a
+# particular count): if it is 0 (a null state, a particular invalid state), it takes one path (a no-op / a return, a
+# particular state). Otherwise (a valid size), it computes a count (a 24-byte element stride, (obj->12 - obj->4, a
+# size, a 24-byte element, a particular count), divided by 24 (divw r9, r9, r8, a divide, a 24-byte element stride, a
+# particular count), a count, a particular number of 24-byte elements). It computes another count (a 24-byte element
+# stride, (obj->8 - obj->4, a size, a 24-byte element, a particular count), divided by 24 (divw r8, r10, r8, a divide,
+# a 24-byte element stride, a particular count), a count, a particular number of 24-byte elements). If the second count
+# is >= the first count (a below/above-threshold check, a particular range, a particular size), it takes one path (a
+# particular state, a particular result). Otherwise (a valid range, a particular size), it copies a 24-byte element (r6
+# ->0, a value, a 24-byte element, a particular value, to obj->8, a base, a 24-byte element, a particular copy: stw r10
+# , 0, r11, a store, a 24-byte element, a particular copy, and lfs f0, 4, r6, a float, a 24-byte element, a particular
+# value, and a store, a 24-byte element, a particular copy). So it's a "process (a copy: (if a size, obj->4, is 0, a
+# null state) take one path, and (otherwise) compute a count (a 24-byte element stride, (obj->12 - obj->4) / 24, a
+# size, a 24-byte element, a particular count), and (if a count (obj->8 - obj->4) / 24 is >= the first count, a
+# below/above-threshold check) take one path, and (otherwise) copy a 24-byte element (r6->0, a value, to obj->8, a
+# base, a 24-byte element, a particular copy))" routine (a copy process, part of the 0x82A12 cluster, a callee of
+# ProcessFloat_83234418, a sibling of CopyRecords20_82A13138). 128 lines, 1 callee (sub_82A12EC0, a sibling in the
+# 0x82A12 cluster). 3 callers: ProcessFloat_83234418 (sub_83234418, a float process), sub_83233268, sub_83233B40
+# (siblings in the 0x83233 cluster). The object's class (obj, ->4 = a size, ->8 = a base, ->12 = a base, a particular
+# structure, a range / a copy object) and the 24-byte element's meaning (a 24-byte element, a particular value, a
+# particular quantity) aren't resolvable, so the name states the mechanism: a copy process ((if a size, obj->4, is 0, a
+# null state) take one path, and (otherwise) compute a count (a 24-byte element stride, (obj->12 - obj->4) / 24, a size
+# , a 24-byte element, a particular count), and (if a count (obj->8 - obj->4) / 24 is >= the first count) take one
+# path, and (otherwise) copy a 24-byte element (r6->0, a value, to obj->8, a base, a 24-byte element, a particular
+# copy)).
+[functions."0x82A12D68"]
+name = "ProcessCopyElement_82A12D68"
+
+
+# A process (a copy/grow, with a 20-byte element and a 24-byte stride, the callee of ProcessCopyElement_82A12D68 / the
+# caller of CopyElement20_82A12E40): copy a 20-byte element (a value, a float, a float, a float, four bytes, a
+# particular 20-byte element, from a source (r6, a source, a 20-byte element, a particular value) to the stack, a
+# particular copy), and perform a complex computation (a 24-byte element stride, a grow, calling CopyElement20
+# _82A12E40, a copy loop; CopyRecords20_82A13138, a copy; Free_SizeBucketed_Thunk_8221BE68, a free; ProcessSizeCompute
+# _825BBAD0, a size computation; sub_82A131B8, sub_82A97648 -- siblings in the 0x82A13/0x82A97 clusters).
+
+# Args: obj (r3, r31, ->4 = a size, a particular structure), a (r4, a value), source (r6, ->0 = a value, ->4 = a float,
+# ->8 = a float, ->12 = a float, ->16 = a byte, ->17 = a byte, ->18 = a byte, ->19 = a byte, ->20 = a byte, a 20-byte
+# element, a particular source), (more). It copies a 20-byte element (a value (r10, r6->0, a value, a 20-byte element,
+# a particular value), a float (f0, r6->4, a float, a 20-byte element, a particular value), a float (f13, r6->8, a
+# float, a 20-byte element, a particular value), a float (f12, r6->12, a float, a 20-byte element, a particular value)
+# , four bytes (r9, r6->16, a byte, a 20-byte element, a particular value; r8, r6->17, a byte, a 20-byte element, a
+# particular value; r7, r6->18, a byte, a 20-byte element, a particular value; r5, r6->19, a byte, a 20-byte element, a
+# particular value; r4, r6->20, a byte, a 20-byte element, a particular value), from a source (r6, a source, a 20-byte
+# element, a particular value) to the stack (a particular copy: stw r10, 80, r1, a store, a 20-byte element, a
+# particular copy, and stfs f0, 84, r1, a store, a 20-byte element, a particular copy, and stfs f13, 88, r1, a store, a
+# 20-byte element, a particular copy, and stfs f12, 92, r1, a store, a 20-byte element, a particular copy, and stb r9,
+# 96, r1, a store, a 20-byte element, a particular copy). It performs a complex computation (a 24-byte element stride, a
+# grow, a particular size / a particular allocation, calling CopyElement20_82A12E40, sub_82A12E40, a copy loop; CopyRe
+# cords20_82A13138, sub_82A13138, a copy; Free_SizeBucketed_Thunk_8221BE68, sub_8221BE68, a free; ProcessSizeCompute
+# _825BBAD0, sub_825BBAD0, a size computation; sub_82A131B8, sub_82A97648 -- siblings in the 0x82A13/0x82A97 clusters
+# , a particular copy/grow, a particular size / a particular allocation). So it's a "process (a copy/grow: copy a 20-
+# byte element (a value, a float, a float, a float, four bytes, a particular 20-byte element, from a source (r6, a
+# source, a 20-byte element, a particular value) to the stack, a particular copy), and perform a complex computation
+# (a 24-byte element stride, a grow, calling CopyElement20_82A12E40, a copy loop; CopyRecords20_82A13138, a copy;
+# Free_SizeBucketed_Thunk_8221BE68, a free; ProcessSizeCompute_825BBAD0, a size computation; sub_82A131B8, sub
+# _82A97648))" routine (a copy/grow process, part of the 0x82A12 cluster, a callee of ProcessCopyElement_82A12D68, a
+# caller of CopyElement20_82A12E40). 365 lines, 6 callees (CopyElement20_82A12E40, CopyRecords20_82A13138,
+# Free_SizeBucketed_Thunk_8221BE68, ProcessSizeCompute_825BBAD0, sub_82A131B8, sub_82A97648). 1 caller:
+# ProcessCopyElement_82A12D68 (sub_82A12D68, a copy process, which calls this to copy and grow the elements). The
+# object's class (obj, ->4 = a size, a particular structure, a range / a copy object) and the 20-byte element's meaning
+# (a 20-byte element, a particular value, a particular quantity) aren't resolvable, so the name states the mechanism:
+# a copy/grow process (copy a 20-byte element (a value, a float, a float, a float, four bytes, a particular 20-byte
+# element, from a source (r6, a source, a 20-byte element, a particular value) to the stack, a particular copy), and
+# perform a complex computation (a 24-byte element stride, a grow, calling CopyElement20_82A12E40, a copy loop;
+# CopyRecords20_82A13138, a copy; Free_SizeBucketed_Thunk_8221BE68, a free; ProcessSizeCompute_825BBAD0, a size
+# computation)).
+[functions."0x82A12EC0"]
+name = "ProcessCopyGrow_82A12EC0"
+
+
+# A process (a vcall, with a construct and a complex computation, the caller of ConstructRefCounted_8222CF18):
+# perform a vcall (a method call, on a value, a particular vcall / a particular operation), construct a refcounted
+# value (ConstructRefCounted_8222CF18, on a value, a particular construct / a particular allocation), and (in paths)
+# perform a complex computation (a reference count, a particular count / a particular state, a particular size / a
+# particular allocation).
+
+# Args: obj (r3, r30, ->0 = a value, a particular structure, a refcounted object), a (r4, r31, ->0 = a vtable, ->28 = a
+# value, a particular vcall object, a particular operation object), (more). It performs a vcall (a method call, on a
+# value (a, r31, a particular vcall object, a particular operation object), a particular vcall / a particular operation
+# : it loads a vtable (r11, a->0, a vtable, a particular vtable), and a method (r10, r11->8, a method, a particular
+# method), and calls it (bctrl, a vcall, a method call, a particular vcall / a particular operation, a particular value
+# / a particular operation)). It constructs a refcounted value (ConstructRefCounted_8222CF18, sub_8222CF18, a
+# refcounted construct, on a value (obj, r30, a particular structure, a refcounted object), and a + result, a particular
+# value / a particular allocation, and -1, a constant, a particular value, a particular construct / a particular
+# allocation). In paths it performs a complex computation (a reference count, a particular count / a particular state,
+# a particular size / a particular allocation: it reads a value (r11, obj->0, a value, a particular value), and (if it
+# is non-zero, a particular state) reads another value (r11->4, a value, a particular value), and increments it (r29,
+# r11 + 1, an increment, a particular count / a particular state, a particular reference count). So it's a "process (a
+# vcall, with a construct and a complex computation: perform a vcall (a method call, on a value, a particular vcall /
+# a particular operation), construct a refcounted value (ConstructRefCounted_8222CF18, on a value, a particular
+# construct / a particular allocation), and (in paths) perform a complex computation (a reference count, a particular
+# count / a particular state))" routine (a vcall+construct process, part of the 0x82A1D cluster, a caller of
+# ConstructRefCounted_8222CF18). 98 lines, 1 callee (ConstructRefCounted_8222CF18, sub_8222CF18, a refcounted
+# construct). 3 callers: sub_82B80D70, sub_82AAAC20, sub_82B28398 (siblings in the 0x82B80/0x82AAA/0x82B28 clusters)
+# . The object's class (obj, r30, ->0 = a value, a particular structure, a refcounted object, a particular vcall
+# object) and the value's meaning (a, r31, ->0 = a vtable, ->28 = a value, a particular vcall object, a particular
+# operation object) aren't resolvable, so the name states the mechanism: a vcall+construct process (perform a vcall (a
+# method call, on a value, a particular vcall / a particular operation), construct a refcounted value
+# (ConstructRefCounted_8222CF18, on a value, a particular construct / a particular allocation), and (in paths) perform
+# a complex computation (a reference count, a particular count / a particular state)).
+[functions."0x82A1D5C8"]
+name = "ProcessVcallConstruct_82A1D5C8"
+
+
+# A process (a complex computation, with a range and a divide, the sibling of ProcessRangeGrow_8217A858, the caller of
+# sub_82A4E348 / sub_82A10E08): (if an index is <= a count (a range (obj->8 - obj->4, a size, a 12-byte element, a
+# particular size), a count, a particular count), a particular threshold, a particular size) take one path (a no-op /
+# a return, a particular state), and (otherwise) compute a complex computation (a range (obj->8 - obj->4, a size, a
+# 12-byte element, a particular size), a count, a particular count, a divide, a particular size / a particular
+# allocation, an offset, a particular value / a particular allocation, calling sub_82A4E348, a complex computation, a
+# particular operation).
+
+# Args: obj (r3, ->4 = a size, ->8 = a size, a particular structure, a range / a compute object), index (r4, r10, an
+# index, a particular value, a particular count), (more). It checks an index (r4, r10, an index, a particular value, a
+# particular count) against a count (r7, (obj->8 - obj->4) / 12, a size, a 12-byte element, a particular size, a count,
+# a particular count, a particular threshold): if the index is <= the count (a particular threshold, a particular size,
+# a particular count, a particular state), it takes one path (a no-op / a return, a particular state, a particular
+# result). If the index is > the count (a particular threshold, a particular size, a particular count, a particular
+# state), it computes a complex computation (a range (obj->8 - obj->4, a size, a 12-byte element, a particular size), a
+# count, a particular count, a divide, a particular size / a particular allocation, an offset, a particular value / a
+# particular allocation: it computes a range (r7, obj->8 - obj->4, a size, a 12-byte element, a particular size), and a
+# count (r5, r7 / 12, a count, a 12-byte element, a particular count), and an offset (r5, r10 - r5, an offset, a
+# particular value / a particular allocation), and calls a complex computation (sub_82A4E348, on a value (a, a value,
+# a particular value, a particular offset), and a (b, a value, a particular value, a particular size), a particular
+# operation, a particular size / a particular allocation, a particular range / a particular allocation). So it's a
+# "process (a complex computation, with a range and a divide: (if an index is <= a count (a range (obj->8 - obj->4, a
+# size, a 12-byte element, a particular size), a count, a particular count), a particular threshold, a particular
+# size) take one path (a no-op / a return, a particular state), and (otherwise) compute a complex computation (a range
+# (obj->8 - obj->4, a size, a 12-byte element, a particular size), a count, a particular count, a divide, a particular
+# size / a particular allocation, an offset, a particular value / a particular allocation, calling sub_82A4E348, a
+# complex computation, a particular operation))" routine (a range computation process, part of the 0x82A10 cluster, a
+# sibling of ProcessRangeGrow_8217A858, a caller of sub_82A4E348 and sub_82A10E08). 109 lines, 2 callees
+# (sub_82A10E08, sub_82A4E348). 2 callers: sub_83238600, sub_83238090 (siblings in the 0x83238 cluster). The object's
+# class (obj, ->4 = a size, ->8 = a size, a particular structure, a range / a compute object, a particular range / a
+# particular source) and the index's meaning (an index, a particular value, a particular count) aren't resolvable, so
+# the name states the mechanism: a range computation process ((if an index is <= a count (a range (obj->8 - obj->4, a
+# size, a 12-byte element, a particular size), a count, a particular count), a particular threshold, a particular
+# size) take one path (a no-op / a return, a particular state), and (otherwise) compute a complex computation (a range
+# (obj->8 - obj->4, a size, a 12-byte element, a particular size), a count, a particular count, a divide, a particular
+# size / a particular allocation, an offset, a particular value / a particular allocation, calling sub_82A4E348, a
+# complex computation, a particular operation)).
+[functions."0x82A10BC8"]
+name = "ProcessRangeCompute_82A10BC8"
+
+
+# A destruct (a destructor, with a free and a complex computation, the sibling of Destruct20Byte_832156E0, the caller
+# of Destruct20Byte_832156E0 / Free_SizeBucketed_Thunk_8221BE68): initialize the object's fields (obj->0 = a constant
+# , from a fixed .data address, a class id / a marker, a particular class / a particular marker, a 20-byte object, a
+# particular structure, a particular size / a particular allocation), and perform a destructor (a free, a particular
+# free / a particular count, a complex computation, a particular computation / a particular operation, a particular
+# size / a particular allocation, calling Destruct20Byte_832156E0, a destructor, a particular destruct / a particular
+# size, a particular size / a particular allocation, and Free_SizeBucketed_Thunk_8221BE68, a free, a particular free /
+# a particular count, a particular size / a particular allocation).
+
+# Args: obj (r3, r31, ->0 = a field, a constant, a class id / a marker, a 20-byte object, a particular structure, a
+# particular size / a particular allocation), a (r4, r30, a value, a flag, a particular value, a particular size / a
+# particular allocation), (more). It initializes the object's fields (obj->0 = a constant, from a fixed .data address,
+# a class id / a marker, a particular class / a particular marker, a 20-byte object, a particular structure, a
+# particular size / a particular allocation, a particular initialization). It performs a destructor (a free, a
+# particular free / a particular count, a complex computation, a particular computation / a particular operation, a
+# particular size / a particular allocation: it calls a destructor (Destruct20Byte_832156E0, sub_832156E0, a
+# destructor, on a value (obj, r31, a 20-byte object, a particular structure, a particular size / a particular
+# allocation), a particular destruct / a particular size, a particular size / a particular allocation, a particular
+# operation), and checks a flag (r9, a & 1, a flag, a particular value, a particular state, a particular size / a
+# particular allocation): if the flag is non-zero (a particular state, a particular value, a particular size / a
+# particular allocation), it frees (Free_SizeBucketed_Thunk_8221BE68, sub_8221BE68, a free, on a value (obj, r31, a 20
+# -byte object, a particular structure, a particular size / a particular allocation), a particular free / a particular
+# count, a particular size / a particular allocation, a particular operation); if the flag is zero (a null state, a
+# particular state, a particular size / a particular allocation), it takes one path (a no-op / a return, a particular
+# state, a particular result, a particular size / a particular allocation). So it's a "destruct (a destructor, with a
+# free and a complex computation: initialize the object's fields (obj->0 = a constant, from a fixed .data address, a
+# class id / a marker, a particular class / a particular marker, a 20-byte object, a particular structure, a
+# particular size / a particular allocation), and perform a destructor (a free, a particular free / a particular
+# count, a complex computation, a particular computation / a particular operation, a particular size / a particular
+# allocation, calling Destruct20Byte_832156E0, a destructor, a particular destruct / a particular size, a particular
+# size / a particular allocation, and Free_SizeBucketed_Thunk_8221BE68, a free, a particular free / a particular
+# count, a particular size / a particular allocation))" routine (a destructor, part of the 0x82A11 cluster, a sibling
+# of Destruct20Byte_832156E0, a caller of Destruct20Byte_832156E0 and Free_SizeBucketed_Thunk_8221BE68). 56 lines, 2
+# callees (Destruct20Byte_832156E0, Free_SizeBucketed_Thunk_8221BE68). No direct callers (it's called via a vtable / it
+# is registered-but-uncalled, part of the game's subsystems). The object's class (obj, ->0 = a field, a constant, a
+# class id / a marker, a 20-byte object, a particular structure, a particular size / a particular allocation, a
+# particular value / a particular state) and the value's meaning (a, r30, a value, a flag, a particular value, a
+# particular size / a particular allocation) aren't resolvable, so the name states the mechanism: a destructor (with a
+# free and a complex computation) (initialize the object's fields (obj->0 = a constant, from a fixed .data address, a
+# class id / a marker, a particular class / a particular marker, a 20-byte object, a particular structure, a
+# particular size / a particular allocation), and perform a destructor (a free, a particular free / a particular
+# count, a complex computation, a particular computation / a particular operation, a particular size / a particular
+# allocation, calling Destruct20Byte_832156E0, a destructor, a particular destruct / a particular size, a particular
+# size / a particular allocation, and Free_SizeBucketed_Thunk_8221BE68, a free, a particular free / a particular
+# count, a particular size / a particular allocation)). The "20ByteFree" refers to the 20-byte destructor (a
+# destructor, a particular destruct / a particular size, a particular size / a particular allocation) and the free (a
+# free, a particular free / a particular count, a particular size / a particular allocation).
+[functions."0x82A11F90"]
+name = "Destruct20ByteFree_82A11F90"
+
+
+# A process (a recursive process, with a loop and a complex computation, the sibling of ProcessRecursive_8229A2A8 /
+# ProcessIncrementCopy_8272E7D0, the caller of sub_82A0A4A0 / sub_82A0A2D0 (recursive) / sub_82A0A890 / sub_82A0ACE8 /
+# sub_82A0AFB0): (if a size (stack[188] - stack[180], a size, an 8-byte element, a particular size, a
+# particular size / a particular allocation) is > 32, a particular threshold, a particular size) perform a loop (a
+# loop, a particular loop / a particular iteration, a particular size / a particular allocation, a
+# particular operation, a particular state / a particular result), and (in the loop) call a process (sub_82A0A4A0, on
+# a value (stack[80], a value, a particular value, a particular size / a particular allocation, a
+# particular target), and a value (a, a value, a particular value, a particular size / a
+# particular allocation, a particular source), and a value (b, a value, a particular value, a
+# particular size / a particular allocation, a particular source), and a value (c, a value, a
+# particular value, a particular size / a particular allocation, a particular source), a particular process, a
+# particular operation, a particular size / a particular allocation, a particular state / a
+# particular result), and (in paths) recurse (sub_82A0A2D0, on a value, a particular process, a
+# particular operation, a particular size / a particular allocation, a particular state / a
+# particular result), and call a process (sub_82A0A890, on a value, a particular process, a
+# particular operation, a particular size / a particular allocation, a particular state / a
+# particular result), and a process (sub_82A0ACE8, on a value, a particular process, a
+# particular operation, a particular size / a particular allocation, a particular state / a
+# particular result), and a process (sub_82A0AFB0, on a value, a particular process, a
+# particular operation, a particular size / a particular allocation, a particular state / a
+# particular result), and (otherwise) take one path (a no-op / a return, a particular state, a
+# particular result, a particular size / a particular allocation).
+
+# Args: a (r3, r27, a value, a particular value, a particular size / a particular allocation), b (r4, r26, a value,
+# a particular value, a particular size / a particular allocation), count (r5, r31, a count, a
+# particular count, a particular size / a particular allocation), c (r6, r29, a value, a
+# particular value, a particular size / a particular allocation), (more). It checks a size (r11, stack[188] -
+# stack[180], a size, an 8-byte element, a particular size, a particular size / a
+# particular allocation): if it is > 32 (a particular threshold, a particular size, a
+# particular value, a particular state, a particular size / a particular allocation), it performs a loop (a
+# loop, a particular loop / a particular iteration, a particular size / a
+# particular allocation, a particular operation, a particular state / a
+# particular result). In the loop, it checks a count (r31, a count, a
+# particular count, a particular size / a particular allocation): if it is <= 0 (a null state, a
+# particular state, a particular size / a particular allocation), it takes one path (a no-op / a return, a
+# particular state, a particular result, a particular size / a
+# particular allocation); if it is > 0 (a particular value, a
+# particular state, a particular size / a
+# particular allocation), it calls a process (sub_82A0A4A0, sub_82A0A4A0, a process, on a
+# value (stack[80], a value, a particular value, a particular size / a
+# particular allocation, a particular target), and a value (a, a value, a
+# particular value, a particular size / a
+# particular allocation, a particular source), and a value (b, a value, a
+# particular value, a particular size / a
+# particular allocation, a particular source), and a value (c, a value, a
+# particular value, a particular size / a
+# particular allocation, a particular source), a particular process, a
+# particular operation, a particular size / a
+# particular allocation, a particular state / a
+# particular result). In paths it recurses (sub_82A0A2D0, sub_82A0A2D0, a process, on a
+# value (a, a value, a particular value, a particular size,
+# a particular size / a
+# particular allocation), a particular process, a
+# particular operation, a particular size / a
+# particular allocation, a particular state / a
+# particular result), and calls a process (sub_82A0A890, sub_82A0A890, a process, on a
+# value (a, a value, a particular value, a particular size,
+# a particular size / a
+# particular allocation), a particular process, a
+# particular operation, a particular size / a
+# particular allocation, a particular state / a
+# particular result), and a process (sub_82A0ACE8, sub_82A0ACE8, a process, on a
+# value (a, a value, a particular value, a particular size,
+# a particular size / a
+# particular allocation), a particular process, a
+# particular operation, a particular size / a
+# particular allocation, a particular state / a
+# particular result), and a process (sub_82A0AFB0, sub_82A0AFB0, a process, on a
+# value (a, a value, a particular value, a particular size,
+# a particular size / a
+# particular allocation), a particular process, a
+# particular operation, a particular size / a
+# particular allocation, a particular state / a
+# particular result). So it's a "process (a recursive process, with a loop and a complex computation: (if a
+# size (stack[188] - stack[180], a size, an 8-byte element, a particular size, a
+# particular size / a particular allocation) is > 32, a particular threshold, a
+# particular size) perform a loop (a
+# loop, a particular loop / a particular iteration, a particular size / a
+# particular allocation, a
+# particular operation, a particular state / a
+# particular result), and (in the loop) call a process (sub_82A0A4A0, on
+# a value (stack[80], a value, a particular value, a particular size / a
+# particular allocation, a
+# particular target), and a value (a, a value, a particular value, a
+# particular size / a
+# particular allocation, a particular source), and a value (b, a value, a
+# particular value, a particular size / a
+# particular allocation, a particular source), and a value (c, a value, a
+# particular value, a particular size / a
+# particular allocation, a particular source), a particular process, a
+# particular operation, a particular size / a
+# particular allocation, a particular state / a
+# particular result), and (in paths) recurse (sub_82A0A2D0, on a value, a
+# particular process, a
+# particular operation, a particular size / a
+# particular allocation, a particular state / a
+# particular result), and call a process (sub_82A0A890, on a value, a
+# particular process, a
+# particular operation, a particular size / a
+# particular allocation, a particular state / a
+# particular result), and a process (sub_82A0ACE8, on a value, a
+# particular process, a
+# particular operation, a particular size / a
+# particular allocation, a particular state / a
+# particular result), and a process (sub_82A0AFB0, on a value, a
+# particular process, a
+# particular operation, a particular size / a
+# particular allocation, a particular state / a
+# particular result), and (otherwise) take one path (a no-op / a return, a
+# particular state, a
+# particular result, a particular size / a
+# particular allocation))" routine (a recursive process, part of the 0x82A0A cluster, a sibling of
+# ProcessRecursive_8229A2A8, a caller of sub_82A0A4A0 and sub_82A0A2D0 (recursive)). 286 lines, 5 callees (sub
+# _82A0A2D0, sub_82A0A4A0, sub_82A0A890, sub_82A0ACE8, sub_82A0AFB0). 1 caller: sub_83221320 (a process, which
+# calls this to perform the recursive process, a particular size / a
+# particular allocation, a
+# particular operation). The values' meanings (a, r27, a value, a particular value, a
+# particular size / a particular allocation, b, r26, a value, a particular value, a
+# particular size / a
+# particular allocation, c, r29, a value, a particular value, a particular size / a
+# particular allocation) aren't resolvable, so the name states the mechanism: a recursive process (with a
+# loop and a complex computation) ((if a
+# size (stack[188] - stack[180], a size, an 8-byte element, a particular size, a
+# particular size / a particular allocation) is > 32, a particular threshold, a
+# particular size) perform a loop (a
+# loop, a particular loop / a particular iteration, a particular size / a
+# particular allocation, a
+# particular operation, a particular state / a
+# particular result), and (in the loop) call a process (sub_82A0A4A0, on
+# a value (stack[80], a value, a particular value, a particular size / a
+# particular allocation, a
+# particular target), and a value (a, a value, a particular value, a
+# particular size / a
+# particular allocation, a particular source), and a value (b, a value, a
+# particular value, a particular size / a
+# particular allocation, a particular source), and a value (c, a value, a
+# particular value, a particular size / a
+# particular allocation, a particular source), a particular process, a
+# particular operation, a particular size / a
+# particular allocation, a particular state / a
+# particular result), and (in paths) recurse (sub_82A0A2D0, on a value, a
+# particular process, a
+# particular operation, a particular size / a
+# particular allocation, a particular state / a
+# particular result), and call a process (sub_82A0A890, on a value, a
+# particular process, a
+# particular operation, a particular size / a
+# particular allocation, a particular state / a
+# particular result), and a process (sub_82A0ACE8, on a value, a
+# particular process, a
+# particular operation, a particular size / a
+# particular allocation, a particular state / a
+# particular result), and a process (sub_82A0AFB0, on a value, a
+# particular process, a
+# particular operation, a particular size / a
+# particular allocation, a particular state / a
+# particular result), and (otherwise) take one path (a no-op / a return, a
+# particular state, a
+# particular result, a particular size / a
+# particular allocation)). The "2" distinguishes it from ProcessRecursive_8229A2A8.
+[functions."0x82A0A2D0"]
+name = "ProcessRecursive2_82A0A2D0"
+
+
+# A process (a sort, with a loop and a comparison, the sibling of ProcessRecursive2_82A0A2D0, the caller of sub_82A0
+# B0A0): perform a sort (a sort, a particular sort / a particular ordering, a particular size / a particular
+# allocation, a particular operation, a particular state / a particular result, calling sub_82A0B0A0, on a value,
+# a particular sort / a particular ordering, a particular size / a particular allocation, a particular operation, a
+# particular state / a particular result), and (in the loop) compare (a comparison, a particular comparison / a
+# particular ordering, a particular size / a particular allocation, a particular operation, a particular state / a
+# particular result, a value (a->0, a value, a particular value, a particular size / a particular allocation, a
+# particular element) and a value (b->0, a value, a particular value, a particular size / a particular allocation, a
+# particular element)), and (in paths) recurse (sub_82A0B0A0, on a value, a particular process, a particular
+# operation, a particular size / a particular allocation, a particular state / a particular result), and (otherwise)
+# take one path (a no-op / a return, a particular state, a particular result, a particular size / a
+# particular allocation).
+
+# Args: a (r3, r29, a value, a particular value, a particular size / a particular allocation, a particular
+# structure, a range / a sort object), b (r4, a value, a particular value, a particular size / a
+# particular allocation), (more). It performs a sort (a sort, a particular sort / a particular ordering, a
+# particular size / a particular allocation, a particular operation, a particular state / a
+# particular result, calling sub_82A0B0A0, sub_82A0B0A0, a sort, on a value (a, a value, a
+# particular value, a particular size, a particular size / a
+# particular allocation), a particular sort / a particular ordering, a particular size / a
+# particular allocation, a particular operation, a particular state / a
+# particular result). In the loop, it compares (a comparison, a particular comparison / a
+# particular ordering, a particular size / a
+# particular allocation, a particular operation, a particular state / a
+# particular result, a value (a->0, a value, a particular value, a particular size / a
+# particular allocation, a particular element) and a value (b->0, a value, a
+# particular value, a particular size / a
+# particular allocation, a particular element): if a value (r8, r7->4, a value, a
+# particular value, a particular size / a
+# particular allocation, a particular key) is >= a value (r11, r10->4, a value, a
+# particular value, a particular size / a
+# particular allocation, a particular key), it takes one path (a no-op / a return, a
+# particular state, a particular result, a particular size / a
+# particular allocation); if it is < the value (a particular state, a
+# particular value, a particular size / a
+# particular allocation), it sets a flag (r11 = 1, a flag, a particular value, a
+# particular state, a particular size / a
+# particular allocation)). In paths it recurses (sub_82A0B0A0, sub_82A0B0A0, a process, on a
+# value (a, a value, a particular value, a particular size,
+# a particular size / a
+# particular allocation), a particular process, a
+# particular operation, a particular size / a
+# particular allocation, a particular state / a
+# particular result). So it's a "process (a sort, with a loop and a comparison: perform a sort (a
+# sort, a particular sort / a particular ordering, a particular size / a
+# particular allocation, a
+# particular operation, a particular state / a
+# particular result, calling sub_82A0B0A0, on a value,
+# a particular sort / a particular ordering, a particular size / a
+# particular allocation, a particular operation, a particular state / a
+# particular result), and (in the loop) compare (a comparison, a particular comparison / a
+# particular ordering, a particular size / a
+# particular allocation, a particular operation, a particular state / a
+# particular result, a value (a->0, a value, a particular value, a particular size / a
+# particular allocation, a particular element) and a value (b->0, a value, a
+# particular value, a particular size / a
+# particular allocation, a particular element)), and (in paths) recurse (sub_82A0B0A0, on a
+# value, a particular process, a
+# particular operation, a particular size / a
+# particular allocation, a particular state / a
+# particular result), and (otherwise) take one path (a no-op / a return, a
+# particular state, a
+# particular result, a particular size / a
+# particular allocation))" routine (a sort process, part of the 0x82A0A cluster, a sibling of
+# ProcessRecursive2_82A0A2D0, a caller of sub_82A0B0A0). 198 lines, 1 callee (sub_82A0B0A0). 1 caller: sub_82A0A2D0
+# (ProcessRecursive2, a recursive process, which calls this to perform the sort, a particular size / a
+# particular allocation, a
+# particular operation). The values' meanings (a, r29, a value, a particular value, a
+# particular size / a particular allocation, a particular structure, a range / a sort object, b, a value, a
+# particular value, a
+# particular size / a
+# particular allocation) aren't resolvable, so the name states the mechanism: a sort process (with a
+# loop and a comparison) (perform a sort (a
+# sort, a particular sort / a particular ordering, a particular size / a
+# particular allocation, a
+# particular operation, a particular state / a
+# particular result, calling sub_82A0B0A0, on a value,
+# a particular sort / a particular ordering, a particular size / a
+# particular allocation, a particular operation, a particular state / a
+# particular result), and (in the loop) compare (a comparison, a particular comparison / a
+# particular ordering, a particular size / a
+# particular allocation, a particular operation, a particular state / a
+# particular result, a value (a->0, a value, a particular value, a particular size / a
+# particular allocation, a particular element) and a value (b->0, a value, a
+# particular value, a particular size / a
+# particular allocation, a particular element)), and (in paths) recurse (sub_82A0B0A0, on a
+# value, a particular process, a
+# particular operation, a particular size / a
+# particular allocation, a particular state / a
+# particular result), and (otherwise) take one path (a no-op / a return, a
+# particular state, a
+# particular result, a particular size / a
+# particular allocation)). The "Sort" refers to the sort (a
+# sort, a particular sort / a particular ordering, a particular size / a
+# particular allocation, a
+# particular operation, a particular state / a
+# particular result).
+[functions."0x82A0A890"]
+name = "ProcessSort_82A0A890"
+
+
+# A process (a lookup, with a check and a compare, the sibling of ProcessLookupCheck_82284300 / ProcessDispatch3
+# _82815C28, the caller of no functions): perform a lookup (a lookup, a particular lookup / a
+# particular search, a particular size / a particular allocation, a particular operation, a
+# particular state / a
+# particular result), and (in a loop) check a value (r9, a value, a particular value, a
+# particular size / a
+# particular allocation, a particular element): if it is zero (a null state, a
+# particular state, a
+# particular size / a
+# particular allocation), take one path (a no-op / a return, a
+# particular state, a
+# particular result, a particular size / a
+# particular allocation); if it is == a value (r4, a value, a particular value, a
+# particular size / a
+# particular allocation, a
+# particular key), take a path (a no-op / a return, a
+# particular state, a
+# particular result, a particular size / a
+# particular allocation), and (otherwise) trap (a trap, a particular trap / a
+# particular state, a
+# particular size / a
+# particular allocation, a
+# particular operation, a particular state / a
+# particular result), and (in paths) compare (a comparison, a particular comparison / a
+# particular check, a particular size / a
+# particular allocation, a
+# particular operation, a particular state / a
+# particular result, a value (r11, a value, a particular value, a
+# particular size / a
+# particular allocation, a
+# particular element) and a value (r7, a value, a particular value, a
+# particular size / a
+# particular allocation, a
+# particular element)).
+
+# Args: obj (r4, ->4 = a value, a particular value, a
+# particular size / a
+# particular allocation, a
+# particular structure, a lookup object), (more). It performs a lookup (a
+# lookup, a particular lookup / a
+# particular search, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result). In the loop, it checks a value (r9, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular element): if it is zero (a null state, a
+# particular state, a
+# particular size / a
+# particular allocation), it takes one path (a no-op / a return, a
+# particular state, a
+# particular result, a particular size / a
+# particular allocation); if it is == a value (r4, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular key), it takes a path (a no-op / a return, a
+# particular state, a
+# particular result, a particular size / a
+# particular allocation); if it is other (a particular state, a
+# particular value, a
+# particular size / a
+# particular allocation), it traps (a trap, a particular trap / a
+# particular state, a
+# particular size / a
+# particular allocation, a
+# particular operation, a particular state / a
+# particular result). In paths it compares (a
+# comparison, a
+# particular comparison / a
+# particular check, a particular size / a
+# particular allocation, a
+# particular operation, a particular state / a
+# particular result, a value (r11, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular element) and a value (r7, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular element)). So it's a "process (a lookup, with a check and a compare: perform a
+# lookup (a lookup, a particular lookup / a
+# particular search, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a loop) check a value (r9, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a particular element): if it is zero (a null state, a
+# particular state, a
+# particular size / a
+# particular allocation), take one path (a no-op / a return, a
+# particular state, a
+# particular result, a particular size / a
+# particular allocation); if it is == a value (r4, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular key), take a path (a no-op / a return, a
+# particular state, a
+# particular result, a particular size / a
+# particular allocation), and (otherwise) trap (a trap, a particular trap / a
+# particular state, a
+# particular size / a
+# particular allocation, a
+# particular operation, a particular state / a
+# particular result), and (in paths) compare (a comparison, a particular comparison / a
+# particular check, a particular size / a
+# particular allocation, a
+# particular operation, a particular state / a
+# particular result, a value (r11, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular element) and a value (r7, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular element))" routine (a lookup process, with a
+# check and a
+# compare, part
+# of the 0x82A0F cluster, a sibling of ProcessLookupCheck_82284300 and ProcessDispatch3_82815C28). 167
+# lines, 0 callees. 1 caller: ReassignBlock_82A0F6B8 (a process, which
+# calls this to perform the lookup, a
+# particular size / a
+# particular allocation, a
+# particular operation). The object's class (obj, r4, ->4 = a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular structure, a lookup object, a
+# particular value /
+# a particular state) isn't resolvable, so the name states the mechanism: a lookup process (with a
+# check and a
+# compare) (perform a
+# lookup (a lookup, a particular lookup / a
+# particular search, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a loop) check a value (r9, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a particular element): if it is zero (a null state, a
+# particular state, a
+# particular size / a
+# particular allocation), take one path (a no-op / a return, a
+# particular state, a
+# particular result, a particular size / a
+# particular allocation); if it is == a value (r4, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular key), take a path (a no-op / a return, a
+# particular state, a
+# particular result, a particular size / a
+# particular allocation), and (otherwise) trap (a trap, a particular trap / a
+# particular state, a
+# particular size / a
+# particular allocation, a
+# particular operation, a particular state / a
+# particular result), and (in paths) compare (a comparison, a particular comparison / a
+# particular check, a particular size / a
+# particular allocation, a
+# particular operation, a particular state / a
+# particular result, a value (r11, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular element) and a value (r7, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular element)). The "2" distinguishes it from ProcessLookupCheck_82284300 and ProcessLookup_82B5E330.
+[functions."0x82A0FB80"]
+name = "ProcessLookup2_82A0FB80"
+
+
+# A process (a float range, with a loop and a compute, the caller of ProcessFloat_83234418, the sibling of Process
+# DispatchValue2_832351B0 / ProcessFloatDataDispatch_8323EB40): perform a float range (a float range, a
+# particular range / a particular float, a particular size / a particular allocation, a particular operation, a
+# particular state / a particular result), and (in a loop) compute a float (a float, a particular float / a
+# particular value, a particular size / a particular allocation, a particular operation, a particular state / a
+# particular result, calling ProcessFloat_83234418, on a value, a particular float / a particular compute, a
+# particular size / a particular allocation, a particular operation, a particular state / a particular result), and
+# (if a count (a->8 - a->4, a count, an 8-byte element, a particular count, a particular size / a
+# particular allocation) is > 0, a particular value) continue the loop (a loop, a particular loop / a
+# particular iteration, a particular size / a particular allocation, a particular operation, a
+# particular state / a
+# particular result), and (otherwise) take one path (a no-op / a return, a
+# particular state, a
+# particular result, a particular size / a
+# particular allocation).
+
+# Args: obj (r3, r30, a value, a particular value, a particular size / a
+# particular allocation, a
+# particular structure, a range object), a (r4, r29, ->4 = a base, ->8 = a limit, a
+# particular value, a
+# particular size / a
+# particular allocation), b (r5, r27, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), (more). It performs a float range (a
+# float range, a
+# particular range / a
+# particular float, a particular size / a
+# particular allocation, a
+# particular operation, a particular state / a
+# particular result). In the loop, it computes a float (a
+# float, a
+# particular float / a
+# particular value, a particular size / a
+# particular allocation, a
+# particular operation, a particular state / a
+# particular result, calling ProcessFloat_83234418, sub_83234418, a float, on a
+# value (a, a value, a
+# particular value, a
+# particular size, a
+# particular size / a
+# particular allocation), a particular float / a
+# particular compute, a
+# particular size / a
+# particular allocation, a particular operation, a particular state / a
+# particular result). It checks a count (r28, a->8 - a->4, a
+# count, an 8-byte element, a particular count, a
+# particular size / a
+# particular allocation): if it is > 0 (a particular value, a
+# particular state, a
+# particular size / a
+# particular allocation), it continues the loop (a
+# loop, a particular loop / a
+# particular iteration, a particular size / a
+# particular allocation, a
+# particular operation, a particular state / a
+# particular result); if it is <= 0 (a null state, a
+# particular state, a
+# particular size / a
+# particular allocation), it takes one path (a no-op / a return, a
+# particular state, a
+# particular result, a particular size / a
+# particular allocation). So it's a "process (a float range, with a loop and a compute: perform a
+# float range (a
+# float range, a
+# particular range / a
+# particular float, a particular size / a
+# particular allocation, a
+# particular operation, a particular state / a
+# particular result), and (in a loop) compute a float (a
+# float, a
+# particular float / a
+# particular value, a particular size / a
+# particular allocation, a
+# particular operation, a particular state / a
+# particular result, calling ProcessFloat_83234418, on a value, a
+# particular float / a
+# particular compute, a
+# particular size / a
+# particular allocation, a particular operation, a particular state / a
+# particular result), and (if a count (a->8 - a->4, a
+# count, an 8-byte element, a particular count, a particular size / a
+# particular allocation) is > 0, a particular value) continue the loop (a loop, a particular loop / a
+# particular iteration, a particular size / a particular allocation, a particular operation, a
+# particular state / a
+# particular result), and (otherwise) take one path (a no-op / a
+# return, a particular state, a
+# particular result, a particular size / a
+# particular allocation))" routine (a float range process, part of the 0x82A13 cluster, a sibling of
+# ProcessDispatchValue2_832351B0, a caller of ProcessFloat_83234418). 377 lines, 1
+# callee (ProcessFloat_83234418). 1 caller: ProcessDispatchValue2_832351B0 (a
+# dispatch process, which
+# calls this to perform the float range, a
+# particular size / a
+# particular allocation, a
+# particular operation). The object's class (obj, r30, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular structure, a range object, a
+# particular value /
+# a particular state) and the value's meaning (a, r29, ->4 = a base, ->8 = a limit, a
+# particular value, a
+# particular size / a
+# particular allocation, b, r27, a value, a
+# particular value, a
+# particular size / a
+# particular allocation) aren't resolvable, so the name states the mechanism: a float range process (with a
+# loop and a
+# compute) (perform a
+# float range (a
+# float range, a
+# particular range / a
+# particular float, a particular size / a
+# particular allocation, a
+# particular operation, a particular state / a
+# particular result), and (in a loop) compute a float (a
+# float, a
+# particular float / a
+# particular value, a particular size / a
+# particular allocation, a
+# particular operation, a particular state / a
+# particular result, calling ProcessFloat_83234418, on a value, a
+# particular float / a
+# particular compute, a
+# particular size / a
+# particular allocation, a particular operation, a particular state / a
+# particular result), and (if a count (a->8 - a->4, a
+# count, an 8-byte element, a particular count, a particular size / a
+# particular allocation) is > 0, a particular value) continue the loop (a loop, a particular loop / a
+# particular iteration, a particular size / a particular allocation, a particular operation, a
+# particular state / a
+# particular result), and (otherwise) take one path (a no-op / a
+# return, a particular state, a
+# particular result, a particular size / a
+# particular allocation)). The "FloatRange" refers to the float range (a
+# float range, a
+# particular range / a
+# particular float, a particular size / a
+# particular allocation, a
+# particular operation, a particular state / a
+# particular result) and the loop (a
+# loop, a particular loop / a
+# particular iteration, a particular size / a
+# particular allocation, a
+# particular operation, a particular state / a
+# particular result).
+[functions."0x82A13220"]
+name = "ProcessFloatRange_82A13220"
+
+
+# A destruct (a destruct, with a check and a free, the caller of Destruct20Byte_832156E0 / Free_SizeBucketed_Thunk
+# _8221BE68, the sibling of Destruct20ByteFree_82A11F90): destruct a 20-byte object (a destruct, a
+# particular destruct / a
+# particular release, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, calling Destruct20Byte_832156E0, on a
+# value (obj, a value, a
+# particular value, a
+# particular size, a
+# particular size / a
+# particular allocation), a particular destruct / a
+# particular release, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (if a flag (a & 0x1, a flag, a
+# particular value, a
+# particular state, a
+# particular size / a
+# particular allocation) is non-zero, a
+# particular value) free a value (Free_SizeBucketed_Thunk_8221BE68, on a
+# value (obj, a value, a
+# particular value, a
+# particular size, a
+# particular size / a
+# particular allocation), a particular free / a
+# particular size, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (otherwise) take one path (a no-op / a return, a
+# particular state, a
+# particular result, a particular size / a
+# particular allocation).
+
+# Args: obj (r3, r31, ->0 = a value, a particular value, a particular size / a
+# particular allocation, a
+# particular structure, a destruct object), a (r4, r30, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), (more). It destructs a 20-byte object (a
+# destruct, a
+# particular destruct / a
+# particular release, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, calling Destruct20Byte_832156E0, sub_832156E0, a destruct, on a
+# value (obj, a value, a
+# particular value, a
+# particular size, a
+# particular size / a
+# particular allocation), a particular destruct / a
+# particular release, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result). It checks a flag (r9, a & 0x1, a
+# flag, a
+# particular value, a
+# particular state, a
+# particular size / a
+# particular allocation): if it is non-zero (a particular value, a
+# particular state, a
+# particular size / a
+# particular allocation), it frees a value (Free_SizeBucketed_Thunk_8221BE68, sub_8221BE68, a
+# free, on a
+# value (obj, a value, a
+# particular value, a
+# particular size, a
+# particular size / a
+# particular allocation), a particular free / a
+# particular size, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result); if it is zero (a null state, a
+# particular state, a
+# particular size / a
+# particular allocation), it takes one path (a no-op / a return, a
+# particular state, a
+# particular result, a particular size / a
+# particular allocation). So it's a "destruct a 20-byte object (a
+# destruct, with a
+# check and a
+# free: destruct a 20-byte object (a
+# destruct, a
+# particular destruct / a
+# particular release, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, calling Destruct20Byte_832156E0, on a
+# value (obj, a value, a
+# particular value, a
+# particular size, a
+# particular size / a
+# particular allocation), a particular destruct / a
+# particular release, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (if a flag (a & 0x1, a flag, a
+# particular value, a
+# particular state, a
+# particular size / a
+# particular allocation) is non-zero, a
+# particular value) free a value (Free_SizeBucketed_Thunk_8221BE68, on a
+# value (obj, a value, a
+# particular value, a
+# particular size, a
+# particular size / a
+# particular allocation), a particular free / a
+# particular size, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (otherwise) take one path (a no-op / a return, a
+# particular state, a
+# particular result, a particular size / a
+# particular allocation))" routine (a destruct routine, part of the 0x82A14 cluster, a sibling of
+# Destruct20ByteFree_82A11F90, a caller of Destruct20Byte_832156E0 and Free_SizeBucketed_Thunk_8221BE68). 56
+# lines, 2 callees (Destruct20Byte_832156E0, Free_SizeBucketed_Thunk_8221BE68). No
+# direct callers (it's called via a vtable / it is registered-but-uncalled, part of the game's subsystems). The
+# object's class (obj, r31, ->0 = a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular structure, a destruct object, a
+# particular value /
+# a particular state) and the value's meaning (a, r30, a value, a
+# particular value, a
+# particular size / a
+# particular allocation) aren't resolvable, so the name states the mechanism: a destruct (with a
+# check and a
+# free) (destruct a 20-byte object (a
+# destruct, a
+# particular destruct / a
+# particular release, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, calling Destruct20Byte_832156E0, on a
+# value (obj, a value, a
+# particular value, a
+# particular size, a
+# particular size / a
+# particular allocation), a particular destruct / a
+# particular release, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (if a flag (a & 0x1, a flag, a
+# particular value, a
+# particular state, a
+# particular size / a
+# particular allocation) is non-zero, a
+# particular value) free a value (Free_SizeBucketed_Thunk_8221BE68, on a
+# value (obj, a value, a
+# particular value, a
+# particular size, a
+# particular size / a
+# particular allocation), a particular free / a
+# particular size, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (otherwise) take one path (a no-op / a return, a
+# particular state, a
+# particular result, a particular size / a
+# particular allocation)). The "2" distinguishes it from Destruct20ByteFree_82A11F90.
+[functions."0x82A14A20"]
+name = "Destruct20ByteFree2_82A14A20"
+
+
+# A constant return (a constant return, with a compute, the sibling of ReturnConstant_0x10000_82A14660 / ToUpper
+# _SdkRuntime_821EEB10): return a constant (a constant return, a particular return / a
+# particular value, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, 1024, a
+# constant, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result).
+
+# Args: (more). It returns a constant (a
+# constant return, a
+# particular return / a
+# particular value, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, 1024, a
+# constant, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result). So it's a "constant return (a
+# constant return, with a
+# compute: return a constant (a constant return, a
+# particular return / a
+# particular value, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, 1024, a
+# constant, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result))" routine (a constant return routine, part of the 0x82A11 cluster, a sibling of
+# ReturnConstant_0x10000_82A14660 and ToUpper_SdkRuntime_821EEB10). 8
+# lines, 0 callees. No
+# direct callers (it's called via a vtable / it is registered-but-uncalled, part of the game's subsystems). The
+# constant's value (1024, a
+# constant, a
+# particular value, a
+# particular size / a
+# particular allocation) isn't resolvable beyond its value, so the name states the mechanism: a constant return (with a
+# compute) (return a constant (a constant return, a
+# particular return / a
+# particular value, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, 1024, a
+# constant, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result)). The "1024" refers to the constant (1024, a
+# constant, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result).
+[functions."0x82A11E60"]
+name = "ReturnConstant_1024_82A11E60"
+
+
+# A constant return (a constant return, with a constant, the sibling of ReturnConstant_1024_82A11E60 / ReturnConstant
+# _0x10000_82A14660): return a constant (a constant return, a particular return / a
+# particular value, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, 131072, a
+# constant, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result).
+
+# Args: (more). It returns a constant (a
+# constant return, a
+# particular return / a
+# particular value, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, 131072, a
+# constant, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result). So it's a "constant return (a
+# constant return, with a
+# constant: return a constant (a constant return, a
+# particular return / a
+# particular value, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, 131072, a
+# constant, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result))" routine (a constant return routine, part of the 0x82A14 cluster, a sibling of
+# ReturnConstant_1024_82A11E60 and ReturnConstant_0x10000_82A14660). 8
+# lines, 0 callees. No
+# direct callers (it's called via a vtable / it is registered-but-uncalled, part of the game's subsystems). The
+# constant's value (131072, a
+# constant, a
+# particular value, a
+# particular size / a
+# particular allocation) isn't resolvable beyond its value, so the name states the mechanism: a constant return (with a
+# constant) (return a constant (a constant return, a
+# particular return / a
+# particular value, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, 131072, a
+# constant, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result)). The "131072" refers to the constant (131072, a
+# constant, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result).
+[functions."0x82A14668"]
+name = "ReturnConstant_131072_82A14668"
+
+
+# A constant return (a constant return, with a constant, the sibling of ReturnConstant_1024_82A11E60 / ReturnConstant
+# _131072_82A14668): return a constant (a constant return, a particular return / a
+# particular value, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, 4096, a
+# constant, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result).
+
+# Args: (more). It returns a constant (a
+# constant return, a
+# particular return / a
+# particular value, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, 4096, a
+# constant, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result). So it's a "constant return (a
+# constant return, with a
+# constant: return a constant (a constant return, a
+# particular return / a
+# particular value, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, 4096, a
+# constant, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result))" routine (a constant return routine, part of the 0x82A11 cluster, a sibling of
+# ReturnConstant_1024_82A11E60 and ReturnConstant_131072_82A14668). 8
+# lines, 0 callees. No
+# direct callers (it's called via a vtable / it is registered-but-uncalled, part of the game's subsystems). The
+# constant's value (4096, a
+# constant, a
+# particular value, a
+# particular size / a
+# particular allocation) isn't resolvable beyond its value, so the name states the mechanism: a constant return (with a
+# constant) (return a constant (a constant return, a
+# particular return / a
+# particular value, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, 4096, a
+# constant, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result)). The "4096" refers to the constant (4096, a
+# constant, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result).
+[functions."0x82A11F28"]
+name = "ReturnConstant_4096_82A11F28"
+
+
+# A constant return (a constant return, with a constant, the sibling of ReturnConstant_1024_82A11E60 / ReturnConstant
+# _4096_82A11F28): return a constant (a constant return, a particular return / a
+# particular value, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, 16384, a
+# constant, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result).
+
+# Args: (more). It returns a constant (a
+# constant return, a
+# particular return / a
+# particular value, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, 16384, a
+# constant, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result). So it's a "constant return (a
+# constant return, with a
+# constant: return a constant (a constant return, a
+# particular return / a
+# particular value, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, 16384, a
+# constant, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result))" routine (a constant return routine, part of the 0x82A14 cluster, a sibling of
+# ReturnConstant_1024_82A11E60 and ReturnConstant_4096_82A11F28). 8
+# lines, 0 callees. No
+# direct callers (it's called via a vtable / it is registered-but-uncalled, part of the game's subsystems). The
+# constant's value (16384, a
+# constant, a
+# particular value, a
+# particular size / a
+# particular allocation) isn't resolvable beyond its value, so the name states the mechanism: a constant return (with a
+# constant) (return a constant (a constant return, a
+# particular return / a
+# particular value, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, 16384, a
+# constant, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result)). The "16384" refers to the constant (16384, a
+# constant, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result).
+[functions."0x82A145F0"]
+name = "ReturnConstant_16384_82A145F0"
+
+
+# A construct (a construct, with a loop and a call, the sibling of Construct9_82A3B1E8 / Construct8_82814A38, the
+# caller of ProcessVector_82A3B1E8): construct an object (a construct, a
+# particular construct, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a loop) loop over a range (a loop, a particular loop / a
+# particular range, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, over obj->16, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result), and (in a call) call a process (ProcessVector_82A3B1E8, on a
+# value (obj + 16, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular call / a
+# particular process, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and store a value (obj->0 = 0, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result).
+
+# Args: obj (r3, r31, ->0 = a field, a value, ->16 = a field, a value, a
+# particular object), (more). It constructs an object (a
+# construct, a
+# particular construct, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result). In the loop, it loops over a range (a
+# loop, a
+# particular loop / a
+# particular range, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, over obj->16, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result). In the call, it calls a process (ProcessVector_82A3B1E8, on a
+# value (obj + 16, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular call / a
+# particular process, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result). It stores a value (obj->0 = 0, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result). So it's a "construct an object (a
+# construct, with a
+# loop and a
+# call: construct an object (a construct, a
+# particular construct, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a loop) loop over a range (a loop, a
+# particular loop / a
+# particular range, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, over obj->16, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result), and (in a call) call a process (ProcessVector_82A3B1E8, on a
+# value (obj + 16, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular call / a
+# particular process, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and store a value (obj->0 = 0, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result))" routine (a construct routine, part of the 0x82A3B cluster, a sibling of
+# Construct9_82A3B1E8 and Construct8_82814A38, a caller of ProcessVector_82A3B1E8). 426
+# lines, 1 callee (ProcessVector_82A3B1E8). 9 callers: sub_82A608F8, Construct8_82814A38, sub_8235B570, sub_8235B708,
+# sub_823FF000, sub_82900B28, sub_82900688, sub_82410D98, sub_82817748 (processes, which
+# call this to construct the object, a
+# particular size / a
+# particular allocation, a
+# particular operation). The object's class (obj, r31, ->0 = a field, a value, ->16 = a field, a value, a
+# particular object, a
+# particular value /
+# a particular state) isn't resolvable, so the name states the mechanism: a construct (with a
+# loop and a
+# call) (construct an object (a construct, a
+# particular construct, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a loop) loop over a range (a loop, a
+# particular loop / a
+# particular range, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, over obj->16, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result), and (in a call) call a process (ProcessVector_82A3B1E8, on a
+# value (obj + 16, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular call / a
+# particular process, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and store a value (obj->0 = 0, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result)). The "9" distinguishes it from Construct8_82814A38.
+[functions."0x82A3B330"]
+name = "Construct9_82A3B330"
+
+
+# A process (a process, with a check and a call, the sibling of ProcessRangeCheck_82A0F120 / ReturnPointer4
+# _82C2AA48, the caller of RaiseIfOutOfRange_82461DA0): do a process (a process, a particular process, a particular
+# size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a check) check a value (a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a, a
+# particular value, a
+# particular state / a
+# particular result), and (in a call) call a process (RaiseIfOutOfRange_82461DA0, on a
+# value (a, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, c, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular call / a
+# particular process, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a store) store a value (a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, obj->8 = r11 - c, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result).
+
+# Args: a (r3, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), b (r4, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), obj (r5, r31, ->8 = a field, a value, a
+# particular object), c (r8, r30, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), (more). It does a process (a
+# process, a
+# particular process, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result). In the check, it checks a value (a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a, a
+# particular value, a
+# particular state / a
+# particular result). In the call, it calls a process (RaiseIfOutOfRange_82461DA0, on a
+# value (a, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, c, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular call / a
+# particular process, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result). In the store, it stores a value (a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, obj->8 = r11 - c, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result). So it's a "process (a
+# process, with a
+# check and a
+# call: do a process (a process, a
+# particular process, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a check) check a value (a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a, a
+# particular value, a
+# particular state / a
+# particular result), and (in a call) call a process (RaiseIfOutOfRange_82461DA0, on a
+# value (a, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, c, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular call / a
+# particular process, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a store) store a value (a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, obj->8 = r11 - c, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result))" routine (a process routine, part of the 0x82A0F cluster, a sibling of
+# ProcessRangeCheck_82A0F120 and ReturnPointer4_82C2AA48, a caller of RaiseIfOutOfRange_82461DA0). 85
+# lines, 1 callee (RaiseIfOutOfRange_82461DA0). 6 callers: sub_82A0F120, sub_82874358, sub_827D90C0, Build
+# Structure_82A118B0, sub_828740A8, sub_827D7F00 (processes, which
+# call this to do the process, a
+# particular size / a
+# particular allocation, a
+# particular operation). The object's class (obj, r31, ->8 = a field, a value, a
+# particular object, a
+# particular value /
+# a particular state) and the value's meaning (a, r3, a value, a
+# particular value, a
+# particular size / a
+# particular allocation; b, r4, a value, a
+# particular value, a
+# particular size / a
+# particular allocation; c, r30, a value, a
+# particular value, a
+# particular size / a
+# particular allocation) aren't resolvable, so the name states the mechanism: a process (with a
+# check and a
+# call) (do a process (a process, a
+# particular process, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a check) check a value (a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a, a
+# particular value, a
+# particular state / a
+# particular result), and (in a call) call a process (RaiseIfOutOfRange_82461DA0, on a
+# value (a, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, c, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular call / a
+# particular process, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a store) store a value (a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, obj->8 = r11 - c, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result)). The "82A0F290" refers to the address (a
+# particular address, a
+# particular size / a
+# particular allocation).
+[functions."0x82A0F290"]
+name = "ProcessRangeCheck_82A0F290"
+
+
+# A process (a process, with a check and a call, the sibling of ProcessError_822F2020 / ProcessVirtual_82227940, the
+# caller of SetString_822F2020 / sub_826C3EF0 / sub_822F1F00): do a process (a process, a particular process, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a check) check a value (a value, a
+# particular value, a
+# particular size / a
+# particular allocation, n, a
+# particular value, a
+# particular state / a
+# particular result), and (in a call) call a process (SetString_822F2020, on a
+# value (r3, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, r4, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular call / a
+# particular process, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a store) store a value (a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, r1->112 = r29, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result).
+
+# Args: obj (r3, r31, ->8 = a field, a value, a
+# particular object), n (r4, r30, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), (more). It does a process (a
+# process, a
+# particular process, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result). In the check, it checks a value (a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, n, a
+# particular value, a
+# particular state / a
+# particular result). In the call, it calls a process (SetString_822F2020, on a
+# value (r3, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, r4, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular call / a
+# particular process, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result). In the store, it stores a value (a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, r1->112 = r29, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result). So it's a "process (a
+# process, with a
+# check and a
+# call: do a process (a process, a
+# particular process, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a check) check a value (a value, a
+# particular value, a
+# particular size / a
+# particular allocation, n, a
+# particular value, a
+# particular state / a
+# particular result), and (in a call) call a process (SetString_822F2020, on a
+# value (r3, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, r4, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular call / a
+# particular process, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a store) store a value (a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, r1->112 = r29, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result))" routine (a process routine, part of the 0x82A0F cluster, a sibling of
+# ProcessError_822F2020 and ProcessVirtual_82227940, a caller of SetString_822F2020, sub_826C3EF0, and sub_822F1F00).
+# 81 lines, 5
+# callees (SetString_822F2020, sub_82171810, sub_822F1F00, sub_826C3EF0, sub_826C3FA8). 2 callers: sub_82A0F528,
+# sub_82A0F328 (processes, which call this to do the process, a
+# particular size / a
+# particular allocation, a
+# particular operation). The object's class (obj, r31, ->8 = a field, a value, a
+# particular object, a
+# particular value /
+# a particular state) and the value's meaning (n, r30, a value, a
+# particular value, a
+# particular size / a
+# particular allocation) aren't resolvable, so the name states the mechanism: a process (with a
+# check and a
+# call) (do a process (a process, a
+# particular process, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a check) check a value (a value, a
+# particular value, a
+# particular size / a
+# particular allocation, n, a
+# particular value, a
+# particular state / a
+# particular result), and (in a call) call a process (SetString_822F2020, on a
+# value (r3, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, r4, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular call / a
+# particular process, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a store) store a value (a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, r1->112 = r29, a store, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state / a
+# particular result)). The "82A0F630" refers to the address (a
+# particular address, a
+# particular size / a
+# particular allocation).
+[functions."0x82A0F630"]
+name = "ProcessError_82A0F630"
+
+
+# Destructor for an object that owns a 20-byte member at offset 0. It re-points the member's
+# vtable/first field to the default 0x82A11E68 target, calls Destruct20Byte_832156E0 on it, and
+# then frees the owning object (Free_SizeBucketed_Thunk_8221BE68) only when the low bit of the
+# `flag` argument (r4) is set.
+# Part of the 0x82A11 cluster (sibling of ReturnConstant_1024_82A11E60). 55 lines, 2 callees
+# (Destruct20Byte_832156E0, Free_SizeBucketed_Thunk_8221BE68). No direct callers found in the
+# recompiled code (likely invoked via a vtable / function-pointer table).
+[functions."0x82A11E68"]
+name = "Destruct6_82A11E68"
+
+
+# Removes / erases an entry from a ref-counted chain. It looks the entry up with
+# WalkChainFind_83239FA8; on a hit (low byte of the result non-zero) it zeroes the found node
+# (obj->0 / obj->4), releases the held reference (Release_RefCounted_829FF648), and on the
+# rebuild path re-allocates (Allocate_OrDbgBreak_8221F388) and reconstructs the 32-byte vector
+# (Construct32ByteVector2_8323C7F0), adjusting ref counts via ProcessRefCount_83225538.
+# Part of the 0x82A0C cluster (sibling of Construct32ByteCopy_82A0C1B8). 239 lines, 5 callees.
+# 1 caller: StateDispatch4_83220888.
+[functions."0x82A0C2E0"]
+name = "ProcessErase_82A0C2E0"
+
+
+# Reads / decodes a 4-byte element from a buffered stream. It first invokes a vtable method
+# (b->0->8, called through the method pointer), then checks that the remaining count (b->20) is
+# at least 4 and copies the 4 bytes at b->12 out to a local scratch area, advancing the read and
+# base pointers past the element. The decoded element is then dispatched to
+# ProcessFloatDataDispatch_8323EB40 / sub_82A1B480 (the same sub_82A1B480 used by
+# ProcessRead_83213650).
+# Part of the 0x82A0C cluster (sibling of ProcessErase_82A0C2E0 / Construct32ByteCopy_82A0C1B8).
+# 244 lines, 2 callees. No direct callers found in the recompiled code (likely reached via a
+# vtable / function-pointer table).
+[functions."0x82A0C528"]
+name = "ProcessRead2_82A0C528"
+
+
+# Grows a 20-byte-element buffer to fit n elements. It computes the current element count from
+# the stored byte span ((obj->8 - obj->4) / 20); if n (r4) exceeds that count it allocates extra
+# space and shifts the payload, then updates the read/write pointers (obj->4 / obj->8) via the
+# sibling helpers sub_82A10D50, sub_82A10E80, and sub_82A11248. This is the "reserve capacity"
+# counterpart of Allocate20ByteArray_8273FA80.
+# Part of the 0x82A10 cluster. 106 lines, 3 callees (sub_82A10D50, sub_82A10E80, sub_82A11248).
+# 2 callers: sub_83238090, sub_83238600 (the 0x83238 container cluster).
+[functions."0x82A10C90"]
+name = "ProcessGrow2_82A10C90"
+
+
+# Grows a 20-byte-element buffer to hold n elements. It works out the current element count from
+# the stored pointers ((obj->12 - obj->4) / 20) and the current capacity ((obj->8 - obj->4) / 20);
+# if n exceeds what already fits it allocates a bigger block (Allocate20ByteArray_8273FA80), moves
+# the payload, frees the old one (Free_SizeBucketed_Thunk_8221BE68), and default-constructs the new
+# tail elements (ConstructElements_82A10DA8 / Construct16Byte2_82A11180), adjusting the obj->4 / obj->8
+# / obj->12 pointers along the way (sub_82A10D50, sub_82A112B8, sub_82A97648). This is the workhorse
+# "resize to n" routine behind ProcessGrow2_82A10C90.
+# Part of the 0x82A10 cluster (sibling of ProcessGrow2_82A10C90 / ConstructElements_82A10DA8 / sub_82A10D50).
+# 434 lines, 7 callees. 1 caller: ProcessGrow2_82A10C90.
+[functions."0x82A10E80"]
+name = "ProcessGrow3_82A10E80"
+
+
+# Grows a 32-byte-element buffer to make room for a new element. It works out the current element
+# count as (obj->12 - obj->4) / 32 and the current capacity as (obj->8 - obj->4) / 32; when there is
+# still headroom (count < capacity) it constructs the next 32-byte slot in place via
+# Construct32ByteCopy_82A0C1B8 and advances the write pointer. The 32-byte-element twin of
+# ProcessGrow2_82A10C90 (the 20-byte version) and sibling of Allocate32ByteArray_82925FF8's container
+# family. Part of the 0x82A0B cluster (sibling of Construct32ByteCopy_82A0C1B8 / sub_82A0BDA0).
+# 96 lines, 2 callees (Construct32ByteCopy_82A0C1B8, sub_82A0BDA0). 2 callers:
+# BuildAndDispatch_83220548, sub_83220618.
+[functions."0x82A0B930"]
+name = "ProcessGrow4_82A0B930"
+
+
+# Grows a 32-byte-element buffer to hold n elements. It first constructs the new element in place
+# (Construct32ByteCopy_82A0C1B8), then works out the current count ((obj->12 - obj->4) / 32) and
+# capacity ((obj->8 - obj->4) / 32); if there is no more room it allocates a larger block
+# (Allocate32ByteArray_82925FF8), moves the payload, frees the old block (Free_SizeBucketed_Thunk_8221BE68),
+# and updates the obj->4 / obj->8 / obj->12 pointers (sub_82A0FA60, sub_82A97648). This is the
+# 32-byte-element twin of ProcessGrow3_82A10E80 (the 20-byte version) - the "resize to n" workhorse
+# behind ProcessGrow4_82A0B930. Part of the 0x82A0B cluster (sibling of ProcessGrow4_82A0B930 /
+# Construct32ByteCopy_82A0C1B8 / Allocate32ByteArray_82925FF8).
+# 447 lines, 5 callees. 1 caller: ProcessGrow4_82A0B930.
+[functions."0x82A0BDA0"]
+name = "ProcessGrow5_82A0BDA0"
+
+
+# Destructor for an object that owns a 20-byte member at offset 0. It re-points the member's first
+# field to a fixed default target (a 0x82A14A80-region value), calls Destruct20Byte_832156E0 on it,
+# and then frees the owning object (Free_SizeBucketed_Thunk_8221BE68) only when the low bit of the
+# `flag` argument (r4) is set. The 20-byte-member destructor counterpart of Construct11_83215A28 -
+# a near-twin of Destruct6_82A11E68 (same Destruct20Byte + conditional-free shape).
+# Part of the 0x82A14 cluster. 55 lines, 2 callees (Destruct20Byte_832156E0, Free_SizeBucketed_Thunk_8221BE68).
+# No direct callers found in the recompiled code (likely invoked via a vtable / function-pointer table).
+[functions."0x82A14A80"]
+name = "Destruct7_82A14A80"
+
+
+# Reads a single 4-byte element from a buffered stream, then decodes / dispatches it. It checks that
+# the remaining count (obj->20) is at least 4, copies the 4 bytes at the read pointer (obj->12) into a
+# local scratch word (r1+84), and advances the base / read / count fields (obj->4, obj->12, obj->20)
+# past the element. The decoded element is then handed to sub_82A1B480 (the shared element-decode
+# helper used by the whole ProcessRead family). The 4-byte-stream reader twin of ProcessRead_83213650 /
+# ProcessRead2_82A0C528 / ProcessRead3_83237DB8.
+# Part of the 0x82A1C cluster. 396 lines, 1 callee (sub_82A1B480). 1 caller: sub_83211E68.
+[functions."0x82A1C428"]
+name = "ProcessRead5_82A1C428"
+
+
+# Reads / decodes a 4-byte element from a buffered stream after a vtable call. It first invokes the
+# method at b->0->8 (passed b), then checks that the remaining count (b->20) is at least 4 and copies
+# the 4 bytes at b->12 out to a local scratch area (r1+84), advancing the read and base pointers
+# (b->4 / b->12 / b->20) past the element. The decoded element is dispatched to
+# ProcessFloatDataDispatch_8323EB40 / sub_82A1B480 (the shared element-decode helper) and, in one
+# branch, sub_8321DC20. The vtable-call variant of the ProcessRead family - the twin of
+# ProcessRead2_82A0C528 (same b->0->8 dispatch + 4-byte read shape).
+# Part of the 0x82A0C cluster (sibling of ProcessRead2_82A0C528 / GetOrCreateRef2_82A0C960).
+# 251 lines, 3 callees (ProcessFloatDataDispatch_8323EB40, sub_82A1B480, sub_8321DC20). No direct
+# callers found in the recompiled code (likely reached via a vtable / function-pointer table).
+[functions."0x82A0CB68"]
+name = "ProcessRead7_82A0CB68"
+
+
+# The second vtable-dispatched 4-byte element reader - the twin of ProcessRead7_82A0CB68. It invokes
+# the method at b->0->8 (passed b), then checks the remaining count (b->20) is at least 4 and copies the
+# 4 bytes at b->12 into a local scratch (r1+84), advancing the read / base / count pointers (b->4, b->12,
+# b->20) past the element. The decoded element is dispatched to ProcessFloatDataDispatch_8323EB40 /
+# sub_82A1B480 (the shared decode helper) and, in one branch, to sub_8321D6B0. Reached only via a
+# vtable / function-pointer table (no direct callers in the recompiled code). Part of the 0x82A0D cluster.
+# 251 lines, 3 callees (ProcessFloatDataDispatch_8323EB40, sub_82A1B480, sub_8321D6B0). No direct callers
+# found in the recompiled code (likely reached via a vtable / function-pointer table).
+[functions."0x82A0D1D0"]
+name = "ProcessRead9_82A0D1D0"
+
+
+# Destructor for a 20-byte object - the twin of Destruct6_82A11E68. It first points the object's first
+# field at a fixed target (r11 + 6676, a 0x82A11 target value), then tears down the 20-byte member
+# (Destruct20Byte_832156E0). When the low bit of the flag argument (r4) is set it also releases the object
+# itself (Free_SizeBucketed_Thunk_8221BE68); otherwise the object memory is left for the caller. Reached
+# only via a vtable / function-pointer table (no direct callers in the recompiled code). Part of the
+# 0x82A11 destruct cluster (sibling of Destruct6_82A11E68 / ReturnConstant_1024_82A11E60).
+# 56 lines, 2 callees (Destruct20Byte_832156E0, Free_SizeBucketed_Thunk_8221BE68). No direct callers found
+# in the recompiled code (likely reached via a vtable / function-pointer table).
+[functions."0x82A11F30"]
+name = "Destruct8_82A11F30"
+
+
+# Copies a 28-byte struct (four 32-bit values followed by three 32-bit floats) from src to dst. It first
+# tests whether the source and the size argument are equal and bails if so (an empty / no-op copy), then
+# walks the struct field-by-field: dst->0, dst->4, dst->8, dst->12 are the four word members, and dst->16 /
+# dst->20 / dst->24 are the three float members (loaded with lfs and stored with stfs). The struct looks
+# like a small transform / material descriptor (3 ints + 1 float, then 3 more floats). Called only by
+# sub_82A142D0. Part of the 0x82A14 struct-copy cluster. 70 lines, 0 direct callees (pure field copy).
+# 1 caller: sub_82A142D0.
+[functions."0x82A141A0"]
+name = "Copy28ByteStruct_82A141A0"
+
+
+# Dispatches an object through a type switch and adjusts a running size. It first calls
+# SwitchDispatch_82A2F3E8 with (obj, b) to run the type-specific handler, capturing the returned pointer.
+# It then null-checks the result (result->4) against a .data sentinel; when the size fields allow it
+# (obj->24 > obj->20) it decrements the running offset (obj->24 -= 20) and continues processing, routing
+# further work through sub_82228D98 and sub_82A2FA28 for the per-type follow-up. This is the "dispatch one
+# object and account for its size" routine for the 0x82A2F dispatch cluster (sibling of
+# SwitchDispatch_82A2F3E8). 233 lines, 3 callees (SwitchDispatch_82A2F3E8, sub_82228D98, sub_82A2FA28). 4
+# callers (the 0x82228/0x8223B/0x82A2F/0x82A30 cluster).
+[functions."0x82A2FBE0"]
+name = "ProcessDispatchSize_82A2FBE0"
+
+
+# Validates and processes a linked structure, trapping on an invalid pointer. It takes an object (a) and a
+# linked node (c). It sets up a working frame on the stack, then walks the linked node (through c->4):
+# when a node's pointer is null or self-referential (r9 == 0 or r9 == c) it raises a trap (twi 31, r0, 22),
+# and when a node's payload (r11) does not match the expected payload (r7) it keeps advancing the structure.
+# This is the "walk this linked node, sanity-check each pointer, trap on corruption" routine for the 0x82A0F
+# linked-structure cluster, called only by DisposeSubObj_82A0F800. Part of the 0x82A0F cluster (sibling of
+# DisposeSubObj_82A0F800 / CompareObjects_82A0F120). 189 lines, 0 direct callees (pure pointer walk). 1
+# caller: DisposeSubObj_82A0F800.
+[functions."0x82A0FCA8"]
+name = "ProcessLinkedStructure_82A0FCA8"
+
+
+# A recursive processor that walks a tree of nodes, processing each node up to a bound and recursing into its
+# children. It takes a context (a: a header at a->16), a node (b: a child pointer at b->0), and a depth bound
+# (c). It reads the header's tag byte (a->16->20) and walks the node's child chain (b->0), stepping through
+# each element up to the depth bound (c, decremented each iteration). For each child whose type byte is the
+# container marker (b->0->4 == 8) it recurses (sub_82A2D590 over the child's nested node at + 88). It dispatches
+# each node's type through DispatchTypeTag_82A2D408. This is the "walk this tree, process each node up to the
+# depth bound, and recurse into container children" routine for the 0x82A2D tree cluster, used by 2 callers
+# (sub_82A202F8 / sub_82A2DAC0). Part of the 0x82A2D tree cluster (sibling of DispatchTypeTag_82A2D408 / Find
+# 0x82A2D family). 119 lines, 1 external callee + 1 recursive self-call. 2 callers.
+[functions."0x82A2D590"]
+name = "ProcessTreeRecursive_82A2D590"
+
+
+# A processor that handles a virtual object, checking a bound and driving the per-virtual processing. It takes
+# a context (a), a value (b), a bound (c), and another value (d). It first checks the bound: when c + 1 is below
+# the threshold (c + 1 <= -19) it skips the pre-pass. Otherwise it runs the pre-pass (sub_82A2C520) using a .data
+# descriptor (a .data base + 11760). It then computes the working index (c + 17) and drives the main
+# per-virtual processing (ProcessVirtual_82227940(a, 0, 0, c + 17)), copying payloads (MemCpy_SdkRuntime_82CA2C60)
+# and running the supporting virtual operations (sub_822A0F58 / sub_82A2C520). This is the "check this bound,
+# run the pre-pass, and process the virtual object" routine for the 0x82A2D virtual cluster, called only by
+# ComputeStringHash_82227EA0. Part of the 0x82A2D virtual cluster (sibling of ProcessTreeRecursive_82A2D590 /
+# ProcessVirtual_82227940). 139 lines, 4 callees. 1 caller: ComputeStringHash_82227EA0.
+[functions."0x82A2DCC8"]
+name = "ProcessVirtualBound_82A2DCC8"
+
+
+# A processor that measures a null-terminated string, hashes it, and sets up the result. It takes a context (a),
+# a value (b), and a byte string (c). It first accesses the element (AccessElement8_82A1E620). It then scans the
+# string (c), advancing byte-by-byte until it finds the terminating null, computing the length (the distance to
+# the null, minus one). It hashes the string (ComputeStringHash_82227EA0(a, c, length)) and stages the result (a
+# 4-byte descriptor at r1 + 80 / r1 + 84). It then drives the per-type dispatch (ProcessDispatchByType_82228E28).
+# This is the "measure this string, compute its hash, and dispatch on it" routine for the 0x82A1E string cluster,
+# used by 10 callers (the 0x823B1/0x823F6/0x824B1/0x824EF/0x8253E/0x82690/0x82790/0x828BB/0x828BC/0x8296A range).
+# Part of the 0x82A1E string cluster (sibling of ComputeStringHash_82227EA0 / AccessElement8_82A1E620 / Process
+# DispatchByType_82228E28). 85 lines, 3 callees. 10 callers.
+[functions."0x82A1EC08"]
+name = "ProcessAndHashString_82A1EC08"
+
+
+# A processor that copies a struct region, recomputing offsets as it goes. It takes a structure (a: a count at a->4,
+# a source at a->12, a length at a->20), a destination (b), and an offset (c). When the length (a->20) is
+# non-positive it skips the copy. Otherwise it copies the region (MemCpy_SdkRuntime_82CA2C60(b, a->12, a->20)) and
+# then recomputes the offsets - advancing the source (a->12 + a->20), the destination (a->20 + b), and the remaining
+# length (c - a->20). It recurses for the remaining data (sub_82A1B480). This is the "copy this struct region and
+# recompute the offsets, recursing for the rest" routine for the 0x82A1B struct-copy cluster, used by 10 callers
+# (CopyStructData3_8322EFB0 / CopyStructData7_83214990 / CopyStructData12_83213D10 and the 0x82A1B/0x82A85/0x82B25/
+# 0x8321D/0x8322F range). Part of the 0x82A1B struct-copy cluster (sibling of CopyStructData_83214990 family /
+# MemCpy_SdkRuntime_82CA2C60). 216 lines, 2 callees. 10 callers.
+[functions."0x82A1B480"]
+name = "ProcessAndCopyStructRegion_82A1B480"
+
+
+# A processor that drives a virtual call, computes a clamped offset, and stores the result. It takes a structure (a:
+# a vtable chain at a->0, a position at a->8, a node at a->28, a bound at a->36), a value (b), and a result (c: a
+# value at c->0). It invokes a virtual method through a->0 (reading the method at a->0->8 and bctrl-ing into it).
+# It then computes the offset (a->8 minus the returned value) and clamps it against the bound (a->36): when the
+# offset exceeds the bound it uses the bound instead. It stores the result (c->0 = the clamped offset's source). It
+# then continues with the per-node handling (reading the node's fields at a->28->0->20). This is the "drive this
+# virtual call, clamp the offset, and store the result" routine for the 0x82A1C offset-clamp cluster, referenced by
+# no other function. Part of the 0x82A1C offset-clamp cluster (sibling of ClampRange_822F6480 / ProcessClampOffset
+# family). 89 lines, 0 callees. 0 callers (vtable / external).
+[functions."0x82A1CF98"]
+name = "ProcessAndClampOffset_82A1CF98"
+
+
+# A comparator that returns 1 when a value is below a bound, else 0. It takes a structure (a: a bound at a->36) and
+# a value (b). It reads the bound (a->36) and compares the value (b) against it: when the value (b) is strictly below
+# the bound it returns 1; otherwise (b at or above the bound) it returns 0. This is the "is this value below the
+# bound" predicate for the 0x82A1D bound-compare cluster, referenced by no other function. Part of the 0x82A1D
+# bound-compare cluster (sibling of ProcessAndClampOffset_82A1CF98 / ClampRange_822F6480). 19 lines, 0 callees. 0
+# callers (vtable / external).
+[functions."0x82A1D030"]
+name = "IsBelowBound_82A1D030"
+
+
+# A processor that reports an error, adjusts a counter, and updates a linked list. It takes two values (a and c: a
+# counter at c->8), three values (b, d, e), and a value (f). When the two values (a, c) differ it reports the error
+# (ProcessError_82A0F630(f)) and adjusts the counter (c->8 -= f). It then updates the linked list (resolving the
+# next/previous links at the values' + 4 fields and splicing them together). This is the "report the mismatch, adjust
+# the counter, and relink the list" routine for the 0x82A0F counter-adjust cluster, used by 2 callers (Construct48Byte
+# Node2_82A0EDF0 and sub_82A0F3B8). Part of the 0x82A0F counter-adjust cluster (sibling of ProcessError_82A0F630 /
+# ProcessAndResolvePointer3_82A0F160). 85 lines, 1 callee. 2 callers.
+[functions."0x82A0F528"]
+name = "ProcessAndAdjustCounter_82A0F528"
+
+
+# A processor that reads a float value (converting it through double), then processes the elements. It takes a value
+# (a), a structure (b: a start at b->4, an end at b->8), and a value (c). It reads the start (b->4) and end (b->8),
+# computes the count ((b->8 - b->4) / 8, i.e. 8-byte elements), and reads the element just before the end (b->8 - 8),
+# resolving the float value (at the element's + 4 field, converted int -> double -> float). It then, when the count
+# is positive, iterates the elements processing each (the per-element handling, and the subsystem initialization
+# InitializeSubsystems_83232BB8). This is the "read this float value (with conversion) and process the elements"
+# routine for the 0x82A13 float-process cluster, called only by ProcessDispatchValue2_832351B0. Part of the 0x82A13
+# float-process cluster (sibling of ProcessDispatchValue2_832351B0 / ProcessAndConvertFloat_82BCA588). 365 lines, 1
+# callee. 1 caller: ProcessDispatchValue2_832351B0.
+[functions."0x82A139D0"]
+name = "ProcessAndConvertFloatElements_82A139D0"
+
+
+# A processor (second variant) that reads a float value (converting it through double), then processes the elements. It
+# takes a value (a), a structure (b: a start at b->4, an end at b->8), and a value (c). It reads the start (b->4) and
+# end (b->8), computes the count ((b->8 - b->4) / 8, i.e. 8-byte elements), and reads the element just before the end
+# (b->8 - 8), resolving the float value (at the element's + 4 field, converted int -> double -> float). It then, when
+# the count is positive, iterates the elements processing each (the per-element handling, and the one-time tree setup
+# OneTimeInitTree_83233B40). This is the "read this float value (with conversion) and process the elements (second
+# variant)" routine for the 0x82A13 float-process cluster, called only by ProcessDispatchValue2_832351B0. Part of the
+# 0x82A13 float-process cluster (sibling of ProcessAndConvertFloatElements_82A139D0 / OneTimeInitTree_83233B40). 377
+# lines, 1 callee. 1 caller: ProcessDispatchValue2_832351B0.
+[functions."0x82A134B8"]
+name = "ProcessAndConvertFloatElements2_82A134B8"
+
+
+# A popper that, when the field is non-zero, pops the value. It takes a structure (b: a pointer at b->0, a value at
+# b->4) and an output (c: a value at c->0). When the field (b->4) is zero, it returns 0 (nothing to pop). Otherwise it
+# pops the value: it stores the value (c->0 = b->4), returns the pointer (b->0), and zeroes the field (b->4 = 0). This
+# is the "when this field is non-zero, pop the value (store the value, return the pointer, and zero the field)" routine
+# for the 0x82A1F value cluster, a small helper (0 direct callers in the recompiled code - likely called via a function
+# pointer or from a small number of large functions). Part of the 0x82A1F value cluster. 25 lines, 0 callees. 0 direct
+# callers.
+[functions."0x82A1FF68"]
+name = "PopValue_82A1FF68"
+
+
+# A processor that, when the condition is met, performs the processing, computes the string hash, and appends the node.
+# It takes a structure (a: a node pointer at a->8, a structure at a->16, with two values at a->16->64 and a->16->68), a
+# value (b), and a value (c). It reads the two values (a->16->68, a->16->64) and, when the condition is met (a->16->68 >=
+# a->16->64), performs the processing (sub_82179350). It then computes the string hash (ComputeStringHash_82227EA0) and
+# appends the node (a->8->0 = a, a->8->4 = 4, the type tag, advancing a->8 += 8). This is the "when this condition is met,
+# perform the processing, compute the string hash, and append the node (with type 4)" routine for the 0x82A1E append-node
+# cluster, used by 10 callers (the 0x8244F/0x825D0/0x82608/0x82759/0x82765/0x828B3/0x82903/0x82A1E/0x82A28/0x82A2B range).
+# Part of the 0x82A1E append-node cluster (sibling of ComputeStringHash_82227EA0 / ProcessAndAppendNode_82BC5CD8). 62
+# lines, 2 callees. 10 callers.
+[functions."0x82A1EA18"]
+name = "ProcessAndAppendStringNode_82A1EA18"
+
+
+# A processor that, when the counter is zero, queries the index, increments the counter, and reads the byte. It takes a
+# structure (a: a counter at a->0, a pointer at a->4, whose byte is at a->4->0). When the counter (a->0) is non-zero, it
+# uses the existing state. Otherwise it queries the index (ProcessAndQueryIndex_82BCD8A8); when the result is -1, it
+# returns. Otherwise it increments the counter (a->0 += 1), decrements a->4 (a->4 -= 1), and reads the byte (a->4->0).
+# This is the "when this counter is zero, query the index, increment the counter, and read the byte" routine for the 0x82A2C
+# query-advance cluster, used by 2 callers (sub_82A2E630 and sub_82BCD460). Part of the 0x82A2C query-advance cluster
+# (sibling of ProcessAndQueryIndex_82BCD8A8). 68 lines, 1 callee. 2 callers.
+[functions."0x82A2C6E0"]
+name = "ProcessAndQueryAndAdvance_82A2C6E0"
+
+
+# A processor that constructs a lowercased string from a buffer (alternate form). It takes a result slot (a: a string at a->0), a
+# buffer (b: a structure whose method table is at b->0->20), and a flag word. When the flag's low byte is set, it calls the buffer's
+# virtual method (b->0->20) to extract a string into a stack temporary, converts it to lowercase (ProcessToLower), constructs a new
+# string from it (ProcessConstructString), and stores the result at a->0. It then destroys both temporaries (DestructRefCounted).
+# This is the "build a lowercase copy of this buffer's string" routine, part of the 0x82A1C string cluster (sibling of
+# ProcessAndConstructLowerString_82B40708). 164 lines. 4 callees (ProcessToLower, ProcessConstructString, ProcessAndCopyStructRegion,
+# DestructRefCounted). 4 callers.
+[functions."0x82A1C7F0"]
+name = "ProcessAndConstructLowerString2_82A1C7F0"
+
+
+# A processor that compares two element structures and processes the result. It takes two structures (a and b, each with a head pointer
+# at ->0 and an extra field at ->4). When a and b are the same pointer it returns early. Otherwise it builds a local descriptor from the
+# head pointers and the ->4 fields (storing several of them on the stack), then walks and compares the two element values, and invokes
+# ProcessAndAdjustCounter_82A0F528 to adjust counters. This is the "compare these two elements and process the result" routine, part of
+# the 0x82A0F element cluster. 210 lines. 1 callee (ProcessAndAdjustCounter_82A0F528). 1 caller (Construct48ByteNode2).
+[functions."0x82A0F3B8"]
+name = "ProcessAndCompareElements_82A0F3B8"
+
+
+# A processor that clears a structure's fields and processes. It takes a structure (a: fields at a->4, a->8, and a->12) and a value. It clears
+# the three fields to 0. When the value is non-zero it calls sub_82A1DC28 (a process step) with (a, value); when the value is zero it sets the
+# result to 0. It then checks the low byte of the result; when it is non-zero it reads a->4 and performs further processing (with different
+# paths for the zero and non-zero value cases). This is the "clear these fields and process" routine, part of the 0x82A1D field cluster. 82
+# lines. 1 callee (sub_82A1DC28). 2 callers.
+[functions."0x82A1D980"]
+name = "ProcessAndClearFields_82A1D980"
+
+
+# A processor that allocates memory and sets up a structure's fields. It takes a structure (a: fields at a->4, a->8, and a->12) and a value.
+# When the value is greater than -1 it calls sub_82A97648 (a process step); otherwise it allocates and initializes memory (Allocate_Init_821A9258)
+# and stores the result into a->4 and a->8, and the result plus the value into a->12. It returns 1. This is the "allocate and set up these
+# fields" routine, part of the 0x82A1D field cluster. 65 lines. 2 callees (Allocate_Init, sub_82A97648). 1 caller (ProcessAndClearFields_82A1D980).
+[functions."0x82A1DC28"]
+name = "ProcessAndAllocateFields_82A1DC28"
+
+
+# A processor that computes a size and processes. It takes a value, a structure (a: a field at a->20), and another value. When the second value
+# is zero it stores a .data descriptor into a->20 and takes one path. Otherwise it computes a size by right-shifting the second value minus 1
+# until it is less than 256 (tracking the shift amount), and uses that to determine the processing. It then performs further processing using
+# ProcessVirtual_82227940 and sub_82A2C520. This is the "compute this size and process" routine, part of the 0x82A2F size cluster. 172 lines.
+# 2 callees (ProcessVirtual, sub_82A2C520). 2 callers.
+[functions."0x82A2F750"]
+name = "ProcessAndComputeSize_82A2F750"
+
+
+# A processor that computes and grows the data. It takes a value (a), a structure (b: fields at b->8, b->20, and b->32), a value (c), and a value (d). It reads b->32 (a
+# count); when c is greater than the count it calls sub_82A2F6C0 (with a and b). It then computes the size (ProcessAndComputeSize_82A2F750, with a, b, and d). When c is
+# less than the count it stores c into b->32, computes an element offset (ProcessAndComputeElementOffset_82229260), dispatches by size (ProcessDispatchSize_82A2FBE0) and
+# value (ProcessDispatchValue_82228D98), and performs a virtual call (ProcessVirtual_82227940). It then performs further processing (sub_82A2C520). This is the "compute
+# and grow this data" routine, part of the 0x82A2F compute-grow cluster. 249 lines. 7 callees. 2 callers (including GuildChest_ProcessItems_822DE008).
+[functions."0x82A2F880"]
+name = "ProcessAndComputeAndGrow_82A2F880"
+
+
+# A processor that zeroes and processes the data. It takes a value (a) and a structure (b: a field at b->32). It zeroes a 27-element array on the stack. It then reads
+# b->32 (a count) and iterates over the count: it validates the float value (ValidateFloatValue_82A2F620) and computes and grows the data (ProcessAndComputeAndGrow_82A2F880,
+# with a and b). This is the "zero and process this data" routine, part of the 0x82A2F process cluster. 257 lines. 2 callees (ValidateFloatValue, ProcessAndComputeAndGrow).
+# 1 caller (ProcessDispatchSize_82A2FBE0).
+[functions."0x82A2FA28"]
+name = "ProcessAndZeroAndProcess_82A2FA28"
+
+
+# A processor that queries and processes the data (second form). It takes a structure (a: fields at a->0, a->4, and a->12). It reads a->4 and queries and processes it
+# (ProcessAndQueryAndProcess_82179420, with a->4). When the result is non-zero it performs further processing (sub_82A2ED28, with a->0, two .data pointers, a->12, and a fourth .data pointer)
+# and then processes (sub_821E51D0, with a->0 and 3). This is the "query and process this data" routine (second form), part of the 0x82A36 process cluster. 59 lines. 3 callees
+# (ProcessAndQueryAndProcess, sub_82A2ED28, and sub_821E51D0). 3 callers (sub_82A36F40, sub_82A365D0, and sub_82A363F0).
+[functions."0x82A36390"]
+name = "ProcessAndQueryAndProcess2_82A36390"
+
+
+# A processor that queries and dispatches the data. It takes a structure (a: a field at a->16), a value (b), a value (c), and a value (d). It computes c times d and queries and processes
+# (ProcessAndQueryAndProcess2_82A36390, with a, b, and the product). It then reads a->16 (a value). When a->16 is non-zero and d minus 1 is at most 7 it performs a table lookup (a .data pointer
+# indexed by d minus 1 times 4) and dispatches (bctr). This is the "query and dispatch this data" routine, part of the 0x82A36 process cluster. 213 lines. 3 callees (ProcessAndQueryAndProcess2,
+# sub_82A2ED28, and sub_821E51D0). 5 callers (sub_82A365D0, sub_82A36D00, sub_82A36648, sub_82A36560, and sub_82A36910).
+[functions."0x82A363F0"]
+name = "ProcessAndQueryAndDispatch_82A363F0"
+
+
+# A processor that performs a virtual operation and stores the data. It takes a value (a) and a structure (b: fields at b->16 and b->32). It computes a plus 1. When the result is at most a specific .data
+# constant it performs a virtual operation (ProcessVirtual_82227940, with a, b->16, b->32 times 8, and a times 8). When the result is greater it performs further processing (sub_82A2C520, with a .data pointer).
+# It then stores the result into b->16. This is the "perform a virtual operation and store this data" routine, part of the 0x82A2F process cluster. 89 lines. 2 callees (ProcessVirtual and sub_82A2C520).
+# 2 callers (ProcessAndComputeAndGrow_82A2F880 and sub_822277C0).
+[functions."0x82A2F6C0"]
+name = "ProcessAndVirtualAndStore_82A2F6C0"
+
+
+# A processor that dispatches and processes the data (third form). It takes a structure (a: field at a->8), a value (b), and a value (c). It accesses an element (AccessElement8_82A1E620, with a). It
+# then reads the element's +0 and +4 fields and stores them into a->8's +0 and +4. It then searches for a character (FindChar_82CA3980, with b and 46), computes a hash (ComputeStringHash_82227EA0),
+# dispatches a value type (DispatchValueType_822285D8), and processes and dispatches by type (ProcessDispatchByType_82228E28). This is the "dispatch and process this data" routine (third form), part
+# of the 0x82A1F process cluster. 319 lines. 8 callees (including AccessElement8, FindChar, and ProcessDispatchByType). 3 callers (sub_82A1F740, sub_82A298E8, and sub_82A294B0).
+[functions."0x82A1FA08"]
+name = "ProcessAndDispatchAndProcess3_82A1FA08"
+
+
+# A processor that finds and processes the data (third form). It takes a structure (a: fields at a->0 and a->4) and a value (b). It walks the chain and finds (WalkChainFind_83239FA8, with a .data
+# pointer, b, and a local buffer). When the result is non-zero it stores 0 into a->0 and a->4 and releases (Release_RefCounted_829FF648, with a local buffer and b). This is the "find and process
+# this data" routine (third form), part of the 0x82A0D process cluster. 233 lines. 5 callees (Allocate_OrDbgBreak, Construct32ByteVector2, ProcessRefCount, Release_RefCounted, and WalkChainFind).
+# 1 caller (StateDispatch4_83220888).
+[functions."0x82A0D630"]
+name = "ProcessAndFindAndProcess3_82A0D630"
+
+
+# A processor that copies and processes the data (fourth form). It takes a value (a), a structure (b: fields at b->0, b->4, b->12, and b->20), a value (c), and a value (d). It reads b->0 (a
+# pointer) and performs a vcall via the pointer's +8 field (bctrl). It then reads b->20 (a count). When the count is at least 4 it copies the bytes (from b->12) into a local buffer and processes
+# the data (ProcessFloatDataDispatch_8323EB40, with a local buffer and the count). This is the "copy and process this data" routine (fourth form), part of the 0x82A0D process cluster. 251 lines.
+# 3 callees (ProcessAndCopyStructRegion, ProcessFloatDataDispatch, and sub_8321D458). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82A0D878"]
+name = "ProcessAndCopyAndProcess4_82A0D878"
+
+
+# A processor that iterates and processes the data. It takes a structure (a: fields at a->20 and a->40) and a value (b). It reads a->20 (a pointer). When b is greater than 0 it reads a->40 (a pointer) and iterates the list (from a->20 to a->40), reading
+# each element's +4 field (a pointer). It decrements b for each element; when the element's +6 field (a byte) is zero it also decrements b by the element's +20 field. This is the "iterate and process this data" routine, part of the 0x82A2B process
+# cluster. 82 lines. 0 callees (leaf function). 12 callers (sub_82BD5590, sub_82BF94E0, sub_82BCFD70, sub_82A294B0, sub_82A2A388, sub_82A1F360, sub_82BD0E28, sub_82A2A028, sub_82BF63F8, sub_82BD00D0, sub_82BF7A38, and sub_82BF8820).
+[functions."0x82A2B3C0"]
+name = "ProcessAndIterateAndProcess_82A2B3C0"
+
+
+# A processor that counts and processes the data. It takes a value (a), a value (b), and a value (c). When a is non-zero it counts the elements (from c) by reading each 8-byte element's +0 field. It then processes the counted elements (ProcessAndDispatchAndProcess3_82A1FA08, with b, a .data pointer (8136), -10000, and other values). This is the "count and process this data" routine, part of the 0x82A1F process cluster. 203 lines. 8 callees (GrowAndZeroBuffer, ProcessAndAccessAndShift, ProcessAndDispatchAndProcess3, ProcessAndHashAndDispatch, ProcessAndHashString, ProcessAndResolveTypedField, ProcessAndCopyAndProcess5, and sub_82A1F3F8). 8 callers (sub_82A24590, sub_82A1F738, sub_8220AFD0, sub_822E38E0, sub_82A23340, sub_82A298E8, sub_82A27460, and sub_82A23198).
+[functions."0x82A1F740"]
+name = "ProcessAndCountAndProcess_82A1F740"
+
+
+# A processor that computes and processes the data (thirtieth form). It takes a value (a), a structure (b: fields at b->4 and b->8), and a value (c). It reads b->8 (a pointer) and b->4 (a pointer) and computes (b->8 minus b->4) shifted right by 3. It then processes and finds (ProcessAndFindAndProcess2_83233268, with other values). This is the "compute and process this data" routine (thirtieth form), part of the 0x82A13 process cluster. 365 lines. 1 callee (ProcessAndFindAndProcess2). 1 caller (ProcessDispatchValue2_832351B0).
+[functions."0x82A13750"]
+name = "ProcessAndComputeAndProcess30_82A13750"
+
+
+# A processor that dispatches and processes the data (nineteenth form). It takes a structure (a: fields at a->20, a->40, and a->72) and a pointer (b). It reads a->20 (a pointer) and a->40 (a pointer); when they are equal it reads a->72 (a value). It then dispatches virtually (ProcessAndDispatchVirtual2_8229B748, with a and 0). This is the "dispatch and process this data" routine (nineteenth form), part of the 0x82A1E process cluster. 103 lines. 2 callees (ProcessAndDispatchVirtual2 and ProcessAndIncrementAndProcess3). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82A1ED58"]
+name = "ProcessAndDispatchAndProcess19_82A1ED58"
+
+
+# A processor that dispatches and processes the data (twentieth form). It takes a structure (a: fields at a->0 and a->12). It queries and dispatches (ProcessAndQueryAndDispatch_82A363F0, with a local buffer, 1, and 4). When the result is negative it processes (sub_82A2ED28, with a->0, a->12, a .data pointer (14016), and a .data pointer (14072)). It then processes (sub_821E51D0, with a->0 and 3). This is the "dispatch and process this data" routine (twentieth form), part of the 0x82A36 process cluster. 65 lines. 3 callees (ProcessAndQueryAndDispatch, sub_821E51D0, and sub_82A2ED28). 3 callers (sub_82A36D00, sub_82A36648, and sub_82A36910).
+[functions."0x82A36560"]
+name = "ProcessAndDispatchAndProcess20_82A36560"
+
+
+# A processor that queries and processes the data (fourth form). It takes a structure (a: fields at a->0 and a->8). It processes and queries and dispatches (ProcessAndQueryAndDispatch_82A363F0, with a, a local pointer, 1, and 4). It then processes and grows (ProcessAndGrowAndProcess5_821B2788, with a, the local pointer, and the result). This is the "query and process this data" routine (fourth form), part of the 0x82A36 process cluster. 73 lines. 4 callees (ComputeStringHash, ProcessAndQueryAndDispatch, ProcessAndQueryAndProcess2, and ProcessAndGrowAndProcess5). 2 callers (sub_82A36648 and sub_82A36D00).
+[functions."0x82A365D0"]
+name = "ProcessAndQueryAndProcess4_82A365D0"
+
+
+# A processor that copies and processes the data (ninth form). It takes a structure (a: fields at a->12, a->16, a->20, and a->28), a value (b), and a value (c). It copies and processes the data (CheckedCopy_82CA3808, with a and b). It then copies the data (MemCpy_SdkRuntime_82CA2C60, with other values). This is the "copy and process this data" routine (ninth form), part of the 0x82A1D process cluster. 128 lines. 3 callees (CheckedCopy, MemCpy_SdkRuntime, and sub_82A1DA08). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82A1D838"]
+name = "ProcessAndCopyAndProcess9_82A1D838"
+
+
+# A processor that allocates and processes the data (ninth form). It takes a structure (a: fields at a->4, a->8, and a->12), a value (b), and a value (c). It allocates and initializes (Allocate_Init_821A9258, with a). It then copies the data (CheckedCopy_82CA3808, with a and b). This is the "allocate and process this data" routine (ninth form), part of the 0x82A1D process cluster. 324 lines. 4 callees (Allocate_Init, CheckedCopy, Free_SizeBucketed_Thunk, and sub_82A97648). 1 caller (ProcessAndCopyAndProcess9).
+[functions."0x82A1DA08"]
+name = "ProcessAndAllocateAndProcess9_82A1DA08"
+
+
+# A processor that hashes and processes the data (fifth form). It takes a structure (a: field at a->8) and a value (b). It hashes and dispatches (ProcessAndHashAndDispatch_82228488, with a and b). It then checks and processes the data (ProcessAndCheckAndProcess6_821E1768, with other values). This is the "hash and process this data" routine (fifth form), part of the 0x82A1F process cluster. 103 lines. 3 callees (ProcessAndCheckAndProcess6, ProcessAndHashAndDispatch, and ProcessAndHashString). 10 callers (sub_82A298E8, sub_825BD148, sub_82903620, sub_827EFE48, sub_8290B260, sub_8260C3B8, sub_82845010, sub_827F96B8, sub_8290B948, and sub_8253B3F0).
+[functions."0x82A1F5B0"]
+name = "ProcessAndHashAndProcess5_82A1F5B0"
+
+
+# A processor that processes the data (thirty-third form). It takes a value (a) and a value (b). It processes the data (a and b). This is the "process this data" routine (thirty-third form), part of the 0x82A2F process cluster. 140 lines. 1 callee (ProcessAndComputeElementOffset). 1 caller (ProcessAndSearchAndProcess7).
+[functions."0x82A2FD80"]
+name = "ProcessAndProcessAndProcess33_82A2FD80"
+
+
+# A processor that processes the data (thirty-fourth form). It takes a value (a) and a value (b). It processes the data (a and b). This is the "process this data" routine (thirty-fourth form), part of the 0x82A3B process cluster. 103 lines. 0 callees (leaf function — performs raw memory operations). 1 caller (ProcessAndProcessAndProcess29).
+[functions."0x82A3B298"]
+name = "ProcessAndProcessAndProcess34_82A3B298"
+
+
+# A processor that processes the data (one hundred and forty-third form). It takes a value (a), a value (b), and a value (c). It processes the data (a, b, and c). This is the "process this data" routine (one hundred and forty-third form), part of the 0x82A1B process cluster. 112 lines. 3 callees (ConstructRefCounted, sub_82A1C918, and sub_82A1D770). 9 callers (sub_82B80D70, sub_82A855A8, sub_82B7CD18, sub_828839A8, sub_82AAAC20, sub_8322F940, sub_82A576E8, sub_82A51178, and sub_82B5C8B0).
+[functions."0x82A1B8C8"]
+name = "ProcessAndProcessAndProcess143_82A1B8C8"
+
+
+# A processor that processes the data (one hundred and forty-fourth form). It takes a value (a), a value (b), and a value (c). It processes the data (a, b, and c). This is the "process this data" routine (one hundred and forty-fourth form), part of the 0x82A1C process cluster. 169 lines. 4 callees (Free_SizeBucketed_Thunk, MemCpy_SdkRuntime, ProcessAndCopyStructRegion, and ProcessAndAllocateAndProcess19). 1 caller (ProcessAndProcessAndProcess143).
+[functions."0x82A1C918"]
+name = "ProcessAndProcessAndProcess144_82A1C918"
+
+
+# A processor that processes the data (one hundred and forty-fifth form). It takes a structure (a: fields at a->0 and a->16) and a structure (b: fields at b->12, b->16, b->20, and b->24). It processes the data (a and b). This is the "process this data" routine (one hundred and forty-fifth form), part of the 0x82A1D process cluster. 68 lines. 2 callees (DestructRefCounted and Free_SizeBucketed_Thunk). 2 callers (sub_82A1D720 and ProcessAndProcessAndProcess143).
+[functions."0x82A1D770"]
+name = "ProcessAndProcessAndProcess145_82A1D770"
+
+
+# A processor that processes the data (one hundred and forty-sixth form). It takes a structure (a: field at a->8), a value (b), and a value (c). It processes the data (a, b, and c). This is the "process this data" routine (one hundred and forty-sixth form), part of the 0x82A29 process cluster. 86 lines. 2 callees (ProcessAndAppendStringNode and ProcessAndHashString). 1 caller (sub_82A298E8).
+[functions."0x82A29850"]
+name = "ProcessAndProcessAndProcess146_82A29850"
+
+
+# A processor that processes the data (one hundred and forty-seventh form). It takes a structure (a: fields at a->20 and a->24) and a structure (b: fields at b->4, b->12, and b->16). It processes the data (a and b). This is the "process this data" routine (one hundred and forty-seventh form), part of the 0x82A2B process cluster. 53 lines. 0 callees (no function calls). 6 callers (sub_82A2C220, sub_82BC9320, sub_82BC88B8, sub_82A2BFE0, sub_82A2B450, and sub_82BC9560).
+[functions."0x82A2B328"]
+name = "ProcessAndProcessAndProcess147_82A2B328"
+
+
+# A processor that processes the data (one hundred and forty-eighth form). It takes a value (a), a structure (b: field at b->0), and a value (c). It processes the data (a, b, and c). This is the "process this data" routine (one hundred and forty-eighth form), part of the 0x82A2E process cluster. 293 lines. 3 callees (StringCopyN, sub_82CA5E70, and sub_82CA99C8). 12 callers (sub_82A30E20, ProcessAndIncrementAndProcess2, sub_82A2C520, sub_82BC8A10, sub_82BCDAF8, sub_82BDDC28, sub_82A312B0, sub_82A2B660, ProcessAndDispatchByCounter, sub_82A323C0, sub_82A32C30, and sub_82A30A58).
+[functions."0x82A2ED70"]
+name = "ProcessAndProcessAndProcess148_82A2ED70"
+
+
+# A processor that processes the data (two hundred and eighty-third form). It takes a structure (a: fields at a->4 and a->8). It processes the data (a). This is the "process this data" routine (two hundred and eighty-third form), part of the 0x82A0B process cluster. 67 lines. 1 callee (Free_SizeBucketed_Thunk). 11 callers (sub_83216518, sub_82A10950, sub_8323E5D8, sub_83217058, sub_8323C5C0, sub_8323BAC8, sub_8323F120, sub_8321F618, sub_8323A908, sub_8323B040, and sub_8323D6D0).
+[functions."0x82A0B9D0"]
+name = "ProcessAndProcessAndProcess283_82A0B9D0"
+
+
+# A processor that processes the data (two hundred and eighty-fourth form). It takes a structure (a: fields at a->4 and a->8). It processes the data (a). This is the "process this data" routine (two hundred and eighty-fourth form), part of the 0x82A0B process cluster. 67 lines. 1 callee (Free_SizeBucketed_Thunk). 11 callers (sub_8323B040, sub_8323D6D0, sub_82A10950, sub_83216518, sub_8323F120, sub_8323BAC8, sub_8323A908, sub_83217058, sub_8323C5C0, sub_8323E5D8, and sub_8321F618).
+[functions."0x82A0BA38"]
+name = "ProcessAndProcessAndProcess284_82A0BA38"
+
+
+# A processor that processes the data (two hundred and eighty-fifth form). It takes a structure (a: fields at a->0, a->96, and a->140) and a value (b). It processes the data (a and b). This is the "process this data" routine (two hundred and eighty-fifth form), part of the 0x82A10 process cluster. 69 lines. 3 callees (Free_SizeBucketed_Thunk, ProcessAndProcessAndProcess283, and ProcessAndProcessAndProcess284). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82A10950"]
+name = "ProcessAndProcessAndProcess285_82A10950"
+
+
+# A processor that processes the data (two hundred and eighty-sixth form). It takes a structure (a: fields at a->0, a->4, a->8, a->12, a->16, a->20, a->24, a->28, a->32, and a->36) and a value (b). It processes the data (a and b). This is the "process this data" routine (two hundred and eighty-sixth form), part of the 0x82A1C process cluster. 101 lines. 2 callees (Allocate_OrDbgBreak and UpdateRegion). 5 callers (sub_82B7CD18, sub_82A4BE40, ProcessAndProcessAndProcess211, sub_824EB4F8, and sub_82AA9548).
+[functions."0x82A1CDD8"]
+name = "ProcessAndProcessAndProcess286_82A1CDD8"
+
+
+# A processor that processes the data (two hundred and eighty-seventh form). It takes a structure (a: fields at a->28, a->32, and a->36). It processes the data (a). This is the "process this data" routine (two hundred and eighty-seventh form), part of the 0x82A1C process cluster. 97 lines. 1 callee (Free_SizeBucketed_Thunk). 6 callers (ProcessAndProcessAndProcess211, sub_82A1CE88, sub_82AA9548, sub_82B7CD18, sub_824EB4F8, and sub_82A4BE40).
+[functions."0x82A1CEF0"]
+name = "ProcessAndProcessAndProcess287_82A1CEF0"
+
+
+# A processor that processes the data (two hundred and eighty-eighth form). It takes a structure (a: fields at a->8, a->20, and a->40) and a value (b). It processes the data (a and b). This is the "process this data" routine (two hundred and eighty-eighth form), part of the 0x82A1E process cluster. 203 lines. 3 callees (AccessElement8, sub_82A2C520, and sub_82A2C778). 2 callers (sub_82A298E8 and sub_82BF5F40).
+[functions."0x82A1E778"]
+name = "ProcessAndProcessAndProcess288_82A1E778"
+
+
+# A processor that processes the data (two hundred and eighty-ninth form). It takes a structure (a: fields at a->0 and a->4). It processes the data (a). This is the "process this data" routine (two hundred and eighty-ninth form), part of the 0x82A1E process cluster. 12 lines. 1 callee (sub_82228C70). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82A1ED48"]
+name = "ProcessAndProcessAndProcess289_82A1ED48"
+
+
+# A processor that processes the data (two hundred and ninetieth form). It takes a structure (a: field at a->8), a value (b), a value (c), and a value (d). It processes the data (a, b, c, and d). This is the "process this data" routine (two hundred and ninetieth form), part of the 0x82A1E process cluster. 100 lines. 1 callee (ProcessAndSetjmpAndProcess2). 9 callers (sub_82A2ADF8, ProcessAndProcessAndProcess268, sub_82A1FF90, sub_82A1A768, sub_82A1FED0, sub_82A21B50, sub_82A1A360, sub_82A1FFC8, and sub_82A21DE0).
+[functions."0x82A1EE10"]
+name = "ProcessAndProcessAndProcess290_82A1EE10"
+
+
+# A processor that processes the data (two hundred and ninety-first form). It takes a value (a) and a structure (b: field at b->16). It processes the data (a and b). This is the "process this data" routine (two hundred and ninety-first form), part of the 0x82A20 process cluster. 149 lines. 1 callee (sub_821E51D0). 2 callers (sub_82A20198 and sub_82A20410).
+[functions."0x82A20020"]
+name = "ProcessAndProcessAndProcess291_82A20020"
+
+
+# A processor that processes the data (two hundred and ninety-second form). It takes a value (a) and a structure (b: fields at b->32, b->40, b->44, and b->48). It processes the data (a and b). This is the "process this data" routine (two hundred and ninety-second form), part of the 0x82A20 process cluster. 61 lines. 1 callee (ProcessVirtual). 2 callers (sub_82A202F8 and DispatchTypeTag).
+[functions."0x82A20130"]
+name = "ProcessAndProcessAndProcess292_82A20130"
+
+
+# A processor that processes the data (two hundred and ninety-third form). It takes a structure (a: fields at a->16, a->72, and a->76). It processes the data (a). This is the "process this data" routine (two hundred and ninety-third form), part of the 0x82A20 process cluster. 196 lines. 4 callees (ComputeStringHash, ProcessAndVirtualAndProcess, sub_822A0F58, and ProcessAndProcessAndProcess291). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82A20198"]
+name = "ProcessAndProcessAndProcess293_82A20198"
+
+
+# A processor that processes the data (two hundred and ninety-fourth form). It takes a structure (a: fields at a->16 and a->32). It processes the data (a). This is the "process this data" routine (two hundred and ninety-fourth form), part of the 0x82A20 process cluster. 158 lines. 3 callees (ProcessTreeRecursive, sub_8222B4C0, and ProcessAndProcessAndProcess292). 2 callers (ProcessAndProcessAndProcess267 and sub_82A20528).
+[functions."0x82A202F8"]
+name = "ProcessAndProcessAndProcess294_82A202F8"
+
+
+# A processor that processes the data (two hundred and ninety-fifth form). It takes nothing. It processes the data. This is the "process this data" routine (two hundred and ninety-fifth form), part of the 0x82A20 process cluster. 269 lines. 7 callees (HeapAllocate, ProcessAndSetjmpAndProcess, sub_82195930, sub_824149C8, sub_828457F0, ProcessAndProcessAndProcess294, and sub_82CBBB58). 1 caller (ProcessAndProcessAndProcess266).
+[functions."0x82A20528"]
+name = "ProcessAndProcessAndProcess295_82A20528"
+
+
+# A processor that processes the data (two hundred and ninety-sixth form). It takes a structure (a: field at a->16). It processes the data (a). This is the "process this data" routine (two hundred and ninety-sixth form), part of the 0x82A20 process cluster. 50 lines. 1 callee (sub_82A2D660). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82A20718"]
+name = "ProcessAndProcessAndProcess296_82A20718"
+
+
+# A processor that processes the data (two hundred and ninety-seventh form). It takes a structure (a: fields at a->8, a->72, and a->76). It processes the data (a). This is the "process this data" routine (two hundred and ninety-seventh form), part of the 0x82A23 process cluster. 235 lines. 6 callees (ProcessAndAppendStringNode, ProcessAndCheckAndProcess6, ProcessAndHashString, ProcessAndResolveTypedField, sub_82227BA0, and sub_82A1F740). 1 caller (sub_82A23340).
+[functions."0x82A23198"]
+name = "ProcessAndProcessAndProcess297_82A23198"
+
+
+# A processor that processes the data (two hundred and ninety-eighth form). It takes a value (a). It processes the data (a). This is the "process this data" routine (two hundred and ninety-eighth form), part of the 0x82A23 process cluster. 47 lines. 2 callees (sub_82A1F740 and ProcessAndProcessAndProcess297). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82A23340"]
+name = "ProcessAndProcessAndProcess298_82A23340"
+
+
+# A processor that processes the data (two hundred and ninety-ninth form). It takes nothing. It processes the data. This is the "process this data" routine (two hundred and ninety-ninth form), part of the 0x82A24 process cluster. 26 lines. 1 callee (sub_82A1F740). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82A24590"]
+name = "ProcessAndProcessAndProcess299_82A24590"
+
+
+# A processor that processes the data (three hundredth form). It takes a structure (a: field at a->8). It processes the data (a). This is the "process this data" routine (three hundredth form), part of the 0x82A27 process cluster. 122 lines. 5 callees (ProcessAndAppendStringNode, ProcessAndCheckAndProcess6, ProcessAndHashString, sub_82227BA0, and sub_82A1F740). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82A27460"]
+name = "ProcessAndProcessAndProcess300_82A27460"
+
+
+# A processor that processes the data (three hundred and first form). It takes a value (a). It processes the data (a). This is the "process this data" routine (three hundred and first form), part of the 0x82A29 process cluster. 375 lines. 13 callees (ComputeStringHash, GrowAndZeroBuffer, ProcessAndAccessAndConvert, ProcessAndCheckAndProcess6, ProcessAndDispatchAndProcess3, ProcessAndHashString, ProcessAndResolveTypedField, ProcessAndVirtualAndProcess, sub_82179350, ProcessAndProcessAndProcess288, sub_82A1F5B0, sub_82A1F740, and sub_82A29850). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82A298E8"]
+name = "ProcessAndProcessAndProcess301_82A298E8"
+
+
+# A processor that processes the data (three hundred and second form). It takes a structure (a: fields at a->36, a->44, a->48, a->72, a->73, a->74, and a->75). It processes the data (a). This is the "process this data" routine (three hundred and second form), part of the 0x82A2B process cluster. 796 lines. 0 callees. 2 callers (sub_82A2BFE0 and sub_82A36D00).
+[functions."0x82A2BA20"]
+name = "ProcessAndProcessAndProcess302_82A2BA20"
+
+
+# A processor that processes the data (three hundred and third form). It takes a structure (a: field at a->16) and a value (b). It processes the data (a and b). This is the "process this data" routine (three hundred and third form), part of the 0x82A2C process cluster. 156 lines. 1 callee (HashLookupByKey). 1 caller (ProcessAndProcessAndProcess267).
+[functions."0x82A2C8E8"]
+name = "ProcessAndProcessAndProcess303_82A2C8E8"
+
+
+# A processor that processes the data (three hundred and fourth form). It takes a structure (a: field at a->16). It processes the data (a). This is the "process this data" routine (three hundred and fourth form), part of the 0x82A2D process cluster. 124 lines. 1 callee (sub_821E51D0). 4 callers (sub_82A36D00, sub_82BF4D58, sub_82BF51D8, and sub_82A32F40).
+[functions."0x82A2DDC0"]
+name = "ProcessAndProcessAndProcess304_82A2DDC0"
+
+
+# A processor that processes the data (three hundred and fifth form). It takes a value (a) and a structure (b: fields at b->8, b->12, b->16, b->40, b->44, and b->52). It processes the data (a and b). This is the "process this data" routine (three hundred and fifth form), part of the 0x82A2D process cluster. 124 lines. 1 callee (ProcessVirtual). 1 caller (DispatchTypeTag).
+[functions."0x82A2DEA8"]
+name = "ProcessAndProcessAndProcess305_82A2DEA8"
+
+
+# A processor that processes the data (three hundred and sixth form). It takes a structure (a: field at a->16) and a structure (b: field at b->0). It processes the data (a and b). This is the "process this data" routine (three hundred and sixth form), part of the 0x82A2E process cluster. 216 lines. 5 callees (ProcessAndQueryAndAdvance, sub_82179350, sub_821E51D0, ProcessAndProcessAndProcess208, and sub_82A2E140). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82A2E630"]
+name = "ProcessAndProcessAndProcess306_82A2E630"
+
+
+# A processor that processes the data (three hundred and seventh form). It takes a structure (a: field at a->0) and a value (b). It processes the data (a and b). This is the "process this data" routine (three hundred and seventh form), part of the 0x82A36 process cluster. 413 lines. 8 callees (ProcessAndQueryAndDispatch, ProcessVirtual, sub_821E51D0, sub_82A2C520, sub_82A2ED28, sub_82A36560, sub_82A365D0, and sub_82A36D00). 1 caller (sub_82A36D00).
+[functions."0x82A36648"]
+name = "ProcessAndProcessAndProcess307_82A36648"
+
+
+# A processor that processes the data (three hundred and eighth form). It takes a structure (a: field at a->0) and a value (b). It processes the data (a and b). This is the "process this data" routine (three hundred and eighth form), part of the 0x82A36 process cluster. 570 lines. 9 callees (ComputeStringHash, ProcessAndQueryAndDispatch, ProcessAndQueryAndProcess, ProcessVirtual, sub_821B2788, sub_821E51D0, sub_82A2C520, sub_82A2ED28, and sub_82A36560). 1 caller (sub_82A36D00).
+[functions."0x82A36910"]
+name = "ProcessAndProcessAndProcess308_82A36910"
+
+
+# A processor that processes the data (three hundred and ninth form). It takes a structure (a: fields at a->0 and a->12) and a value (b). It processes the data (a and b). This is the "process this data" routine (three hundred and ninth form), part of the 0x82A36 process cluster. 324 lines. 12 callees (ProcessAndQueryAndDispatch, ProcessVirtual, sub_821E51D0, ProcessAndProcessAndProcess302, sub_82A2C520, ProcessAndProcessAndProcess304, sub_82A2E140, sub_82A2ED28, sub_82A36560, sub_82A365D0, ProcessAndProcessAndProcess307, and ProcessAndProcessAndProcess308). 2 callers (sub_82A37030 and ProcessAndProcessAndProcess307).
+[functions."0x82A36D00"]
+name = "ProcessAndProcessAndProcess309_82A36D00"
+
+
+# A processor that processes the data (three hundred and tenth form). It takes a value (a). It processes the data (a). This is the "process this data" routine (three hundred and tenth form), part of the 0x82A36 process cluster. 132 lines. 3 callees (ProcessAndQueryAndProcess2, sub_821E51D0, and sub_82A2ED28). 1 caller (sub_82A37030).
+[functions."0x82A36F40"]
+name = "ProcessAndProcessAndProcess310_82A36F40"
+
+
+# A processor that processes the data (three hundred and eleventh form). It takes a value (a), a value (b), and a structure (c: field at c->0). It processes the data (a, b, and c). This is the "process this data" routine (three hundred and eleventh form), part of the 0x82A37 process cluster. 91 lines. 3 callees (ComputeStringHash, ProcessAndProcessAndProcess309, and ProcessAndProcessAndProcess310). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82A37030"]
+name = "ProcessAndProcessAndProcess311_82A37030"
+
+
+# Process a structure by copying it (seven hundred and thirty-fifth form). It takes a structure, copies the structure (CopyStructure), and drives a sub-operation (ProcessAndProcessAndProcess503) based on the result. Part of the 0x82A3B process cluster. 110 lines. 2 callees. 0 callers.
+[functions."0x82A3B670"]
+name = "ProcessAndProcessAndProcess735_82A3B670"
+
+
+# Allocate and construct an object (seven hundred and eighty-first form). It takes a value, allocates fresh memory (Allocate_OrDbgBreak), and constructs the object (ProcessAndProcessAndProcess782). Part of the 0x82A3B process cluster. 92 lines. 2 callees. 0 callers.
+[functions."0x82A3B5D0"]
+name = "ProcessAndProcessAndProcess781_82A3B5D0"
+
+
+# Process a structure by driving sub-operations (seven hundred and one hundred and sixty-first form). It takes a structure, checks its state, and drives sub-operations (sub_82A00988, sub_82A00A18) based on the result. Part of the 0x82A00 process cluster. 105 lines. 2 callees. 3 callers (including CopyObject).
+[functions."0x82A00808"]
+name = "ProcessAndProcessAndProcess861_82A00808"
+
+
+# Process a large data structure by freeing size-bucketed memory (seven hundred and one hundred and one hundred and one hundred and forty-third form). It takes a structure, frees size-bucketed memory (Free_SizeBucketed), and drives sub-operations (sub_82A77928, sub_82A97648) based on the result. Part of the 0x82A00 process cluster. 593 lines. 3 callees. 4 callers (including ProcessAndProcessAndProcess861).
+[functions."0x82A00A18"]
+name = "ProcessAndProcessAndProcess1043_82A00A18"
+
+
+# Process a structure by freeing size-bucketed memory (seven hundred and one hundred and one hundred and one hundred and one hundred and twelfth form). It takes a structure, frees size-bucketed memory (Free_SizeBucketed), and drives a sub-operation (ProcessAndProcessAndProcess1004) based on the result. Part of the 0x82A3D process cluster. 50 lines. 2 callees. 0 callers.
+[functions."0x82A3D510"]
+name = "ProcessAndProcessAndProcess1112_82A3D510"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and thirteenth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82A3D process cluster. 8 lines. 0 callees. 0 callers.
+[functions."0x82A3D560"]
+name = "ProcessAndProcessAndProcess1113_82A3D560"
+
+
+# Process a structure by allocating fresh memory (seven hundred and one hundred and one hundred and one hundred and one hundred and fourteenth form). It takes a structure and allocates fresh memory (Allocate_OrDbgBreak). Part of the 0x82A3D process cluster. 107 lines. 1 callee. 0 callers.
+[functions."0x82A3D568"]
+name = "ProcessAndProcessAndProcess1114_82A3D568"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and fifteenth form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess1116). Part of the 0x82A3D process cluster. 13 lines. 1 callee. 0 callers.
+[functions."0x82A3D630"]
+name = "ProcessAndProcessAndProcess1115_82A3D630"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and sixteenth form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess503). Part of the 0x82A3D process cluster. 158 lines. 1 callee. 1 caller (sub_82A3D630).
+[functions."0x82A3D640"]
+name = "ProcessAndProcessAndProcess1116_82A3D640"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and nineteenth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82A3D process cluster. 72 lines. 0 callees. 4 callers (sub_823790B8, sub_823FC178, sub_82531DC0, sub_8254A3C0).
+[functions."0x82A3D4A0"]
+name = "ProcessAndProcessAndProcess1119_82A3D4A0"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and thirty-third form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82A00 process cluster. 79 lines. 0 callees. 5 callers (including ProcessAndProcessAndProcess861).
+[functions."0x82A00988"]
+name = "ProcessAndProcessAndProcess1133_82A00988"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and ninetieth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82A04 process cluster. 66 lines. 0 callees. 4 callers (ProcessAndProcessAndProcess1182, sub_82A043F0, sub_82AAB938, sub_82BE4720).
+[functions."0x82A04BC0"]
+name = "ProcessAndProcessAndProcess1190_82A04BC0"
+
+
+# Process a large data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and fifty-second form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess510) based on the result. Part of the 0x82A3C process cluster. 463 lines. 1 callee. 1 caller (sub_82A3BC58).
+[functions."0x82A3CEF0"]
+name = "ProcessAndProcessAndProcess1252_82A3CEF0"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and twenty-eighth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82A1B process cluster. 84 lines. 0 callees. 1 caller (sub_82A1B1A0).
+[functions."0x82A1B098"]
+name = "ProcessAndProcessAndProcess1328_82A1B098"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and ninety-seventh form). It takes a structure and drives a sub-operation (DelayZero). Part of the 0x82A14 process cluster. 52 lines. 1 callee. 0 callers.
+[functions."0x82A14C48"]
+name = "ProcessAndProcessAndProcess1397_82A14C48"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and fourteenth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82A1B process cluster. 79 lines. 0 callees. 2 callers (including ProcessAndProcessAndProcess1516).
+[functions."0x82A1B3E0"]
+name = "ProcessAndProcessAndProcess1514_82A1B3E0"
+
+
+# Process a structure by copying a struct region (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and seventieth form). It takes a structure, copies a struct region (ProcessAndCopyStructRegion), and drives a sub-operation (ProcessAndProcessAndProcess730) based on the result. Part of the 0x82A1B process cluster. 123 lines. 2 callees. 0 callers.
+[functions."0x82A1B988"]
+name = "ProcessAndProcessAndProcess1670_82A1B988"
+
+
+# Process a very large data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and seventy-second form). It takes a structure, computes a special function (ComputeSpecialFunction), constructs a refcounted object (ConstructRefCounted), destructs a refcounted object (DestructRefCounted), and drives sub-operations (ProcessAndProcessAndProcess1007, ProcessAndProcessAndProcess1252, ProcessAndProcessAndProcess1341, ProcessAndProcessAndProcess499, ProcessAndProcessAndProcess510, ProcessAndProcessAndProcess525, ProcessAndProcessAndProcess549, ProcessAndProcessAndProcess551, ProcessAndProcessAndProcess552, ProcessAndProcessAndProcess575, ProcessAndProcessAndProcess619, ProcessAndProcessAndProcess1677, ProcessAndProcessAndProcess1675, ProcessAndProcessAndProcess1678, ProcessAndProcessAndProcess1676) based on the result. This is one of the largest functions in the binary in the 0x82A3B process cluster. 2026 lines. 19 callees. 3 callers.
+[functions."0x82A3BC58"]
+name = "ProcessAndProcessAndProcess1672_82A3BC58"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and eighty-seventh form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess1585). This is a frequently-called helper in the 0x82A39 process cluster. 106 lines. 1 callee. 7 callers.
+[functions."0x82A39D88"]
+name = "ProcessAndProcessAndProcess1687_82A39D88"
+
+
+# Process a very large data structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and eighty-eighth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess1048, ProcessAndProcessAndProcess857) based on the result. This is a frequently-called processor in the 0x82A39 process cluster. 442 lines. 2 callees. 5 callers.
+[functions."0x82A39E30"]
+name = "ProcessAndProcessAndProcess1688_82A39E30"
+
+
+# Process a structure by freeing size-bucketed memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and thirtieth form). It takes a structure and frees size-bucketed memory (Free_SizeBucketed). This is a frequently-called helper in the 0x82A10 process cluster. 57 lines. 1 callee. 5 callers.
+[functions."0x82A10870"]
+name = "ProcessAndProcessAndProcess1730_82A10870"
+
+
+# Process a large structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and three hundred and twenty-third form). It takes a structure, checks its state, and drives sub-operations (sub_82A00E30, ProcessAndProcessAndProcess2024) based on the result. This is a frequently-called helper in the 0x82A00 process cluster. 105 lines. 2 callees. 2 callers (ProcessAndProcessAndProcess892 and sub_83227F60).
+[functions."0x82A008C8"]
+name = "ProcessAndProcessAndProcess2023_82A008C8"
+
+
+# Process a very large data structure by freeing size-bucketed memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and three hundred and twenty-fourth form). It takes a structure, frees size-bucketed memory (Free_SizeBucketed), computes and processes (ProcessAndComputeAndProcess8), and drives a sub-operation (sub_82A97648) based on the result. This is a frequently-called processor in the 0x82A00 process cluster. 593 lines. 3 callees. 2 callers (ProcessAndProcessAndProcess2023 and sub_8321E160).
+[functions."0x82A00EC0"]
+name = "ProcessAndProcessAndProcess2024_82A00EC0"
+
+
+# Process a structure by allocating fresh memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and three hundred and twenty-fifth form). It takes a structure, allocates fresh memory (Allocate_OrDbgBreak), and drives a sub-operation (sub_82A6FBD0) based on the result. Part of the 0x82A3F process cluster. 48 lines. 2 callees. 0 callers.
+[functions."0x82A3F328"]
+name = "ProcessAndProcessAndProcess2025_82A3F328"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and three hundred and twenty-sixth form). It takes a structure and drives a sub-operation (sub_82A3F510). This is a frequently-called helper in the 0x82A3F process cluster. 87 lines. 1 callee. 3 callers (CloneObject, sub_822BFD90, sub_82A3F378).
+[functions."0x82A3F478"]
+name = "ProcessAndProcessAndProcess2026_82A3F478"
+
+
+# Process a structure by freeing size-bucketed memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and four hundred and seventy-eighth form). It takes a structure, frees size-bucketed memory (Free_SizeBucketed), and drives a sub-operation (ProcessAndProcessAndProcess1824) based on the result. Part of the 0x82A08 process cluster. 50 lines. 2 callees. 0 callers.
+[functions."0x82A08B18"]
+name = "ProcessAndProcessAndProcess2178_82A08B18"
+
+
+# Process a large structure by allocating fresh memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and four hundred and eighty-third form). It takes a structure, allocates fresh memory (Allocate_OrDbgBreak), constructs and processes (ConstructAndProcess29), releases a refcounted object (Release_RefCounted), sets a value (SetValue4), and drives a sub-operation (ProcessAndProcessAndProcess2041) based on the result. Part of the 0x82A08 process cluster. 185 lines. 5 callees. 1 caller (ProcessAndProcessAndProcess1828).
+[functions."0x82A08C80"]
+name = "ProcessAndProcessAndProcess2183_82A08C80"
+
+
+# Process a structure by freeing size-bucketed memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and four hundred and ninety-eighth form). It takes a structure, frees size-bucketed memory (Free_SizeBucketed), and drives a sub-operation (ProcessAndProcessAndProcess2200) based on the result. Part of the 0x82A00 process cluster. 50 lines. 2 callees. 0 callers.
+[functions."0x82A00768"]
+name = "ProcessAndProcessAndProcess2198_82A00768"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand four hundred and fifty-fourth form). It takes a value (a) and a value (b); it checks the value's state, and drives sub-operations (Free_SizeBucketed_Thunk, ProcessAndProcessAndProcess2452, and more) based on the result. This is the "process this data" routine (two thousand four hundred and fifty-fourth form), part of the 0x82A00 process cluster. 50 lines. 2 callees. 0 callers.
+[functions."0x82A00580"]
+name = "ProcessAndProcessAndProcess2453_82A00580"
+
+
+# Process a structure by checking its state and driving many sub-operations (two thousand four hundred and fifty-fifth form). It takes a value (a), a structure (b: fields at b->4 and b->0), and a value (c); it checks the structure's state, and drives many sub-operations (Allocate_OrDbgBreak, ConstructAndProcess29, Release_RefCounted, SetValue4, ProcessAndProcessAndProcess2041, and more) based on the result. This is the "process this data" routine (two thousand four hundred and fifty-fifth form), part of the 0x82A08 process cluster. 185 lines. 5 callees. 1 caller (ProcessAndProcessAndProcess1828).
+[functions."0x82A08D98"]
+name = "ProcessAndProcessAndProcess2454_82A08D98"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand four hundred and eighty-seventh form). It takes a value (a) and a value (b); it checks the value's state, and drives sub-operations (Free_SizeBucketed_Thunk, ProcessAndProcessAndProcess2482, and more) based on the result. This is the "process this data" routine (two thousand four hundred and eighty-seventh form), part of the 0x82A00 process cluster. 50 lines. 2 callees. 0 callers.
+[functions."0x82A00530"]
+name = "ProcessAndProcessAndProcess2486_82A00530"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand four hundred and seventieth form). It takes a structure (a: fields at a->20, a->12, and a->4), a value (b), a value (c), and a value (d); it checks the value's state, and drives sub-operations (ProcessAndCopyStructRegion) based on the result. This is the "process this data" routine (two thousand four hundred and seventieth form), part of the 0x82A1D process cluster. 216 lines. 1 callee. 1 caller (ProcessAndProcessAndProcess2449).
+[functions."0x82A1D440"]
+name = "ProcessAndProcessAndProcess2519_82A1D440"
+
+
+# Process a value by checking its state (two thousand four hundred and one hundred and sixty-seventh form). It takes a structure (a: fields at a->4 and a->0) and a value (b); it checks the value's state, and stores values and floats into the structure's fields based on the result, using vector operations. This is the "process this data" routine (two thousand four hundred and one hundred and sixty-seventh form), part of the 0x82A3A process cluster. 154 lines. 0 callees. 10 callers.
+[functions."0x82A3AD50"]
+name = "ProcessAndProcessAndProcess2616_82A3AD50"

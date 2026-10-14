@@ -1,0 +1,47 @@
+# data-processing region 0x82480000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# A process (a hash table operation, the sibling of ProcessHashTable_829FC3C0 / the callee of ChainSearch_82B3D880):
+# (if a list's field, list->8, is zero) call a hash table operation (ProcessHashTable_829FC3C0, on the list's field
+# (list->4) and a value, with a flag), and (otherwise) process the list (call ProcessChain2_8250AF60 and sibling
+# operations, sub_8246E758 and sub_8273F9D8).
+
+# Args: obj (r3, r29), list (r4, r30, ->4 = a field, ->8 = a field), a (r5, r31), b (r6, r28), (more). It checks the
+# list's field (list->8, a field, a free-list pointer / a head): if it is zero (an empty state), it calls a hash table
+# operation (ProcessHashTable_829FC3C0, sub_829FC3C0, a hash table process, on the list's field (r6 = list->4), a
+# value (r7 = b), and a flag (r5 = 1), a hash table initialization / a setup). Otherwise (the list is non-empty), it
+# processes the list (call ProcessChain2_8250AF60, sub_8250AF60, a chain operation, and sibling operations, sub
+# _8246E758 and sub_8273F9D8 -- siblings in the 0x8246E/0x8273F clusters). So it's a "process (a hash table operation:
+# (if the list is empty) call a hash table operation, and (otherwise) process the list (call a chain operation and
+# siblings))" routine (a hash table process, part of the 0x824AE cluster, a sibling of ProcessHashTable_829FC3C0, a
+# callee of ChainSearch_82B3D880). 372 lines, 4 callees (ProcessHashTable_829FC3C0, ProcessChain2_8250AF60, sub
+# _8246E758, sub_8273F9D8). 2 callers: ChainSearch_82B3D880 (sub_82B3D880, a chain search), sub_824AE2E8 (a sibling in
+# the 0x824AE cluster). The list's element type (a node, a list of nodes, a hash table / a particular structure) and
+# the value's meaning (a value, a particular argument) aren't resolvable, so the name states the mechanism: a hash
+# table process ((if the list is empty) call a hash table operation, and (otherwise) process the list). The "2"
+# distinguishes it from ProcessHashTable_829FC3C0.
+[functions."0x824AEBB8"]
+name = "ProcessHashTable2_824AEBB8"
+
+
+# Process a structure by allocating and copy-assigning (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and eighty-first form). It takes a structure, allocates fresh memory (Allocate_OrDbgBreak), and copy-assigns a refcounted object (CopyAssign_RefCounted). Part of the 0x82497 process cluster. 108 lines. 2 callees. 1 caller (sub_82496EF0).
+[functions."0x82497878"]
+name = "ProcessAndProcessAndProcess1681_82497878"
+
+
+# Process a very large data structure by allocating fresh memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and one hundred and thirteenth form). It takes a structure, sets a string (SetString), frees size-bucketed memory (Free_SizeBucketed), and drives sub-operations (ProcessAndFreeAndProcess9, ProcessAndProcessAndProcess1039, ProcessAndProcessAndProcess231, sub_822F1F00, sub_824AF0E8, sub_826C3EF0, sub_826C3FA8) based on the result. Part of the 0x824AE process cluster. 583 lines. 9 callees. 7 callers.
+[functions."0x824AE5C8"]
+name = "ProcessAndProcessAndProcess1813_824AE5C8"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and five hundred and fifty-fifth form). It takes a structure and checks its state, with no external sub-operations. This is a frequently-called helper in the 0x824AF process cluster. 67 lines. 0 callees. 19 callers.
+[functions."0x824AF0E8"]
+name = "ProcessAndProcessAndProcess2255_824AF0E8"
+
+
+# Process a large structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and five hundred and sixty-fifth form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess1681). This is a frequently-called helper in the 0x82496 process cluster. 110 lines. 1 callee. 26 callers.
+[functions."0x82496EF0"]
+name = "ProcessAndProcessAndProcess2265_82496EF0"

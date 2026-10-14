@@ -317,6 +317,12 @@ namespace fable2::bootsave {
 inline void OnFrame(PPCContext& ctx, uint8_t* base);
 }
 
+// Per-frame hook for the main-menu mod item (fable2_modmenu.h, included
+// after this header). Kept as a forward declaration here so the mod menu can
+// keep its label cache fresh every frame without redefining the render-loop
+// override (which this header owns). Defined in fable2::modmenu::on_frame.
+namespace fable2 { namespace modmenu { void on_frame(uint8_t* base); } }
+
 extern "C" void MainRenderLoop_82B9CD68(PPCContext& ctx, uint8_t* base) {
   const int64_t frame_us =
       std::chrono::duration_cast<std::chrono::microseconds>(
@@ -371,6 +377,8 @@ extern "C" void MainRenderLoop_82B9CD68(PPCContext& ctx, uint8_t* base) {
   fable2::d3dcensus::OnFrame();
   // F5 (host) -> run the external Lua file (per-frame, responsive).
   fable2::f5lua::poll_mainloop(ctx, base);
+  // Main-menu mod item: keep the relabeled row's string cache fresh.
+  fable2::modmenu::on_frame(base);
   // FABLE2_BOOT_SAVE: load a named save from the front end (inert when unset).
   fable2::bootsave::OnFrame(ctx, base);
   const auto swap_t0 = std::chrono::steady_clock::now();

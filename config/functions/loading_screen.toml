@@ -1,0 +1,35 @@
+# loading_screen functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# These are the loading screen functions when starting a new game
+[functions."0x822142D0"]
+name = "GetNewGameLoadingGlobal"
+
+[functions."0x82988ED8"]
+name = "LoadingScreen_Virtual43"
+
+[functions."0x82988F28"]
+name = "LoadingScreen_Virtual48"
+
+[functions."0x8274B748"]
+name = "LoadingScreen_Virtual42"
+
+[functions."0x82EAA980"]
+name = "LoadingScreen_Virtual36"
+
+[functions."0x8274B758"]
+name = "LoadingScreen_Virtual39"
+
+[functions."0x8274B778"]
+name = "LoadingScreen_Virtual28"
+
+[functions."0x822D6678"]
+name = "LoadingScreen_VectorOffset"
+
+
+# After new game video plays
+[functions."0x82988EC8"]
+name = "Story_AfterNewGameVideo"

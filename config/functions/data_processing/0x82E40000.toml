@@ -1,0 +1,64 @@
+# data-processing region 0x82E40000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# Process a value by checking its state and driving sub-operations (two thousand four hundred and sixty-second form). It uses global state to check its state, and drives sub-operations (ProcessAndAllocateAndProcess2) based on the result. This is the "process this data" routine (two thousand four hundred and sixty-second form), part of the 0x82E78 process cluster. 69 lines. 1 callee. 3 callers (sub_82E78B38, sub_82E78DA8, and sub_82E78A70).
+[functions."0x82E788B8"]
+name = "ProcessAndProcessAndProcess2511_82E788B8"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand four hundred and sixty-third form). It uses global state to check its state, and drives sub-operations (ProcessAndAllocateAndProcess2) based on the result. This is the "process this data" routine (two thousand four hundred and sixty-third form), part of the 0x82E7C process cluster. 69 lines. 1 callee. 4 callers (sub_82E7C5F8, sub_82E7C418, sub_82E7EED0, and sub_82E7ED40).
+[functions."0x82E7C3A0"]
+name = "ProcessAndProcessAndProcess2512_82E7C3A0"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand four hundred and one hundredth form). It uses global state to check its state, and drives sub-operations (ProcessAndAllocateAndProcess2) based on the result. This is the "process this data" routine (two thousand four hundred and one hundredth form), part of the 0x82E78 process cluster. 69 lines. 1 callee. 4 callers (sub_82E789A8, sub_82E7D388, sub_82E78CE0, and sub_82E7D0D8).
+[functions."0x82E78930"]
+name = "ProcessAndProcessAndProcess2549_82E78930"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand four hundred and one hundred and sixteenth form). It uses global state to check its state, and drives sub-operations (ProcessAndAllocateAndProcess2) based on the result. This is the "process this data" routine (two thousand four hundred and one hundred and sixteenth form), part of the 0x82E77 process cluster. 69 lines. 1 callee. 3 callers (sub_82E77390, sub_82E772C8, and sub_82E77508).
+[functions."0x82E77110"]
+name = "ProcessAndProcessAndProcess2565_82E77110"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand four hundred and one hundred and seventy-first form). It takes a value (a); it checks the value's state, and drives sub-operations (ProcessAndAllocateAndProcess2) based on the result. This is the "process this data" routine (two thousand four hundred and one hundred and seventy-first form), part of the 0x82E7F process cluster. 69 lines. 1 callee. 5 callers.
+[functions."0x82E7F208"]
+name = "ProcessAndProcessAndProcess2620_82E7F208"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand four hundred and one hundred and ninety-first form). It takes a value (a); it checks the value's state, and drives sub-operations (ProcessAndAllocateAndProcess2) based on the result. This is the "process this data" routine (two thousand four hundred and one hundred and ninety-first form), part of the 0x82E77 process cluster. 69 lines. 1 callee. 5 callers.
+[functions."0x82E77AD0"]
+name = "ProcessAndProcessAndProcess2640_82E77AD0"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand four hundred and one hundred and ninety-second form). It takes a structure (a: fields at a->12, a->1024, and a->0); it checks the value's state, and drives sub-operations (ProcessAndProcessAndProcess2511) based on the result, looping over elements. This is the "process this data" routine (two thousand four hundred and one hundred and ninety-second form), part of the 0x82E78 process cluster. 116 lines. 1 callee. 1 caller (sub_82E78DA8).
+[functions."0x82E78A70"]
+name = "ProcessAndProcessAndProcess2641_82E78A70"
+
+
+# Process a value by checking its state and driving many sub-operations (two thousand four hundred and one hundred and ninety-third form). It takes a structure (a: fields at a->12 and a->0), a value (b), a value (c), a value (d), a value (e), and a value (f); it checks the value's state, and drives many sub-operations (ProcessAndProcessAndProcess2641, ProcessAndProcessAndProcess2511, and more) based on the result. This is the "process this data" routine (two thousand four hundred and one hundred and ninety-third form), part of the 0x82E78 process cluster. 118 lines. 3 callees. 1 caller (sub_82E78EB8).
+[functions."0x82E78DA8"]
+name = "ProcessAndProcessAndProcess2642_82E78DA8"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand four hundred and one hundred and ninety-fourth form). It takes a structure (a); it checks the value's state, and drives sub-operations (ProcessAndProcessAndProcess2642) based on the result. This is the "process this data" routine (two thousand four hundred and one hundred and ninety-fourth form), part of the 0x82E78 process cluster. 35 lines. 1 callee. 12 callers.
+[functions."0x82E78EB8"]
+name = "ProcessAndProcessAndProcess2643_82E78EB8"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand four hundred and one hundred and ninety-fifth form). It takes a structure (a: fields at a->12, a->1024, and a->0); it checks the value's state, and drives sub-operations (ProcessAndProcessAndProcess2512) based on the result, looping over elements. This is the "process this data" routine (two thousand four hundred and one hundred and ninety-fifth form), part of the 0x82E7E process cluster. 116 lines. 1 callee. 1 caller (sub_82E7EED0).
+[functions."0x82E7ED40"]
+name = "ProcessAndProcessAndProcess2644_82E7ED40"
+
+
+# Process a value by checking its state and driving many sub-operations (two thousand four hundred and one hundred and ninety-sixth form). It takes a structure (a: fields at a->12 and a->0), a value (b), a value (c), a value (d), a value (e), and a value (f); it checks the value's state, and drives many sub-operations (ProcessAndProcessAndProcess2644, ProcessAndProcessAndProcess2512, and more) based on the result. This is the "process this data" routine (two thousand four hundred and one hundred and ninety-sixth form), part of the 0x82E7E process cluster. 118 lines. 3 callees. 1 caller (sub_82E7EFD8).
+[functions."0x82E7EED0"]
+name = "ProcessAndProcessAndProcess2645_82E7EED0"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand four hundred and one hundred and ninety-seventh form). It takes a structure (a); it checks the value's state, and drives sub-operations (ProcessAndProcessAndProcess2645) based on the result. This is the "process this data" routine (two thousand four hundred and one hundred and ninety-seventh form), part of the 0x82E7E process cluster. 35 lines. 1 callee. 12 callers.
+[functions."0x82E7EFD8"]
+name = "ProcessAndProcessAndProcess2646_82E7EFD8"

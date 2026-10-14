@@ -44,14 +44,15 @@ are hand-written readable C++ rewrites (see
 | `refcount/ProcessGrowBitArray_821EC668.cpp` | **hand-tuned** (was nv (14) + mfmsr (1) + glock (1)) |
 | `subsystems/LazyInitSubsystemA_8217FD08.cpp` | **hand-tuned** (was nv (9)) |
 | `subsystems/LazyInitSubsystemB_822C6C60.cpp` | **hand-tuned** (was nv (9)) |
-| `subsystems/ResolveSubsystemReference_821F8760.cpp` | nv (10) |
+| `subsystems/ResolveSubsystemReference_821F8760.cpp` | **hand-tuned** (was nv (10); goto-free rewrite) |
 | `player/QueryActivePlayerMethod_821EC8A0.cpp` | **hand-tuned** (was nv (14)) |
 | `player/CallActivePlayerMethod_821A11E8.cpp` | **hand-tuned** (was nv (20)) |
 | `os_notifications/PollAndProcessOsNotifications_8229A9D8.cpp` | **hand-tuned** (was nv (10)) |
 | `os_notifications/DispatchOsNotifications_82185080.cpp` | **hand-tuned** (was nv (36)) |
 | `entity/InitializeGameEntity_8233CAC8.cpp` | **hand-tuned** (was nv (21)) |
 | `entity/ProcessGameStateUpdate_821C9008.cpp` | **hand-tuned** (was nv (34)) |
-| `yield/YieldAndCheckThreshold_82CBD098.cpp` | nv (3) + batched yield |
+| `yield/Yield_82CBD098.cpp` | nv (3) + batched yield |
+| `vblank/FrameLimiterWait_82242628.cpp` | **hand-tuned** (goto-free rewrite, volatile guest access; see below) |
 
 Transforms:
 - **nv** — non-volatile `GV*/SV*` guest-RAM access (rules below).
@@ -62,7 +63,7 @@ Transforms:
   per-use DLL call; same mutex, same lock/unlock order.
 - **gt** — inlines `GetTimebase_8221EB58` with the exact codegen expressions
   (sub_82276C30 only; 7 sites).
-- **batched yield** — `YieldAndCheckThreshold_82CBD098`: the work-loop
+- **batched yield** — `Yield_82CBD098`: the work-loop
   `NtYieldExecution` (SDK `MaybeYield()` = `SwitchToThread()` +
   `MemoryBarrier()`) was the single biggest cost in the 475 chain (~13.7%
   of total CPU; the loop calls it every iteration and each real
@@ -72,7 +73,7 @@ Transforms:
   SwitchToThread, the others take a full memory fence; guest-visible
   result unchanged (r3 = X_STATUS_SUCCESS, then the constant threshold
   math). N is runtime-tunable: `[perf] hotfunc_yield_every` in
-  fable2_config.toml (default 8; 1 = original; 0 = never yield).
+  fable2_config.toml (default 1; 1 = original; 0 = never yield).
 - **hoist** (sub_82276C30 only, OFF by default, `HOTFUNC_HOIST=1` to
   re-test) — per-iteration hoist of the time-constant doubles; see the
   hoisting rule below for why it is off. (The older
@@ -93,12 +94,14 @@ decompiled guest-logic sketch in the header). Currently:
 - `entity/InitializeGameEntity_8233CAC8.cpp`
 - `subsystems/LazyInitSubsystemA_8217FD08.cpp`
 - `subsystems/LazyInitSubsystemB_822C6C60.cpp`
+- `subsystems/ResolveSubsystemReference_821F8760.cpp`
 - `os_notifications/PollAndProcessOsNotifications_8229A9D8.cpp`
 - `refcount/ProcessGrowBitArray_821EC668.cpp`
 - `player/QueryActivePlayerMethod_821EC8A0.cpp`
 - `frame/RegisterFrameCallback_821DCF10.cpp`
 - `entity/ProcessGameStateUpdate_821C9008.cpp`
 - `refcount/Release_RefCounted_821C67D8.cpp`
+- `vblank/FrameLimiterWait_82242628.cpp`
 
 **Mechanism (survives regeneration):**
 - The first line of the file is `// Hand-tuned override ...`. The generator's
@@ -145,13 +148,18 @@ header with the reason it is unobservable):
   writes to *volatile non-argument* registers (r0-r12 except arguments) since
   the PPC32 ABI makes them unobservable to callers - never r2/r13-r30;
   document any such deviation in the file header.
-- Non-volatile access is safe per-function: each recompiled function is
-  compiled independently, calls are opaque, so CSE only happens inside basic
-  blocks. Verify the function touches **no MMIO** (no `REX_MM_*`) first.
+- Non-volatile access is safe per-function only for memory no other thread
+  writes while the function runs (its own stack frame, for example), and
+  only when it touches **no MMIO** (no `REX_MM_*`). Calls are not opaque
+  under the ThinLTO/PGO build: the optimiser can see that a callee does not
+  write a location and keep a non-volatile load out of a loop. A loop that
+  polls memory another thread writes (the GPU progress counter in
+  `FrameLimiterWait_82242628`) must use `REX_LOAD_*`, or that load is a data
+  race and can turn into a hang.
 - Hoisting globals: a whole-tree scan for literal `REX_STORE_*` writers is
   **necessary but not sufficient** — pointer-based stores and cross-thread
   writers are invisible to it. If the function's loop calls
-  `YieldAndCheckThreshold_82CBD098` (or anything that yields the host thread,
+  `Yield_82CBD098` (or anything that yields the host thread,
   e.g. via `NtYieldExecution`), other guest threads run MID-iteration, so any
   global they touch may change between a hoisted load and its uses. The
   time-constant hoist for `0x82276C30` failed exactly this way (game hung on

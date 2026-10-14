@@ -1,0 +1,1205 @@
+# data-processing region 0x82CC0000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# CS-guarded virtual-call wrapper, one of ~11 uniform siblings in the
+# 0x82CD2Cxx-0x82CD2Fxx block. Pattern (verified across the cluster):
+# RtlEnterCriticalSection(global CS at 0x82CD0324); target = arg1->76
+# (a C++ object, vptr at +0); call vtable[+60/4 = slot 15] with
+# (this=target, out=arg2); RtlLeaveCriticalSection; return the result.
+# The sibling slots are 28/56/60/64/72/80/92/96 (plus two that forward to
+# helpers sub_82CDC180/sub_82CDCFE8) — i.e. a synchronized proxy class in
+# the SDK runtime around one core object, all methods sharing the single
+# global CS. 2 call sites: RingBuffer_TickPadWithFillByte_832B68A0 (polled
+# 3x, looping while successive out-values differ by >= 1024 — a consumer
+# progress query) and sub_832B6A98 (called after sibling slots 72/64 and a
+# helper, in a fetch-and-advance sequence). The vtable contents are
+# unresolved, so the name stays mechanism-based (slot offset in bytes).
+[functions."0x82CD2DF8"]
+name = "CsGuardedVcall_Slot60_82CD2DF8"
+
+
+# 5-insn leaf: *r4 = (uint16_t)obj->108 * obj->120; returns 0.
+# Field roles pinned down by the inverse operation sub_82CE37C0, which
+# (spin-lock protected: KeRaiseIrqlToDpcLevel + KeAcquireSpinLockAtRaisedIrql
+# on global 0x82CA7060, with a twllei div-by-zero trap guard) computes
+# obj->120 = (*total) / obj->108 and sets obj->272 = 1 — so obj->108 is a
+# unit/divisor and obj->120 the total/unit count; this function is the
+# count -> total direction (unit * count, classic frameSize*frameCount /
+# sampleSize*sampleCount byte-length math). Several siblings in the 0x82CE
+# region write these fields (sub_82CE3BE0/sub_82CE3400/sub_82CE24B0/
+# sub_82CE0C20 store the u16; sub_82CE3CF0/sub_82CE1588 update the u32).
+# ZERO static call sites — vtable method of that object family.
+[functions."0x82CE32B0"]
+name = "StoreUnitTimesCount_82CE32B0"
+
+
+# A SIMD (vector) memcpy KERNEL -- the 128-bytes-per-iteration vectorized loop
+# that a vectorized memcpy dispatches to for large blocks.
+
+# Args: dst (r3), src (r4), length (r5). For length >= 128 the main loop loads
+# 8 x 128-bit vectors from src (lvx at offsets 0/16/32/48/63/64/80/96 with vperm
+# alignment), stores them to dst (stvx at the same offsets), then advances dst
+# and src by 128 and length -= 128, looping while length >= 128 (with dcbt/dcbzl
+# cache-block hints for the large case). A scalar path (lvsl shift + tail store)
+# handles length < 128. Single caller: MemCpy_Vectorized_822085D0 (it calls this
+# as its large-block kernel). So it is the raw SIMD copy kernel. Named for the
+# mechanism: a SIMD (128-byte-unrolled) memcpy kernel.
+[functions."0x82CC9DA0"]
+name = "MemCpy_SIMDKernel_82CC9DA0"
+
+
+# A delay / sleep: compute a millisecond delay as a 100ns-tick relative time and call
+# __imp__KeDelayExecutionThread (a wait) in a loop.
+
+# Args: value (r3, a duration in milliseconds), flag (r4, ->0 = a flag byte). If value is -1, it uses a
+# fixed 64-bit timeout (0xFFFFFFFF_00000000). Otherwise it computes value * -10000 (a negative 100ns-
+# tick relative time: 10000 ticks = 1 ms, so value ms). It then loops, calling
+# __imp__KeDelayExecutionThread (a kernel delay, passing the 100ns-tick time and flag), until the flag
+# byte (value & 0xFF of the flag arg) is 0. So it's a "delay for value milliseconds (polling a flag)"
+# routine. 83 lines. 2 callers: ByteValueCheck_82CBC678 (sub_82CBC678) and sub_82CBC6B0. The flag's
+# meaning (an "interrupted" / "abort" flag) isn't resolvable, so the name states the mechanism: delay
+# for a duration in milliseconds.
+[functions."0x82CC2028"]
+name = "KeDelayExecutionThreadWrapper_82CC2028"
+
+
+# Conditionally records a value into a global object's field. It takes a value (a) and reads the current
+# thread's context object (r13). When the context's "already set" marker (r13->336) is non-zero the routine
+# is a no-op. Otherwise it writes (a) into the global object's slot (r13->256 -> 352). This is the "record
+# this value into the global, but only if one has not already been recorded" setter for the 0x82CC1 global-
+# setter cluster, used by 6 callers (the 0x82CC0/0x82CFA/0x82CBC range). Part of the 0x82CC1 global-setter
+# cluster. 16 lines, 0 direct callees (pure flag-check + store). 6 callers.
+[functions."0x82CC1C20"]
+name = "SetGlobalFieldIfNeeded_82CC1C20"
+
+
+# A thunk that forwards to the global-field setter. It takes no arguments of its own (forwarding the passed arguments)
+# and performs the set (SetGlobalFieldIfNeeded_82CC1C20), returning the result. It is a one-line pass-through wrapper
+# around SetGlobalFieldIfNeeded_82CC1C20 (the conditional global-field setter). This is the "set this global field (via
+# the conditional setter)" thunk for the 0x82CC0 global-set cluster, used by 10 callers (the 0x82BEB/0x82BF0/0x82BF2/
+# 0x82BF3/0x82CBD/0x82CBD/0x82CBDD/0x82CAC/0x82CC1 range). Part of the 0x82CC0 global-set cluster (sibling of
+# SetGlobalFieldIfNeeded_82CC1C20). 7 lines, 1 callee. 10 callers.
+[functions."0x82CC0750"]
+name = "SetGlobalField_Thunk_82CC0750"
+
+
+# A processor that queries data and copies it. It takes a value. It allocates a 328-byte buffer (sub_82CC1FC8); when the allocation fails (a
+# negative result) it releases the buffer (sub_82CC1C38) and returns 0. Otherwise it copies the data into the buffer (CopyFieldsAndBlock_82CC9E60)
+# and returns 1. This is the "query this data and copy it" routine, part of the 0x82CC0 query cluster. 56 lines. 3 callees (sub_82CC1FC8,
+# sub_82CC1C38, CopyFieldsAndBlock). 4 callers.
+[functions."0x82CC0BB8"]
+name = "ProcessAndQueryAndCopy_82CC0BB8"
+
+
+# A processor that queries data. It takes a value (a) and another value (b). It sets up a local buffer and invokes a query function indirectly (the
+# function pointer at a .data structure's +24 field), passing 0 for several parameters. When the query returns a negative value it returns that
+# error code; otherwise it reads the size field from the local buffer (at +96) and returns it. This is the "query this data" routine, a leaf
+# function (no callees, single indirect call), part of the 0x82CC1 query cluster. 55 lines. 0 callees (single indirect call). 1 caller
+# (ProcessAndQueryAndCopy_82CC0BB8).
+[functions."0x82CC1FC8"]
+name = "ProcessAndQueryData_82CC1FC8"
+
+
+# A wrapper that calls sub_82CC1C70. It calls sub_82CC1C70 and returns. This is the "call sub_82CC1C70" routine, part of the 0x82CC0 wrapper cluster. 7 lines. 1 callee (sub_82CC1C70). 12 callers
+# (sub_82CB6AA0, ProcessAndLookupWithDefaultInit_82CA5DC0, sub_83001DF8, sub_83002B80, sub_82D17A38, Func_82CAFC28, sub_82B3F010, sub_82CBC490, sub_82BF3010, sub_83001818, sub_82CAA7A8, and sub_83004D18).
+[functions."0x82CC0758"]
+name = "WrapperSub82CC1C70_82CC0758"
+
+
+# A processor that initializes a string (second form). It takes a value (a) and a value (b). It stores 0 into a local buffer and initializes an ANSI string (RtlInitAnsiString, with the local buffer and a). It then stores -3, 64, and the buffer pointer into a .data structure. It then processes (sub_82CC1E48, with the .data structure and other values). This is the "initialize a string" routine (second form), part of the 0x82CC0 process cluster. 83 lines. 3 callees (CopyFieldsAndBlock, StoreLastErrorCode, and sub_82CC1E48). 7 callers (ProcessAndQueryAndProcess, sub_82BF32C8, ProcessAndCompareAndProcess, ProcessAndCheckString2, sub_83002B80, sub_82CAA7A8, and sub_82B3EB30).
+[functions."0x82CC0C10"]
+name = "ProcessAndInitializeString2_82CC0C10"
+
+
+# A processor that computes and processes the data (twenty-seventh form). It takes a structure (a: fields at a->0, a->4, and a->8), a value (b), a value (c), and a value (d). It reads a->4 (a pointer) and then reads the pointer's +0 field (a value). It then iterates a range (from 0 to the value), reading each byte (a byte) and computing. This is the "compute and process this data" routine (twenty-seventh form), part of the 0x82CC1 process cluster. 216 lines. 0 callees (leaf function). 1 caller (ProcessAndInitializeString2_82CC0C10).
+[functions."0x82CC1E48"]
+name = "ProcessAndComputeAndProcess27_82CC1E48"
+
+
+# A processor that destructs and processes the data (twenty-fifth form). It takes a value (a). It enters a critical section (RtlEnterCriticalSection, with a .data pointer (-352)) and iterates through a list (calling the method at +8 on each element). It then exits the critical section. This is the "destruct and process this data" routine (twenty-fifth form), part of the 0x82CC1 process cluster. 66 lines. 0 callees (leaf function — performs raw memory operations and virtual calls). 5 callers (sub_82CCA400, FatalError, sub_82CC0728, xstart, and Thread).
+[functions."0x82CC16C0"]
+name = "ProcessAndDestructAndProcess25_82CC16C0"
+
+
+# A processor that sets the timebase (fourth form). It takes a structure (a: field at a->0). It sets the timebase (KeQueryPerformanceFrequency, with a). This is the "set the timebase" routine (fourth form), part of the 0x82CC0 process cluster. 34 lines. 0 callees (leaf function — performs raw memory operations and calls KeQueryPerformanceFrequency). 9 callers (ProcessAndInitializeAndProcess3, sub_82BA0220, sub_8234A128, sub_82D02BF8, sub_82CD4448, sub_82CFF878, sub_830CD2B0, sub_82B3D380, and sub_82FFE500).
+[functions."0x82CC0620"]
+name = "ProcessAndTimebaseAndProcess4_82CC0620"
+
+
+# A processor that processes the data (one hundred and twenty-third form). It takes a value (a) and a value (b). It processes the data (a and b). This is the "process this data" routine (one hundred and twenty-third form), part of the 0x82CCA process cluster. 58 lines. 1 callee (sub_82CC16C0). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82CCA400"]
+name = "ProcessAndProcessAndProcess123_82CCA400"
+
+
+# A processor that processes the data (one hundred and ninety-eighth form). It takes a value (a). It processes the data (a). This is the "process this data" routine (one hundred and ninety-eighth form), part of the 0x82CC1 process cluster. 62 lines. 0 callees (no function calls). 3 callers (sub_82CFAC40, sub_82CFACA8, and sub_82CBC3B8).
+[functions."0x82CC1C90"]
+name = "ProcessAndProcessAndProcess198_82CC1C90"
+
+
+# A processor that processes the data (one hundred and ninety-ninth form). It takes a value (a), a value (b), a value (c), a value (d), a value (e), a value (f), and a value (g). It processes the data (a, b, c, d, e, f, and g). This is the "process this data" routine (one hundred and ninety-ninth form), part of the 0x82CFA process cluster. 62 lines. 1 callee (ProcessAndProcessAndProcess198). 5 callers (sub_823C2148, sub_82886658, sub_824E7A50, sub_82374D58, and sub_824E5978).
+[functions."0x82CFAC40"]
+name = "ProcessAndProcessAndProcess199_82CFAC40"
+
+
+# Destruct a value and terminate the current thread (four hundred and eighty-second form). It takes a value (a); it destructs the value and then terminates the current thread via ExTerminateThread. This is the "process this data" routine (four hundred and eighty-second form), part of the 0x82CC0 process cluster. 27 lines. 2 callees (ProcessAndDestructAndProcess25 and __imp__ExTerminateThread). 9 callers (sub_830029D8, Func_83002974, ProcessAndProcessAndProcess474, Func_82CA33AC, sub_8262DDD0, sub_82D012D8, ProcessAndProcessAndProcess475, sub_83002950, and sub_83002940).
+[functions."0x82CC0728"]
+name = "ProcessAndProcessAndProcess482_82CC0728"
+
+
+# Query the console region via the XConfig setting, falling back to the game-region API (four hundred and eighty-third form). It takes nothing; it reads an XConfig setting (category 3, value 9) into a local and, when the result is out of the valid 0-12 range, falls back to the game-region query (XGetGameRegion). This is the "process this data" routine (four hundred and eighty-third form), part of the 0x82CC0 process cluster. 87 lines. 2 callees (__imp__ExGetXConfigSetting and __imp__XGetGameRegion). 1 caller (ProcessAndProcessAndProcess355).
+[functions."0x82CC0888"]
+name = "ProcessAndProcessAndProcess483_82CC0888"
+
+
+# Large processor over the console-language XConfig setting (four hundred and eighty-fourth form). It takes nothing; it reads the console-language XConfig setting (category 3, value 14), validates the returned language code against a range of known values, performs a table lookup to resolve the language, and drives further processing. This is the "process this data" routine (four hundred and eighty-fourth form), part of the 0x82CC0 process cluster. 520 lines. 2 callees (__imp__ExGetXConfigSetting and __imp__XGetGameRegion). 1 caller (ProcessAndProcessAndProcess355).
+[functions."0x82CC0918"]
+name = "ProcessAndProcessAndProcess484_82CC0918"
+
+
+# Build a value array on the stack with a clamped count, raising an exception on failure (four hundred and eighty-fifth form). It takes a value (a), a flag (b: low bit extracted), a count (c: clamped to 0-15), and a value (d); it sets up a local structure, copies an aligned block of values, and — when the result is invalid — raises an exception. This is the "process this data" routine (four hundred and eighty-fifth form), part of the 0x82CC0 process cluster. 76 lines. 2 callees (MemCpy_Aligned and __imp__RtlRaiseException). 4 callers (sub_82CA69D0, Func_82B387D0, ProcessAndProcessAndProcess318, and sub_82CAD810).
+[functions."0x82CC0D58"]
+name = "ProcessAndProcessAndProcess485_82CC0D58"
+
+
+# Process vectors by performing vector addition operations on multiple data regions (five hundred and forty-fifth form). It takes a pointer (a), a value (b), a pointer (c), a pointer (d), and a value (e); it performs vector addition operations on the data regions, computing sums. This is the "process this data" routine (five hundred and forty-fifth form), part of the 0x82CD8 process cluster. 144 lines. 0 callees. 1 caller (sub_82CD8F58).
+[functions."0x82CD8E38"]
+name = "ProcessAndProcessAndProcess545_82CD8E38"
+
+
+# Process a value by updating a global structure under a spinlock (five hundred and seventy-ninth form). It takes a value (a); it raises the IRQL, acquires a spinlock, updates a global structure, releases the spinlock, and lowers the IRQL. This is the "process this data" routine (five hundred and seventy-ninth form), part of the 0x82CDA process cluster. 112 lines. 4 callees. 1 caller (sub_82CDAAE0).
+[functions."0x82CDA698"]
+name = "ProcessAndProcessAndProcess579_82CDA698"
+
+
+# Process values by updating a global structure under a spinlock (five hundred and eightieth form). It takes a value (a) and a value (b); it raises the IRQL, acquires a spinlock, updates a global structure, drives sub-operations (sub_82CDD5D8), releases the spinlock, and lowers the IRQL. This is the "process this data" routine (five hundred and eightieth form), part of the 0x82CDA process cluster. 248 lines. 5 callees. 1 caller (sub_82CDABC8).
+[functions."0x82CDA840"]
+name = "ProcessAndProcessAndProcess580_82CDA840"
+
+
+# Process a structure by checking its state and setting flags (five hundred and eighty-first form). It takes a structure (a: fields at a->304, a->328, a->324, and a->320) and a value (b, an offset); it checks the structure's state, and sets flags based on the result. This is the "process this data" routine (five hundred and eighty-first form), part of the 0x82CDA process cluster. 146 lines. 0 callees. 1 caller (sub_82CDABC8).
+[functions."0x82CDA0F8"]
+name = "ProcessAndProcessAndProcess581_82CDA0F8"
+
+
+# Process a structure by performing division operations and driving sub-operations (six hundred and twenty-third form). It takes a structure (a: fields at a->12, a->16, a->24, and a->13) and a value (b); it performs division operations, and drives sub-operations (MemSet_SdkRuntime) based on the result. This is the "process this data" routine (six hundred and twenty-third form), part of the 0x82CD7 process cluster. 160 lines. 1 callee. 4 callers (many from the 0x82C* cluster).
+[functions."0x82CD7EB8"]
+name = "ProcessAndProcessAndProcess623_82CD7EB8"
+
+
+# Process a structure by checking its state and driving sub-operations (six hundred and twenty-eighth form). It takes a structure (a: fields at a->0, a->44, a->48, and a->61); it checks the structure's state, and drives sub-operations (Stub_ReturnZero) based on the result. This is the "process this data" routine (six hundred and twenty-eighth form), part of the 0x82CE5 process cluster. 121 lines. 1 callee. 2 callers (sub_82CDD088 and sub_82CE4728).
+[functions."0x82CE59D0"]
+name = "ProcessAndProcessAndProcess628_82CE59D0"
+
+
+# Process a structure by iterating over its elements and driving sub-operations (six hundred and twenty-ninth form). It takes a structure (a: fields at a->60 and a->36) and a value (b); it iterates over the structure's elements, and drives sub-operations (sub_82CE5F78) based on the result. This is the "process this data" routine (six hundred and twenty-ninth form), part of the 0x82CE6 process cluster. 64 lines. 1 callee. 2 callers (sub_82CE5610 and sub_82CE44E0).
+[functions."0x82CE67B8"]
+name = "ProcessAndProcessAndProcess629_82CE67B8"
+
+
+# Process a structure by checking its state and returning a result (six hundred and thirtieth form). It takes a structure (a: fields at a->4, a->8, a->28, a->24, a->80, a->32, and a->16); it checks the structure's state, and returns a result based on the check. This is the "process this data" routine (six hundred and thirtieth form), part of the 0x82CE7 process cluster. 256 lines. 0 callees. 2 callers (sub_82CE3CF0 and sub_82CE2618).
+[functions."0x82CE7730"]
+name = "ProcessAndProcessAndProcess630_82CE7730"
+
+
+# Process a value by driving many sub-operations (six hundred and forty-sixth form). It takes three values (a, b, and c); it drives many sub-operations (CopyThreeFields, MemCpy_Vectorized, ProcessAndProcessAndProcess545, and spinlock operations) based on the result. This is the "process this data" routine (six hundred and forty-sixth form), part of the 0x82CD8 process cluster. 532 lines. 8 callees. 0 callers.
+[functions."0x82CD8F58"]
+name = "ProcessAndProcessAndProcess646_82CD8F58"
+
+
+# Process a structure by checking its state and driving sub-operations (six hundred and forty-ninth form). It takes a structure (a: fields at a->69 and a->72) and a structure (b: field at b->0); it checks the structure's state, and drives sub-operations (ProcessAndProcessAndProcess629) based on the result. This is the "process this data" routine (six hundred and forty-ninth form), part of the 0x82CE5 process cluster. 86 lines. 1 callee. 1 caller (sub_82CDC2F0).
+[functions."0x82CE5610"]
+name = "ProcessAndProcessAndProcess649_82CE5610"
+
+
+# Process a structure by checking its state (six hundred and fiftieth form). It takes a value (a), a structure (b: fields at b->5 and b->6), a structure (c: field at c->0), and a structure (d: field at d->268); it checks the structure's state. This is the "process this data" routine (six hundred and fiftieth form), part of the 0x82CE5 process cluster. 160 lines. 0 callees. 2 callers (ProcessAndProcessAndProcess629 and sub_82CDC2F0).
+[functions."0x82CE5F78"]
+name = "ProcessAndProcessAndProcess650_82CE5F78"
+
+
+# Process a structure by performing bit manipulation (six hundred and sixty-seventh form). It takes a structure (a: fields at a->8, a->36, a->13, a->28, a->4, a->24, a->0, and a->20); it performs bit manipulation on the structure's fields. This is the "process this data" routine (six hundred and sixty-seventh form), part of the 0x82CEF process cluster. 187 lines. 0 callees. 0 callers.
+[functions."0x82CEFDE0"]
+name = "ProcessAndProcessAndProcess667_82CEFDE0"
+
+
+# Process a value (seven hundred and forty-first form). It takes a value and checks its state, with no external sub-operations. This is a frequently-called helper in the 0x82CD7 process cluster. 29 lines. 0 callees. 8 callers.
+[functions."0x82CD7D68"]
+name = "ProcessAndProcessAndProcess741_82CD7D68"
+
+
+# Process a structure (seven hundred and fifty-second form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CD2 process cluster. 54 lines. 0 callees. 1 caller (sub_82C53750).
+[functions."0x82CD2F00"]
+name = "ProcessAndProcessAndProcess752_82CD2F00"
+
+
+# Process a value (seven hundred and fifty-third form). It takes a value and checks its state, with no external sub-operations. Part of the 0x82CE0 process cluster. 12 lines. 0 callees. 0 callers.
+[functions."0x82CE0BD8"]
+name = "ProcessAndProcessAndProcess753_82CE0BD8"
+
+
+# Process a value (seven hundred and fifty-fourth form). It takes a value and checks its state, with no external sub-operations. Part of the 0x82CDC process cluster. 52 lines. 0 callees. 0 callers.
+[functions."0x82CDC3E0"]
+name = "ProcessAndProcessAndProcess754_82CDC3E0"
+
+
+# Process a structure (seven hundred and fifty-fifth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CE3 process cluster. 122 lines. 0 callees. 1 caller (TailCall_82CE3770).
+[functions."0x82CE3460"]
+name = "ProcessAndProcessAndProcess755_82CE3460"
+
+
+# Process a value (seven hundred and fifty-sixth form). It takes a value and checks its state, with no external sub-operations. This is a frequently-called helper in the 0x82CD2 process cluster. 73 lines. 0 callees. 5 callers.
+[functions."0x82CD2F58"]
+name = "ProcessAndProcessAndProcess756_82CD2F58"
+
+
+# Process a value (seven hundred and ninety-sixth form). It takes a value and checks its state, with no external sub-operations. Part of the 0x82CE3 process cluster. 12 lines. 0 callees. 1 caller (TailCall_82CE3768).
+[functions."0x82CE3238"]
+name = "ProcessAndProcessAndProcess796_82CE3238"
+
+
+# Process a value (seven hundred and ninety-eighth form). It takes a value and checks its state, with no external sub-operations. Part of the 0x82CDC process cluster. 18 lines. 0 callees. 0 callers.
+[functions."0x82CDC2D0"]
+name = "ProcessAndProcessAndProcess798_82CDC2D0"
+
+
+# Process a structure by driving sub-operations (seven hundred and ninety-ninth form). It takes a structure, adjusts a counter (AddAtomic), and drives sub-operations (ProcessAndProcessAndProcess649, ProcessAndProcessAndProcess650, sub_82CE62C0) based on the result. Part of the 0x82CDC process cluster. 139 lines. 4 callees. 0 callers.
+[functions."0x82CDC2F0"]
+name = "ProcessAndProcessAndProcess799_82CDC2F0"
+
+
+# Process a very large data structure (seven hundred and one hundredth form). It takes a structure, adjusts a counter (AddAtomic), copies fields (CopyThreeFields), clears memory (MemSet), and drives sub-operations (ProcessAndProcessAndProcess623, ProcessAndProcessAndProcess630) based on the result. Part of the 0x82CE3 process cluster. 1034 lines. 5 callees. 0 callers.
+[functions."0x82CE3CF0"]
+name = "ProcessAndProcessAndProcess800_82CE3CF0"
+
+
+# Process a structure by adjusting a counter (seven hundred and one hundred and twelfth form). It takes a structure, adjusts a counter (AddAtomic), and drives sub-operations (ProcessAndProcessAndProcess623, ProcessAndProcessAndProcess628) based on the result. Part of the 0x82CDD process cluster. 68 lines. 3 callees. 0 callers.
+[functions."0x82CDD088"]
+name = "ProcessAndProcessAndProcess812_82CDD088"
+
+
+# Process a structure (seven hundred and one hundred and thirteenth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CDA process cluster. 224 lines. 0 callees. 1 caller (sub_82CDABC8).
+[functions."0x82CDA2F8"]
+name = "ProcessAndProcessAndProcess813_82CDA2F8"
+
+
+# Process a structure (seven hundred and one hundred and fifty-ninth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CD5 process cluster. 237 lines. 0 callees. 1 caller (sub_82CD6010).
+[functions."0x82CD5720"]
+name = "ProcessAndProcessAndProcess859_82CD5720"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and sixty-eighth form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess623). Part of the 0x82CD7 process cluster. 16 lines. 1 callee. 6 callers.
+[functions."0x82CD7FE0"]
+name = "ProcessAndProcessAndProcess868_82CD7FE0"
+
+
+# Process a structure by driving sub-operations (seven hundred and one hundred and eighty-second form). It takes a structure, checks its state, and drives sub-operations (sub_82CE6C20, sub_82CEBF30) based on the result. Part of the 0x82CF4 process cluster. 123 lines. 2 callees. 0 callers.
+[functions."0x82CF48B0"]
+name = "ProcessAndProcessAndProcess882_82CF48B0"
+
+
+# Process a structure (seven hundred and one hundred and eighty-sixth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CFF process cluster. 221 lines. 0 callees. 1 caller (sub_82D005F8).
+[functions."0x82CFFF70"]
+name = "ProcessAndProcessAndProcess886_82CFFF70"
+
+
+# Process a large data structure (seven hundred and one hundred and eighty-ninth form). It takes a structure, checks its state, and drives a sub-operation (ProcessAndProcessAndProcess763) based on the result. Part of the 0x82CE6 process cluster. 413 lines. 1 callee. 1 caller (sub_82CF48B0).
+[functions."0x82CE6C20"]
+name = "ProcessAndProcessAndProcess889_82CE6C20"
+
+
+# Process a structure (seven hundred and one hundred and eighty-third form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CE6 process cluster. 68 lines. 0 callees. 1 caller (sub_82CDDB80).
+[functions."0x82CE6820"]
+name = "ProcessAndProcessAndProcess893_82CE6820"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and ninety-eighth form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess579). Part of the 0x82CDA DPC atomic cluster. 138 lines. 1 callee. 2 callers (sub_82CDB248 and sub_82CDB3C0).
+[functions."0x82CDAAE0"]
+name = "ProcessAndProcessAndProcess908_82CDAAE0"
+
+
+# Process a structure by driving sub-operations (seven hundred and one hundred and ninety-ninth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess580, ProcessAndProcessAndProcess581, ProcessAndProcessAndProcess813) based on the result. Part of the 0x82CDA DPC atomic cluster. 183 lines. 3 callees. 3 callers (including sub_82CDB3C0).
+[functions."0x82CDABC8"]
+name = "ProcessAndProcessAndProcess909_82CDABC8"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundredth form). It takes a structure and drives a sub-operation (sub_82CDB3C0). Part of the 0x82CE4 process cluster. 11 lines. 1 callee. 0 callers.
+[functions."0x82CE4540"]
+name = "ProcessAndProcessAndProcess910_82CE4540"
+
+
+# Process a structure by driving sub-operations (seven hundred and one hundred and one hundred and first form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess741, sub_82D02DD8, sub_82D03340) based on the result. Part of the 0x82CFF process cluster. 205 lines. 3 callees. 0 callers.
+[functions."0x82CFFB48"]
+name = "ProcessAndProcessAndProcess911_82CFFB48"
+
+
+# Process a structure by copying its data (seven hundred and one hundred and one hundred and second form). It takes a structure and copies its data (MemCpy). Part of the 0x82CD8 process cluster. 119 lines. 1 callee. 0 callers.
+[functions."0x82CD8168"]
+name = "ProcessAndProcessAndProcess912_82CD8168"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and third form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess741). Part of the 0x82CD8 process cluster. 59 lines. 1 callee. 0 callers.
+[functions."0x82CD82E8"]
+name = "ProcessAndProcessAndProcess913_82CD82E8"
+
+
+# Process a DPC atomic structure (seven hundred and one hundred and one hundred and fourth form). It takes a structure, adjusts an atomic counter (AddAtomic), clears memory (MemSet), returns a stub (Stub_ReturnZero), and drives sub-operations (ProcessAndProcessAndProcess908, ProcessAndProcessAndProcess909, ProcessAndProcessAndProcess915) based on the result. Part of the 0x82CDB DPC atomic cluster. 163 lines. 6 callees. 1 caller (ProcessAndProcessAndProcess910).
+[functions."0x82CDB3C0"]
+name = "ProcessAndProcessAndProcess914_82CDB3C0"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and fifth form). It takes a structure and drives a sub-operation (sub_83004A90). Part of the 0x82CDD process cluster. 108 lines. 1 callee. 1 caller (ProcessAndProcessAndProcess914).
+[functions."0x82CDD610"]
+name = "ProcessAndProcessAndProcess915_82CDD610"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and sixth form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess629). Part of the 0x82CE4 process cluster. 56 lines. 1 callee. 0 callers.
+[functions."0x82CE44E0"]
+name = "ProcessAndProcessAndProcess916_82CE44E0"
+
+
+# Process a structure by driving sub-operations (seven hundred and one hundred and one hundred and seventh form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess628, ProcessAndProcessAndProcess868) based on the result. Part of the 0x82CE4 process cluster. 52 lines. 2 callees. 0 callers.
+[functions."0x82CE4728"]
+name = "ProcessAndProcessAndProcess917_82CE4728"
+
+
+# Process a very large data structure (seven hundred and one hundred and one hundred and forty-first form). It takes a structure and checks its state, with no external sub-operations. This is a leaf handler in the 0x82CD4/0x82CD5 cluster, dispatched solely by sub_82CD6010. 969 lines. 0 callees. 1 caller (sub_82CD6010).
+[functions."0x82CD4A10"]
+name = "ProcessAndProcessAndProcess941_82CD4A10"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and forty-second form). It takes a structure and checks its state, with no external sub-operations. This is a leaf handler in the 0x82CD5 cluster, dispatched solely by sub_82CD6010. 174 lines. 0 callees. 1 caller (sub_82CD6010).
+[functions."0x82CD5060"]
+name = "ProcessAndProcessAndProcess942_82CD5060"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and forty-third form). It takes a structure and checks its state, with no external sub-operations. This is a leaf handler in the 0x82CD5 cluster, dispatched solely by sub_82CD6010. 128 lines. 0 callees. 1 caller (sub_82CD6010).
+[functions."0x82CD5170"]
+name = "ProcessAndProcessAndProcess943_82CD5170"
+
+
+# Process a large data structure (seven hundred and one hundred and one hundred and forty-fourth form). It takes a structure and checks its state, with no external sub-operations. This is a leaf handler in the 0x82CD5 cluster, dispatched solely by sub_82CD6010. 428 lines. 0 callees. 1 caller (sub_82CD6010).
+[functions."0x82CD5238"]
+name = "ProcessAndProcessAndProcess944_82CD5238"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and forty-fifth form). It takes a structure and checks its state, with no external sub-operations. This is a leaf handler in the 0x82CD5 cluster, dispatched solely by sub_82CD6010. 128 lines. 0 callees. 1 caller (sub_82CD6010).
+[functions."0x82CD54E0"]
+name = "ProcessAndProcessAndProcess945_82CD54E0"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and forty-sixth form). It takes a structure and checks its state, with no external sub-operations. This is a leaf handler in the 0x82CD5 cluster, dispatched solely by sub_82CD6010. 237 lines. 0 callees. 1 caller (sub_82CD6010).
+[functions."0x82CD55A8"]
+name = "ProcessAndProcessAndProcess946_82CD55A8"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and forty-seventh form). It takes a structure and checks its state, with no external sub-operations. This is a leaf handler in the 0x82CD5 cluster, dispatched solely by sub_82CD6010. 239 lines. 0 callees. 1 caller (sub_82CD6010).
+[functions."0x82CD5898"]
+name = "ProcessAndProcessAndProcess947_82CD5898"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and forty-eighth form). It takes a structure and checks its state, with no external sub-operations. This is a leaf handler in the 0x82CD5 cluster, dispatched solely by sub_82CD6010. 108 lines. 0 callees. 1 caller (sub_82CD6010).
+[functions."0x82CD5A10"]
+name = "ProcessAndProcessAndProcess948_82CD5A10"
+
+
+# Process a large data structure (seven hundred and one hundred and one hundred and forty-ninth form). It takes a structure and checks its state, with no external sub-operations. This is the largest leaf handler in the 0x82CD5 cluster, dispatched solely by sub_82CD6010. 748 lines. 0 callees. 1 caller (sub_82CD6010).
+[functions."0x82CD5AB8"]
+name = "ProcessAndProcessAndProcess949_82CD5AB8"
+
+
+# Dispatch the entire 0x82CD4/0x82CD5 leaf-processor cluster (seven hundred and one hundred and one hundred and one hundred and fifty-fourth form). It takes a structure, checks its state, and drives all the leaf handlers (ProcessAndProcessAndProcess859, ProcessAndProcessAndProcess941, ProcessAndProcessAndProcess942, ProcessAndProcessAndProcess943, ProcessAndProcessAndProcess944, ProcessAndProcessAndProcess945, ProcessAndProcessAndProcess946, ProcessAndProcessAndProcess947, ProcessAndProcessAndProcess948, ProcessAndProcessAndProcess949) based on the result. This is the master dispatcher of the 0x82CD6 cluster and the second-largest function in the recompiled binary. 3363 lines. 10 callees. 1 caller (sub_82CD7788).
+[functions."0x82CD6010"]
+name = "ProcessAndProcessAndProcess1054_82CD6010"
+
+
+# Process a structure by driving sub-operations (seven hundred and one hundred and one hundred and one hundred and fifty-fifth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess1054, sub_82CDDB68, sub_82CDDB80, sub_82CDF788) based on the result. Part of the 0x82CD7 process cluster. 186 lines. 4 callees. 1 caller (sub_82CD7960).
+[functions."0x82CD7788"]
+name = "ProcessAndProcessAndProcess1055_82CD7788"
+
+
+# Process a large data structure by querying the timebase (seven hundred and one hundred and one hundred and one hundred and fifty-sixth form). It takes a structure, queries the timebase (GetTimebase), and drives sub-operations (ProcessAndProcessAndProcess741, ProcessAndProcessAndProcess868, ProcessAndProcessAndProcess1055, ProcessAndProcessAndProcess1057) based on the result. This is the top-level entry to the 0x82CD6/0x82CD7 cluster. 199 lines. 5 callees. 0 callers.
+[functions."0x82CD7960"]
+name = "ProcessAndProcessAndProcess1056_82CD7960"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and fifty-seventh form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CDD process cluster. 8 lines. 0 callees. 1 caller (sub_82CD7960).
+[functions."0x82CDDB60"]
+name = "ProcessAndProcessAndProcess1057_82CDDB60"
+
+
+# Process a structure by computing a special-function value (seven hundred and one hundred and one hundred and one hundred and one hundred and tenth form). It takes a structure, computes a special-function value (ComputeSpecialFunction), and drives a sub-operation (ProcessAndProcessAndProcess504) based on the result. Part of the 0x82CDD process cluster. 219 lines. 2 callees. 2 callers (sub_82CDDB80 and sub_82CDE918).
+[functions."0x82CDD758"]
+name = "ProcessAndProcessAndProcess1110_82CDD758"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and forty-third form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CD3 UI rendering cluster. 57 lines. 0 callees. 2 callers (ProcessAndProcessAndProcess1139 and sub_82CE1588).
+[functions."0x82CD3810"]
+name = "ProcessAndProcessAndProcess1143_82CD3810"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and forty-fourth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CD3 UI rendering cluster. 53 lines. 0 callees. 3 callers (ProcessAndProcessAndProcess1139, sub_82CE1588, sub_82CE1E70).
+[functions."0x82CD3878"]
+name = "ProcessAndProcessAndProcess1144_82CD3878"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and forty-fifth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CD3 UI rendering cluster. 91 lines. 0 callees. 3 callers (ProcessAndProcessAndProcess1138, sub_82C44468, sub_82CE2618).
+[functions."0x82CD3B20"]
+name = "ProcessAndProcessAndProcess1145_82CD3B20"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and forty-sixth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CD3 UI rendering cluster. 37 lines. 0 callees. 3 callers (ProcessAndProcessAndProcess1139, sub_82CE09E0, sub_82CE1588).
+[functions."0x82CD3D00"]
+name = "ProcessAndProcessAndProcess1146_82CD3D00"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and forty-seventh form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CD3 UI rendering cluster. 37 lines. 0 callees. 2 callers (ProcessAndProcessAndProcess1139 and sub_82CE09E0).
+[functions."0x82CD3D40"]
+name = "ProcessAndProcessAndProcess1147_82CD3D40"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and forty-eighth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CD4 UI rendering cluster. 80 lines. 0 callees. 5 callers (sub_82C44F50, ProcessAndProcessAndProcess1139, sub_82CE11E0, sub_82CE12E0, sub_82CE2618).
+[functions."0x82CD4008"]
+name = "ProcessAndProcessAndProcess1148_82CD4008"
+
+
+# Process a structure by driving sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and forty-ninth form). It takes a structure and drives sub-operations (sub_82CD3C50, ProcessAndProcessAndProcess1150) based on the result. Part of the 0x82CD4 UI rendering cluster. 117 lines. 2 callees. 5 callers (sub_82C44F50, ProcessAndProcessAndProcess1139, sub_82CE11E0, sub_82CE12E0, sub_82CE2618).
+[functions."0x82CD40A0"]
+name = "ProcessAndProcessAndProcess1149_82CD40A0"
+
+
+# Process a large structure (seven hundred and one hundred and one hundred and one hundred and one hundred and fiftieth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CD4 UI rendering cluster. 188 lines. 0 callees. 2 callers (ProcessAndProcessAndProcess1149 and sub_82CE12E0).
+[functions."0x82CD4168"]
+name = "ProcessAndProcessAndProcess1150_82CD4168"
+
+
+# Process a large structure (seven hundred and one hundred and one hundred and one hundred and one hundred and fifty-first form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CD4 UI rendering cluster. 161 lines. 0 callees. 4 callers (sub_82C44F50, ProcessAndProcessAndProcess1139, sub_82CE12E0, sub_82CE2618).
+[functions."0x82CD42B8"]
+name = "ProcessAndProcessAndProcess1151_82CD42B8"
+
+
+# Process a large structure (seven hundred and one hundred and one hundred and one hundred and one hundred and fifty-third form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CD3 UI rendering cluster. 234 lines. 0 callees. 3 callers (ProcessAndProcessAndProcess1138, sub_82C44468, sub_82CE2618).
+[functions."0x82CD3968"]
+name = "ProcessAndProcessAndProcess1153_82CD3968"
+
+
+# Process a large structure (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and tenth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CD8 process cluster. 276 lines. 0 callees. 0 callers.
+[functions."0x82CD8C58"]
+name = "ProcessAndProcessAndProcess1210_82CD8C58"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and forty-sixth form). It takes a structure and checks its state, with no external sub-operations. Part of the UI text-rendering cluster in the 0x82CD2 region. 66 lines. 0 callees. 4 callers (sub_82C560A0, sub_82C566A0, sub_82C568A0, sub_82D017B0).
+[functions."0x82CD2AC0"]
+name = "ProcessAndProcessAndProcess1406_82CD2AC0"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and twenty-fourth form). It takes a structure and checks its state, with no external sub-operations. Part of the UI text-rendering cluster in the 0x82CD9 region. 120 lines. 0 callees. 0 callers.
+[functions."0x82CD9AF0"]
+name = "ProcessAndProcessAndProcess1524_82CD9AF0"
+
+
+# Process a very large data structure by copying memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and seventy-fourth form). It takes a structure, copies memory (MemCpy_SdkRuntime), and drives a sub-operation (sub_82CDD6D0) based on the result. Part of the 0x82CD4 process cluster. 552 lines. 2 callees. 0 callers.
+[functions."0x82CD4658"]
+name = "ProcessAndProcessAndProcess1574_82CD4658"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and eighty-first form). It takes a structure and checks its state, with no external sub-operations. This is a frequently-called helper in the 0x82CD2 process cluster. 54 lines. 0 callees. 5 callers.
+[functions."0x82CD2B88"]
+name = "ProcessAndProcessAndProcess1581_82CD2B88"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and eighty-second form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CE5 process cluster. 88 lines. 0 callees. 0 callers.
+[functions."0x82CE5410"]
+name = "ProcessAndProcessAndProcess1582_82CE5410"
+
+
+# Process a structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and third form). It takes a structure, checks its state, and drives sub-operations (sub_82CE69B8, sub_82CEBC18) based on the result. Part of the 0x82CF4 process cluster. 123 lines. 2 callees. 0 callers.
+[functions."0x82CF47D8"]
+name = "ProcessAndProcessAndProcess1603_82CF47D8"
+
+
+# Process a large data structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and thirty-sixth form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess763). Part of the 0x82CE6 process cluster. 359 lines. 1 callee. 1 caller (ProcessAndProcessAndProcess1603).
+[functions."0x82CE69B8"]
+name = "ProcessAndProcessAndProcess1636_82CE69B8"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and forty-fifth form). It takes a structure and drives a sub-operation (sub_82CC1C18). Part of the 0x82CC1 process cluster. 87 lines. 1 callee. 2 callers (sub_82B56918 and sub_82B57010).
+[functions."0x82CC1578"]
+name = "ProcessAndProcessAndProcess1645_82CC1578"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and forty-sixth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CC9 process cluster. 63 lines. 0 callees. 0 callers.
+[functions."0x82CC9F00"]
+name = "ProcessAndProcessAndProcess1646_82CC9F00"
+
+
+# Process a very large data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and fifty-fifth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CEB process cluster. 513 lines. 0 callees. 1 caller (ProcessAndProcessAndProcess882).
+[functions."0x82CEBF30"]
+name = "ProcessAndProcessAndProcess1655_82CEBF30"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and fifty-eighth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CD9 process cluster. 45 lines. 0 callees. 2 callers (sub_82CDAD08 and sub_82CDAD90).
+[functions."0x82CD9910"]
+name = "ProcessAndProcessAndProcess1658_82CD9910"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and fifty-ninth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CE4 process cluster. 64 lines. 0 callees. 0 callers.
+[functions."0x82CE4BE8"]
+name = "ProcessAndProcessAndProcess1659_82CE4BE8"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and sixtieth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CE4 process cluster. 12 lines. 0 callees. 0 callers.
+[functions."0x82CE4CE0"]
+name = "ProcessAndProcessAndProcess1660_82CE4CE0"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and seventy-ninth form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess1680). Part of the 0x82CD9 process cluster. 58 lines. 1 callee. 1 caller (sub_82CE09E0).
+[functions."0x82CD9F68"]
+name = "ProcessAndProcessAndProcess1679_82CD9F68"
+
+
+# Process a large structure by zeroing memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and eightieth form). It takes a structure and zeroes memory (MemSet_SdkRuntime). Part of the 0x82CE0 process cluster. 259 lines. 1 callee. 1 caller (ProcessAndProcessAndProcess1679).
+[functions."0x82CE04C8"]
+name = "ProcessAndProcessAndProcess1680_82CE04C8"
+
+
+# Process a large structure by setting a global field (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and ninety-sixth form). It takes a structure and sets a global field (SetGlobalField_Thunk). Part of the 0x82CC8 process cluster. 278 lines. 1 callee. 1 caller (ProcessAndProcessAndProcess1695).
+[functions."0x82CC87C8"]
+name = "ProcessAndProcessAndProcess1696_82CC87C8"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and fifth form). It takes a structure and checks its state, with no external sub-operations. This is a frequently-called helper in the 0x82CDD process cluster. 88 lines. 0 callees. 3 callers.
+[functions."0x82CDD6D0"]
+name = "ProcessAndProcessAndProcess1705_82CDD6D0"
+
+
+# Process a very large data structure by copying memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and sixth form). It takes a structure, copies memory (MemCpy_SdkRuntime), and drives sub-operations (ProcessAndProcessAndProcess1110, ProcessAndProcessAndProcess504, ProcessAndProcessAndProcess893) based on the result. This is one of the largest functions in the binary in the 0x82CDD process cluster. 2052 lines. 4 callees. 2 callers (ProcessAndProcessAndProcess1055 and ProcessAndProcessAndProcess1708).
+[functions."0x82CDDB80"]
+name = "ProcessAndProcessAndProcess1706_82CDDB80"
+
+
+# Process a large data structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and seventh form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess683). Part of the 0x82CDF process cluster. 386 lines. 1 callee. 1 caller (ProcessAndProcessAndProcess1708).
+[functions."0x82CDF4F8"]
+name = "ProcessAndProcessAndProcess1707_82CDF4F8"
+
+
+# Process a large data structure by copying memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and eighth form). It takes a structure, copies memory (MemCpy_SdkRuntime), and drives sub-operations (ProcessAndProcessAndProcess1705, ProcessAndProcessAndProcess1706, ProcessAndProcessAndProcess1707) based on the result. Part of the 0x82CDF process cluster. 227 lines. 4 callees. 1 caller (ProcessAndProcessAndProcess1055).
+[functions."0x82CDF788"]
+name = "ProcessAndProcessAndProcess1708_82CDF788"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and seventeenth form). It takes a structure and checks its state, with no external sub-operations. This is a frequently-called helper in the 0x82CD2 process cluster. 54 lines. 0 callees. 2 callers.
+[functions."0x82CD2BE0"]
+name = "ProcessAndProcessAndProcess1717_82CD2BE0"
+
+
+# Process a large structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and eighteenth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CDC process cluster. 136 lines. 0 callees. 0 callers.
+[functions."0x82CDC1E8"]
+name = "ProcessAndProcessAndProcess1718_82CDC1E8"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and thirty-fourth form). It takes a structure and checks its state, with no external sub-operations. This is a frequently-called helper in the 0x82CD2 process cluster. 58 lines. 0 callees. 4 callers.
+[functions."0x82CD2C38"]
+name = "ProcessAndProcessAndProcess1734_82CD2C38"
+
+
+# Process a very large data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and thirty-fifth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CDF process cluster. 498 lines. 0 callees. 2 callers (ProcessAndProcessAndProcess1736 and sub_82CE0260).
+[functions."0x82CDFB90"]
+name = "ProcessAndProcessAndProcess1735_82CDFB90"
+
+
+# Process a very large data structure by copying memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and thirty-sixth form). It takes a structure, copies memory (MemCpy_SdkRuntime), and drives a sub-operation (ProcessAndProcessAndProcess1735) based on the result. Part of the 0x82CDF process cluster. 389 lines. 2 callees. 2 callers (sub_82CE0890 and ProcessAndProcessAndProcess1737).
+[functions."0x82CDFFA8"]
+name = "ProcessAndProcessAndProcess1736_82CDFFA8"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and thirty-seventh form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess1736). Part of the 0x82CE3 process cluster. 9 lines. 1 callee. 1 caller (TailCall_82CE3760).
+[functions."0x82CE3220"]
+name = "ProcessAndProcessAndProcess1737_82CE3220"
+
+
+# Process a very large data structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and fifty-fifth form). It takes a structure, checks its state, and drives sub-operations (Stub_ReturnZero, sub_82CDA478) based on the result. Part of the 0x82CE6 process cluster. 547 lines. 2 callees. 5 callers.
+[functions."0x82CE62C0"]
+name = "ProcessAndProcessAndProcess1755_82CE62C0"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and seventy-eighth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CE3 process cluster. 47 lines. 0 callees. 1 caller (sub_82CD8348).
+[functions."0x82CE31B8"]
+name = "ProcessAndProcessAndProcess1778_82CE31B8"
+
+
+# Process a very large data structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and ninety-first form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess1793). Part of the 0x82CDC process cluster. 372 lines. 1 callee. 2 callers (sub_82CDCE38 and sub_82CDCFE8).
+[functions."0x82CDC850"]
+name = "ProcessAndProcessAndProcess1791_82CDC850"
+
+
+# Process a large structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and ninety-third form). It takes a structure and checks its state, with no external sub-operations. This is a frequently-called helper in the 0x82CDA process cluster. 189 lines. 0 callees. 2 callers (ProcessAndProcessAndProcess1755 and ProcessAndProcessAndProcess1791).
+[functions."0x82CDA478"]
+name = "ProcessAndProcessAndProcess1793_82CDA478"
+
+
+# Process a large structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and ninety-sixth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CE3 process cluster. 177 lines. 0 callees. 1 caller (sub_82CE3BD0).
+[functions."0x82CE3988"]
+name = "ProcessAndProcessAndProcess1796_82CE3988"
+
+
+# Process a structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and one hundred and eighth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess1755, ProcessAndProcessAndProcess1791) based on the result. Part of the 0x82CDC process cluster. 101 lines. 2 callees. 0 callers.
+[functions."0x82CDCE38"]
+name = "ProcessAndProcessAndProcess1808_82CDCE38"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and one hundred and thirty-fifth form). It takes a structure and checks its state, with no external sub-operations. This is a frequently-called helper in the 0x82CDF process cluster. 92 lines. 0 callees. 3 callers.
+[functions."0x82CDFA78"]
+name = "ProcessAndProcessAndProcess1835_82CDFA78"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and one hundred and thirty-sixth form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess1835). Part of the 0x82CE3 process cluster. 9 lines. 1 callee. 1 caller (sub_82CE3748).
+[functions."0x82CE3230"]
+name = "ProcessAndProcessAndProcess1836_82CE3230"
+
+
+# Process a very large data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and one hundred and forty-seventh form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CD8 process cluster. 352 lines. 0 callees. 0 callers.
+[functions."0x82CD88C0"]
+name = "ProcessAndProcessAndProcess1847_82CD88C0"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and one hundred and sixty-first form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CDB process cluster. 22 lines. 0 callees. 1 caller (ProcessAndProcessAndProcess1863).
+[functions."0x82CDBAA0"]
+name = "ProcessAndProcessAndProcess1861_82CDBAA0"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and one hundred and sixty-second form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CDB process cluster. 78 lines. 0 callees. 0 callers.
+[functions."0x82CDBB80"]
+name = "ProcessAndProcessAndProcess1862_82CDBB80"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and one hundred and sixty-third form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess1861). This is a frequently-called helper in the 0x82CE5 process cluster. 88 lines. 1 callee. 3 callers.
+[functions."0x82CE5C70"]
+name = "ProcessAndProcessAndProcess1863_82CE5C70"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and one hundred and sixty-sixth form). It takes a structure and checks its state, with no external sub-operations. This is a frequently-called helper in the 0x82CDB process cluster. 22 lines. 0 callees. 3 callers.
+[functions."0x82CDBA80"]
+name = "ProcessAndProcessAndProcess1866_82CDBA80"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and one hundred and sixty-seventh form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CDB process cluster. 76 lines. 0 callees. 0 callers.
+[functions."0x82CDBAF8"]
+name = "ProcessAndProcessAndProcess1867_82CDBAF8"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and one hundred and eighty-second form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CD4 process cluster. 53 lines. 0 callees. 0 callers.
+[functions."0x82CD43F0"]
+name = "ProcessAndProcessAndProcess1882_82CD43F0"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and one hundred and eighty-fourth form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess1885). This is a frequently-called helper in the 0x82CD2 process cluster. 54 lines. 1 callee. 4 callers.
+[functions."0x82CD2C98"]
+name = "ProcessAndProcessAndProcess1884_82CD2C98"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and one hundred and eighty-fifth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CDC process cluster. 60 lines. 0 callees. 1 caller (ProcessAndProcessAndProcess1884).
+[functions."0x82CDC180"]
+name = "ProcessAndProcessAndProcess1885_82CDC180"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and one hundred and eighty-seventh form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess1657). This is a frequently-called helper in the 0x82CD9 process cluster. 11 lines. 1 callee. 5 callers.
+[functions."0x82CD9FC8"]
+name = "ProcessAndProcessAndProcess1887_82CD9FC8"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and one hundred and ninety-eighth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CE3 process cluster. 16 lines. 0 callees. 1 caller (sub_82CE1540).
+[functions."0x82CE31A0"]
+name = "ProcessAndProcessAndProcess1898_82CE31A0"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and two hundred and fourth form). It takes a structure and checks its state, with no external sub-operations. This is a frequently-called helper in the 0x82CE5 process cluster. 60 lines. 0 callees. 2 callers (sub_82CE54A8 and sub_82CE5548).
+[functions."0x82CE53B0"]
+name = "ProcessAndProcessAndProcess1913_82CE53B0"
+
+
+# Process a structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and two hundred and ninth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess626, sub_82CFE4C8) based on the result. This is a frequently-called helper in the 0x82CFC process cluster. 90 lines. 2 callees. 3 callers.
+[functions."0x82CFC8E8"]
+name = "ProcessAndProcessAndProcess1918_82CFC8E8"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and two hundred and twelfth form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess1920). This is a frequently-called helper in the 0x82CFE process cluster. 27 lines. 1 callee. 5 callers.
+[functions."0x82CFE4C8"]
+name = "ProcessAndProcessAndProcess1919_82CFE4C8"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and two hundred and thirteenth form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess626). Part of the 0x82CFE process cluster. 93 lines. 1 callee. 1 caller (ProcessAndProcessAndProcess1919).
+[functions."0x82CFE978"]
+name = "ProcessAndProcessAndProcess1920_82CFE978"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and two hundred and fifty-second form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CDC process cluster. 60 lines. 0 callees. 1 caller (ProcessAndProcessAndProcess1953).
+[functions."0x82CDC118"]
+name = "ProcessAndProcessAndProcess1952_82CDC118"
+
+
+# Process a large structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and two hundred and fifty-third form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess1952). This is a frequently-called helper in the 0x82CDC process cluster. 115 lines. 1 callee. 2 callers (sub_82CDC4F8 and sub_82CDC770).
+[functions."0x82CDC430"]
+name = "ProcessAndProcessAndProcess1953_82CDC430"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and two hundred and sixty-third form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess1657). Part of the 0x82CFD process cluster. 15 lines. 1 callee. 0 callers.
+[functions."0x82CFDDF0"]
+name = "ProcessAndProcessAndProcess1963_82CFDDF0"
+
+
+# Process a very large data structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and two hundred and ninety-seventh form). It takes a structure and drives a sub-operation (Stub_ReturnZero). This is a frequently-called processor in the 0x82CE6 process cluster. 315 lines. 1 callee. 2 callers (sub_82CDCFE8 and sub_82CE4780).
+[functions."0x82CE6098"]
+name = "ProcessAndProcessAndProcess1997_82CE6098"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and three hundred and sixty-first form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess1658). This is a frequently-called helper in the 0x82CDA process cluster. 78 lines. 1 callee. 2 callers (sub_82CDAD90 and sub_82CE6898).
+[functions."0x82CDAD08"]
+name = "ProcessAndProcessAndProcess2061_82CDAD08"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and three hundred and seventy-first form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess2048). This is a frequently-called helper in the 0x82CD9 process cluster. 11 lines. 1 callee. 16 callers.
+[functions."0x82CD9FD8"]
+name = "ProcessAndProcessAndProcess2071_82CD9FD8"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and three hundred and seventy-ninth form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess1887). Part of the 0x82CE4 process cluster. 90 lines. 1 callee. 1 caller (ProcessAndProcessAndProcess2080).
+[functions."0x82CE4F40"]
+name = "ProcessAndProcessAndProcess2079_82CE4F40"
+
+
+# Process a large structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and three hundred and eightieth form). It takes a structure, checks its state, and drives sub-operations (sub_82CE4E90, ProcessAndProcessAndProcess2079) based on the result. This is a frequently-called helper in the 0x82CE4 process cluster. 105 lines. 2 callees. 4 callers.
+[functions."0x82CE4FE0"]
+name = "ProcessAndProcessAndProcess2080_82CE4FE0"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and three hundred and eighty-third form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CD8 process cluster. 10 lines. 0 callees. 0 callers.
+[functions."0x82CD8678"]
+name = "ProcessAndProcessAndProcess2083_82CD8678"
+
+
+# Process a large structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and three hundred and eighty-fourth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CD8 process cluster. 113 lines. 0 callees. 0 callers.
+[functions."0x82CD86A0"]
+name = "ProcessAndProcessAndProcess2084_82CD86A0"
+
+
+# Process a large structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and three hundred and eighty-fifth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CD9 process cluster. 122 lines. 0 callees. 0 callers.
+[functions."0x82CD9320"]
+name = "ProcessAndProcessAndProcess2085_82CD9320"
+
+
+# Process a large structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and three hundred and eighty-sixth form). It takes a structure and drives a sub-operation (sub_82CD2660). Part of the 0x82CE5 process cluster. 114 lines. 1 callee. 1 caller (sub_82CE5548).
+[functions."0x82CE52F0"]
+name = "ProcessAndProcessAndProcess2086_82CE52F0"
+
+
+# Process a large structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and three hundred and eighty-seventh form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess1866, sub_82CD7FF8) based on the result. This is a frequently-called helper in the 0x82CE5 process cluster. 129 lines. 2 callees. 2 callers (sub_82CE48C8 and ProcessAndProcessAndProcess2092).
+[functions."0x82CE5AB8"]
+name = "ProcessAndProcessAndProcess2087_82CE5AB8"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and three hundred and eighty-eighth form). It takes a structure and checks its state, with no external sub-operations. This is a frequently-called helper in the 0x82CE5 process cluster. 87 lines. 0 callees. 2 callers (sub_82CE4A50 and ProcessAndProcessAndProcess2091).
+[functions."0x82CE5E08"]
+name = "ProcessAndProcessAndProcess2088_82CE5E08"
+
+
+# Process a large structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and three hundred and eighty-ninth form). It takes a structure, checks its state, and drives sub-operations (sub_82CD7D00, sub_82CD8050, sub_82CE5F08) based on the result. This is a frequently-called helper in the 0x82CE6 process cluster. 176 lines. 3 callees. 2 callers (sub_82CE4600 and ProcessAndProcessAndProcess2093).
+[functions."0x82CE6680"]
+name = "ProcessAndProcessAndProcess2089_82CE6680"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and three hundred and ninetieth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CD9 process cluster. 41 lines. 0 callees. 0 callers.
+[functions."0x82CD92D8"]
+name = "ProcessAndProcessAndProcess2090_82CD92D8"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and three hundred and ninety-first form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess2088). This is a frequently-called helper in the 0x82CE5 process cluster. 38 lines. 1 callee. 2 callers (sub_82CDCAE0 and sub_82CDD388).
+[functions."0x82CE5090"]
+name = "ProcessAndProcessAndProcess2091_82CE5090"
+
+
+# Process a large structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and three hundred and ninety-second form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess1866, ProcessAndProcessAndProcess2087) based on the result. This is a frequently-called helper in the 0x82CE5 process cluster. 100 lines. 2 callees. 2 callers (sub_82CDC4F8 and sub_82CDD4C8).
+[functions."0x82CE5120"]
+name = "ProcessAndProcessAndProcess2092_82CE5120"
+
+
+# Process a large structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and three hundred and ninety-third form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess1863, ProcessAndProcessAndProcess2089) based on the result. This is a frequently-called helper in the 0x82CE5 process cluster. 157 lines. 2 callees. 2 callers (sub_82CDC770 and sub_82CDD320).
+[functions."0x82CE51D8"]
+name = "ProcessAndProcessAndProcess2093_82CE51D8"
+
+
+# Process a large structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and three hundred and ninety-fourth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess1913, ProcessAndProcessAndProcess2086) based on the result. Part of the 0x82CE5 process cluster. 118 lines. 2 callees. 1 caller (sub_82CDD318).
+[functions."0x82CE5548"]
+name = "ProcessAndProcessAndProcess2094_82CE5548"
+
+
+# Process a large structure by setting a global field (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and four hundred and seventeenth form). It takes a structure, sets a global field (SetGlobalField_Thunk), and computes a UTF-16 string length (StrLenUTF16). Part of the 0x82CC8 process cluster. 177 lines. 2 callees. 1 caller (ProcessAndClearAndConvert).
+[functions."0x82CC8B50"]
+name = "ProcessAndProcessAndProcess2117_82CC8B50"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and five hundred and sixteenth form). It takes a structure and drives a sub-operation (sub_82CDCEE8). This is a frequently-called helper in the 0x82CD3 process cluster. 59 lines. 1 callee. 4 callers.
+[functions."0x82CD32A8"]
+name = "ProcessAndProcessAndProcess2216_82CD32A8"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and five hundred and seventeenth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CD7 process cluster. 22 lines. 0 callees. 1 caller (ProcessAndProcessAndProcess2089).
+[functions."0x82CD7D00"]
+name = "ProcessAndProcessAndProcess2217_82CD7D00"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and five hundred and eighteenth form). It takes a structure and drives a sub-operation (sub_82CDFA10). This is a frequently-called helper in the 0x82CD9 process cluster. 29 lines. 1 callee. 2 callers (sub_82CE24B0 and sub_82CE3BE0).
+[functions."0x82CD93F8"]
+name = "ProcessAndProcessAndProcess2218_82CD93F8"
+
+
+# Process a structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and five hundred and nineteenth form). It takes a structure, checks its state, and drives sub-operations (sub_82CE1560, ProcessAndProcessAndProcess2229) based on the result. Part of the 0x82CD9 process cluster. 28 lines. 2 callees. 0 callers.
+[functions."0x82CD9618"]
+name = "ProcessAndProcessAndProcess2219_82CD9618"
+
+
+# Process a structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and five hundred and twentieth form). It takes a structure, checks its state, and drives sub-operations (sub_82CE30E0, sub_82CE4400) based on the result. Part of the 0x82CD9 process cluster. 28 lines. 2 callees. 0 callers.
+[functions."0x82CD9640"]
+name = "ProcessAndProcessAndProcess2220_82CD9640"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and five hundred and twenty-first form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess2226). This is a frequently-called helper in the 0x82CD9 process cluster. 60 lines. 1 callee. 2 callers (sub_82CE24B0 and ProcessAndProcessAndProcess2230).
+[functions."0x82CD9668"]
+name = "ProcessAndProcessAndProcess2221_82CD9668"
+
+
+# Process a large structure by copying memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and five hundred and twenty-second form). It takes a structure, copies memory (MemCpy_SdkRuntime), and drives sub-operations (ProcessAndProcessAndProcess1866, ProcessAndProcessAndProcess1953, ProcessAndProcessAndProcess2092) based on the result. Part of the 0x82CDC process cluster. 132 lines. 4 callees. 1 caller (ProcessAndProcessAndProcess2225).
+[functions."0x82CDC4F8"]
+name = "ProcessAndProcessAndProcess2222_82CDC4F8"
+
+
+# Process a large structure by copying memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and five hundred and twenty-third form). It takes a structure, copies memory (MemCpy_SdkRuntime), and drives sub-operations (ProcessAndProcessAndProcess1863, ProcessAndProcessAndProcess1953, ProcessAndProcessAndProcess2093) based on the result. Part of the 0x82CDC process cluster. 129 lines. 4 callees. 1 caller (ProcessAndProcessAndProcess2225).
+[functions."0x82CDC770"]
+name = "ProcessAndProcessAndProcess2223_82CDC770"
+
+
+# Process a large structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and five hundred and twenty-fourth form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess2091). Part of the 0x82CDC process cluster. 147 lines. 1 callee. 1 caller (ProcessAndProcessAndProcess2225).
+[functions."0x82CDCAE0"]
+name = "ProcessAndProcessAndProcess2224_82CDCAE0"
+
+
+# Process a large structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and five hundred and twenty-fifth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess2080, ProcessAndProcessAndProcess2222, ProcessAndProcessAndProcess2223, ProcessAndProcessAndProcess2224) based on the result. Part of the 0x82CDC process cluster. 151 lines. 4 callees. 1 caller (ProcessAndProcessAndProcess2216).
+[functions."0x82CDCEE8"]
+name = "ProcessAndProcessAndProcess2225_82CDCEE8"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and five hundred and twenty-sixth form). It takes a structure and drives a sub-operation (sub_82CE6990). Part of the 0x82CDF process cluster. 40 lines. 1 callee. 1 caller (ProcessAndProcessAndProcess2221).
+[functions."0x82CDF9B8"]
+name = "ProcessAndProcessAndProcess2226_82CDF9B8"
+
+
+# Process a structure by copying memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and five hundred and twenty-seventh form). It takes a structure, copies memory (MemCpy_SdkRuntime), and drives a sub-operation (sub_82CE68D0) based on the result. Part of the 0x82CDF process cluster. 68 lines. 2 callees. 1 caller (ProcessAndProcessAndProcess2218).
+[functions."0x82CDFA10"]
+name = "ProcessAndProcessAndProcess2227_82CDFA10"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and five hundred and twenty-eighth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CE3 process cluster. 18 lines. 0 callees. 1 caller (sub_82CE3758).
+[functions."0x82CE3200"]
+name = "ProcessAndProcessAndProcess2228_82CE3200"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and five hundred and twenty-ninth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CE3 process cluster. 16 lines. 0 callees. 1 caller (ProcessAndProcessAndProcess2219).
+[functions."0x82CE3BB0"]
+name = "ProcessAndProcessAndProcess2229_82CE3BB0"
+
+
+# Process a large structure by setting memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and five hundred and thirtieth form). It takes a structure, sets memory (MemSet_SdkRuntime), and drives sub-operations (ProcessAndProcessAndProcess2218, ProcessAndProcessAndProcess2221) based on the result. Part of the 0x82CE3 process cluster. 151 lines. 3 callees. 1 caller (sub_82CE4400).
+[functions."0x82CE3BE0"]
+name = "ProcessAndProcessAndProcess2230_82CE3BE0"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and five hundred and thirty-first form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess2230). Part of the 0x82CE4 process cluster. 69 lines. 1 callee. 1 caller (ProcessAndProcessAndProcess2220).
+[functions."0x82CE4400"]
+name = "ProcessAndProcessAndProcess2231_82CE4400"
+
+
+# Process a large structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and five hundred and thirty-second form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CE6 process cluster. 106 lines. 0 callees. 1 caller (ProcessAndProcessAndProcess2227).
+[functions."0x82CE68D0"]
+name = "ProcessAndProcessAndProcess2232_82CE68D0"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and five hundred and thirty-third form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CE6 process cluster. 22 lines. 0 callees. 1 caller (ProcessAndProcessAndProcess2226).
+[functions."0x82CE6990"]
+name = "ProcessAndProcessAndProcess2233_82CE6990"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and five hundred and forty-third form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CDC process cluster. 12 lines. 0 callees. 0 callers.
+[functions."0x82CDC740"]
+name = "ProcessAndProcessAndProcess2243_82CDC740"
+
+
+# Process a very large data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and five hundred and forty-ninth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CE5 process cluster. 219 lines. 0 callees. 0 callers.
+[functions."0x82CE5848"]
+name = "ProcessAndProcessAndProcess2249_82CE5848"
+
+
+# Process a large structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and five hundred and fifty-second form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CD2 process cluster. 153 lines. 0 callees. 1 caller (ProcessAndProcessAndProcess2086).
+[functions."0x82CD2660"]
+name = "ProcessAndProcessAndProcess2252_82CD2660"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and five hundred and fifty-third form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CDC process cluster. 18 lines. 0 callees. 0 callers.
+[functions."0x82CDC750"]
+name = "ProcessAndProcessAndProcess2253_82CDC750"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and five hundred and seventy-second form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess2273). This is a frequently-called helper in the 0x82CD2 process cluster. 48 lines. 1 callee. 7 callers.
+[functions."0x82CD2CF0"]
+name = "ProcessAndProcessAndProcess2272_82CD2CF0"
+
+
+# Process a structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and five hundred and seventy-third form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess1791, ProcessAndProcessAndProcess1997, sub_82CDCC08) based on the result. This is a frequently-called helper in the 0x82CDC process cluster. 95 lines. 3 callees. 2 callers (ProcessAndProcessAndProcess2272 and sub_82CDA9F8).
+[functions."0x82CDCFE8"]
+name = "ProcessAndProcessAndProcess2273_82CDCFE8"
+
+
+# Process a large structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and five hundred and seventy-fourth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82CE3 process cluster. 144 lines. 0 callees. 1 caller (sub_82CE3BD8).
+[functions."0x82CE3890"]
+name = "ProcessAndProcessAndProcess2274_82CE3890"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and five hundred and seventy-eighth form). It takes a structure and checks its state, with no external sub-operations. This is a frequently-called helper in the 0x82CD2 process cluster. 71 lines. 0 callees. 2 callers (ProcessAndProcessAndProcess759 and sub_832B66A0).
+[functions."0x82CD2FD0"]
+name = "ProcessAndProcessAndProcess2278_82CD2FD0"
+
+
+# Process a structure by checking its state and driving sub-operations (two thousand two hundred and eightieth form). It takes a structure (a: field at a->8), a value (b), a value (c), and a value (d); it checks the structure's state, and drives sub-operations (MmGetPhysicalAddress and sub_82CD3F20) based on the result. This is the "process this data" routine (two thousand two hundred and eightieth form), part of the 0x82CD3 process cluster. 123 lines. 2 callees. 2 callers (ProcessAndProcessAndProcess2277 and sub_82CE1588).
+[functions."0x82CD36B8"]
+name = "ProcessAndProcessAndProcess2279_82CD36B8"
+
+
+# Process a value by checking its state and driving many sub-operations (two thousand two hundred and eightieth form). It takes a value (a), a float (b), and a value (c); it checks the value's state, and drives many sub-operations (ProcessAndProcessAndProcess504, KeAcquireSpinLockAtRaisedIrql, KeRaiseIrqlToDpcLevel, KeReleaseSpinLockFromRaisedIrql, and KfLowerIrql) based on the result. This is the "process this data" routine (two thousand two hundred and eightieth form), part of the 0x82CE3 process cluster. 165 lines. 5 callees. 1 caller (sub_82CE3788).
+[functions."0x82CE3528"]
+name = "ProcessAndProcessAndProcess2280_82CE3528"
+
+
+# Process a structure by initializing it from a source structure (two thousand two hundred and eighty-second form). It takes a structure (a: fields at a->1, a->12, a->20, a->24, a->8, and a->9) and a value (b); it initializes the structure's fields from the source. This is the "process this data" routine (two thousand two hundred and eighty-second form), part of the 0x82CDD process cluster. 72 lines. 0 callees. 2 callers (sub_82CDD4C8 and sub_82CDD320).
+[functions."0x82CDD0F8"]
+name = "ProcessAndProcessAndProcess2281_82CDD0F8"
+
+
+# Process a value by checking its state and driving many sub-operations (two thousand three hundred and forty-first form). It takes a value (a), a value (b), a value (c), a value (d), and a value (e); it checks the value's state, and drives many sub-operations (ProcessAndProcessAndProcess1887, MmGetPhysicalAddress, ProcessAndProcessAndProcess2339, and more) based on the result. This is the "process this data" routine (two thousand three hundred and forty-first form), part of the 0x82CD3 process cluster. 286 lines. 6 callees. 2 callers (ProcessAndProcessAndProcess1137 and sub_82CE1000).
+[functions."0x82CD3380"]
+name = "ProcessAndProcessAndProcess2340_82CD3380"
+
+
+# Process a value by computing it (two thousand three hundred and forty-second form). It takes a value (a) and a value (b); it computes the value. This is the "process this data" routine (two thousand three hundred and forty-second form), part of the 0x82CD3 process cluster. 50 lines. 0 callees. 1 caller (ProcessAndProcessAndProcess2340).
+[functions."0x82CD35D8"]
+name = "ProcessAndProcessAndProcess2341_82CD35D8"
+
+
+# Process a structure by checking its state and modifying it (two thousand three hundred and forty-third form). It takes a structure (a: field at a->8), a value (b), a value (c), and a value (d); it checks the structure's state, and modifies it based on the result. This is the "process this data" routine (two thousand three hundred and forty-third form), part of the 0x82CD3 process cluster. 30 lines. 0 callees. 2 callers (ProcessAndProcessAndProcess2277 and sub_82CE1588).
+[functions."0x82CD3EE8"]
+name = "ProcessAndProcessAndProcess2342_82CD3EE8"
+
+
+# Process a value by computing it (two thousand three hundred and forty-fourth form). It takes a value (a); it computes the value. This is the "process this data" routine (two thousand three hundred and forty-fourth form), part of the 0x82CD3 process cluster. 18 lines. 0 callees. 1 caller (sub_82CD36B8).
+[functions."0x82CD3F20"]
+name = "ProcessAndProcessAndProcess2343_82CD3F20"
+
+
+# Process a structure by checking its state and driving many sub-operations (two thousand three hundred and forty-fifth form). It takes a structure (a: fields at a->0 and a->8); it checks the structure's state, and drives many sub-operations (MmGetPhysicalAddress, XMACreateContext, and more) based on the result. This is the "process this data" routine (two thousand three hundred and forty-fifth form), part of the 0x82CD3 process cluster. 115 lines. 2 callees. 2 callers (sub_82CE2100 and ProcessAndProcessAndProcess2340).
+[functions."0x82CD3F40"]
+name = "ProcessAndProcessAndProcess2344_82CD3F40"
+
+
+# Process a value by checking its state and driving many sub-operations (two thousand three hundred and forty-sixth form). It takes a value (a); it checks the value's state, and drives many sub-operations (KeAcquireSpinLockAtRaisedIrql, KeRaiseIrqlToDpcLevel, KeReleaseSpinLockFromRaisedIrql, KfLowerIrql, and more) based on the result. This is the "process this data" routine (two thousand three hundred and forty-sixth form), part of the 0x82CE5 process cluster. 188 lines. 4 callees. 0 callers.
+[functions."0x82CE56A0"]
+name = "ProcessAndProcessAndProcess2345_82CE56A0"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand three hundred and fiftieth form). It takes a value (a); it checks the value's state, and drives sub-operations (RtlEnterCriticalSection, RtlLeaveCriticalSection, and more) based on the result. This is the "process this data" routine (two thousand three hundred and fiftieth form), part of the 0x82CD2 process cluster. 60 lines. 2 callees. 10 callers (sub_82D01D30, sub_82D01858, sub_832B6FF8, sub_82D02058, sub_82C54750, and more).
+[functions."0x82CD2A58"]
+name = "ProcessAndProcessAndProcess2349_82CD2A58"
+
+
+# Process a value by checking its state (two thousand three hundred and fifty-first form). It takes a value (a); it checks the value's state. This is the "process this data" routine (two thousand three hundred and fifty-first form), part of the 0x82CD7 process cluster. 22 lines. 0 callees. 2 callers (sub_82CDAD90 and sub_82CE5BA0).
+[functions."0x82CD7D20"]
+name = "ProcessAndProcessAndProcess2350_82CD7D20"
+
+
+# Process a value by checking its state (two thousand three hundred and fifty-second form). It takes a value (a); it checks the value's state. This is the "process this data" routine (two thousand three hundred and fifty-second form), part of the 0x82CD8 process cluster. 9 lines. 1 callee. 0 callers.
+[functions."0x82CD8648"]
+name = "ProcessAndProcessAndProcess2351_82CD8648"
+
+
+# Process a value by modifying it (two thousand three hundred and fifty-third form). It takes a value (a); it modifies the value. This is the "process this data" routine (two thousand three hundred and fifty-third form), part of the 0x82CD8 process cluster. 26 lines. 0 callees. 1 caller (ProcessAndProcessAndProcess2351).
+[functions."0x82CD8F28"]
+name = "ProcessAndProcessAndProcess2352_82CD8F28"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand three hundred and fifty-fourth form). It takes a value (a); it checks the value's state, and drives sub-operations based on the result. This is the "process this data" routine (two thousand three hundred and fifty-fourth form), part of the 0x82CD9 process cluster. 50 lines. 1 callee. 2 callers (sub_82CE0818 and sub_82CE33A8).
+[functions."0x82CD9958"]
+name = "ProcessAndProcessAndProcess2353_82CD9958"
+
+
+# Process a structure by checking its state and driving sub-operations (two thousand three hundred and fifty-fifth form). It takes a structure (a: fields at a->8 and a->0); it checks the structure's state, and drives sub-operations based on the result. This is the "process this data" routine (two thousand three hundred and fifty-fifth form), part of the 0x82CDA process cluster. 78 lines. 0 callees. 0 callers.
+[functions."0x82CDA270"]
+name = "ProcessAndProcessAndProcess2354_82CDA270"
+
+
+# Process a value by checking its state and driving many sub-operations (two thousand three hundred and fifty-sixth form). It takes a value (a); it checks the value's state, and drives many sub-operations (KeAcquireSpinLockAtRaisedIrql, KeRaiseIrqlToDpcLevel, KeReleaseSpinLockFromRaisedIrql, KfLowerIrql, and more) based on the result. This is the "process this data" routine (two thousand three hundred and fifty-sixth form), part of the 0x82CDC process cluster. 195 lines. 5 callees. 1 caller (sub_82CDCBD8).
+[functions."0x82CDC5D8"]
+name = "ProcessAndProcessAndProcess2355_82CDC5D8"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand three hundred and fifty-seventh form). It takes a value (a); it checks the value's state, and drives sub-operations (ProcessAndProcessAndProcess2355) based on the result. This is the "process this data" routine (two thousand three hundred and fifty-seventh form), part of the 0x82CDC process cluster. 32 lines. 1 callee. 0 callers.
+[functions."0x82CDCBD8"]
+name = "ProcessAndProcessAndProcess2356_82CDCBD8"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand three hundred and fifty-eighth form). It takes a value (a); it checks the value's state, and drives sub-operations based on the result. This is the "process this data" routine (two thousand three hundred and fifty-eighth form), part of the 0x82CDF process cluster. 17 lines. 1 callee. 2 callers (ProcessAndProcessAndProcess2353 and sub_82CD9EE0).
+[functions."0x82CDF9F8"]
+name = "ProcessAndProcessAndProcess2357_82CDF9F8"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand three hundred and fifty-ninth form). It takes a value (a); it checks the value's state, and drives sub-operations based on the result. This is the "process this data" routine (two thousand three hundred and fifty-ninth form), part of the 0x82CE3 process cluster. 9 lines. 1 callee. 0 callers.
+[functions."0x82CE3198"]
+name = "ProcessAndProcessAndProcess2358_82CE3198"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand three hundred and sixtieth form). It takes a value (a); it checks the value's state, and drives sub-operations (ProcessAndProcessAndProcess2353) based on the result. This is the "process this data" routine (two thousand three hundred and sixtieth form), part of the 0x82CE3 process cluster. 52 lines. 1 callee. 2 callers (ProcessAndProcessAndProcess2358 and sub_82CE3190).
+[functions."0x82CE33A8"]
+name = "ProcessAndProcessAndProcess2359_82CE33A8"
+
+
+# Process a structure by checking its state and driving sub-operations (two thousand three hundred and sixty-first form). It takes a structure (a: fields at a->24 and a->4); it checks the structure's state, and drives sub-operations (ProcessAndProcessAndProcess2071) based on the result. This is the "process this data" routine (two thousand three hundred and sixty-first form), part of the 0x82CE4 process cluster. 71 lines. 1 callee. 3 callers (sub_82CE4DC8, sub_82CE4D68, and sub_82CE4E40).
+[functions."0x82CE4C58"]
+name = "ProcessAndProcessAndProcess2360_82CE4C58"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand three hundred and sixty-second form). It takes a value (a); it checks the value's state, and drives sub-operations based on the result. This is the "process this data" routine (two thousand three hundred and sixty-second form), part of the 0x82CE4 process cluster. 9 lines. 1 callee. 0 callers.
+[functions."0x82CE4CF8"]
+name = "ProcessAndProcessAndProcess2361_82CE4CF8"
+
+
+# Process a structure by checking its state and driving sub-operations (two thousand three hundred and sixty-third form). It takes a structure (a: fields at a->0 and a->8); it checks the structure's state, and drives sub-operations (ProcessAndProcessAndProcess2071) based on the result. This is the "process this data" routine (two thousand three hundred and sixty-third form), part of the 0x82CE4 process cluster. 60 lines. 1 callee. 0 callers.
+[functions."0x82CE4D00"]
+name = "ProcessAndProcessAndProcess2362_82CE4D00"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand three hundred and sixty-fourth form). It takes a value (a); it checks the value's state, and drives sub-operations (ProcessAndProcessAndProcess2360) based on the result. This is the "process this data" routine (two thousand three hundred and sixty-fourth form), part of the 0x82CE4 process cluster. 48 lines. 1 callee. 1 caller (ProcessAndProcessAndProcess2361).
+[functions."0x82CE4E40"]
+name = "ProcessAndProcessAndProcess2363_82CE4E40"
+
+
+# Process a structure by checking its state and driving many sub-operations (two thousand three hundred and sixty-fifth form). It takes a structure (a: fields at a->0, a->68, and a->72); it checks the structure's state, and drives many sub-operations (ProcessAndProcessAndProcess1755, ProcessAndProcessAndProcess1913, and more) based on the result. This is the "process this data" routine (two thousand three hundred and sixty-fifth form), part of the 0x82CE5 process cluster. 94 lines. 3 callees. 3 callers (sub_82CE57E8, ProcessAndProcessAndProcess2355, and sub_82CDD1F0).
+[functions."0x82CE54A8"]
+name = "ProcessAndProcessAndProcess2364_82CE54A8"
+
+
+# Process a structure by checking its state and driving sub-operations (two thousand three hundred and sixty-sixth form). It takes a structure (a: fields at a->60 and a->36); it checks the structure's state, and drives sub-operations (ProcessAndProcessAndProcess2350) based on the result. This is the "process this data" routine (two thousand three hundred and sixty-sixth form), part of the 0x82CE5 process cluster. 119 lines. 1 callee. 3 callers (sub_82CE4470, sub_82CE5EA8, and ProcessAndProcessAndProcess2364).
+[functions."0x82CE5BA0"]
+name = "ProcessAndProcessAndProcess2365_82CE5BA0"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand three hundred and sixty-seventh form). It takes a value (a); it checks the value's state, and drives sub-operations (ProcessAndProcessAndProcess2061) based on the result. This is the "process this data" routine (two thousand three hundred and sixty-seventh form), part of the 0x82CE6 process cluster. 37 lines. 1 callee. 2 callers (ProcessAndProcessAndProcess2357 and sub_82CDFB20).
+[functions."0x82CE6898"]
+name = "ProcessAndProcessAndProcess2366_82CE6898"
+
+
+# Process a structure by checking its state and driving sub-operations (two thousand four hundred and seventeenth form). It takes a structure (a: field at a->4); it checks the structure's state, and drives sub-operations (ProcessAndProcessAndProcess2071) based on the result. This is the "process this data" routine (two thousand four hundred and seventeenth form), part of the 0x82CD3 process cluster. 54 lines. 2 callees. 4 callers (sub_82CD3380, sub_82C45A80, sub_82CE0818, and sub_82C450D8).
+[functions."0x82CD3580"]
+name = "ProcessAndProcessAndProcess2416_82CD3580"
+
+
+# Process a structure by checking its state and driving sub-operations (two thousand four hundred and eighteenth form). It takes a structure (a: fields at a->0 and a->8); it checks the structure's state, and drives sub-operations (XMAReleaseContext) based on the result. This is the "process this data" routine (two thousand four hundred and eighteenth form), part of the 0x82CD3 process cluster. 73 lines. 1 callee. 2 callers (sub_82CD3580 and sub_82CE22B8).
+[functions."0x82CD3630"]
+name = "ProcessAndProcessAndProcess2417_82CD3630"
+
+
+# Process a structure by checking its state (two thousand four hundred and thirty-seventh form). It takes a structure (a: fields at a->8, a->13, a->28, a->24, a->0, a->4, a->20, and a->52); it checks the structure's state. This is the "process this data" routine (two thousand four hundred and thirty-seventh form), part of the 0x82CEB process cluster. 442 lines. 0 callees. 1 caller (ProcessAndProcessAndProcess1603).
+[functions."0x82CEBC18"]
+name = "ProcessAndProcessAndProcess2436_82CEBC18"
+
+
+# Process a structure by checking its state (two thousand four hundred and eighty-first form). It takes a structure (a), a structure (b: fields at b->0, b->16, and b->8), and a structure (c: field at c->0); it checks the structure's state, and initializes the structure's fields based on the result. This is the "process this data" routine (two thousand four hundred and eighty-first form), part of the 0x82CD7 process cluster. 146 lines. 0 callees. 1 caller (sub_82CD8050).
+[functions."0x82CD7D98"]
+name = "ProcessAndProcessAndProcess2530_82CD7D98"
+
+
+# Process a value by checking its state (two thousand four hundred and eighty-second form). It takes a value (a) and a value (b); it checks the value's state, and stores a pointer (or zero) based on the result. This is the "process this data" routine (two thousand four hundred and eighty-second form), part of the 0x82CD7 process cluster. 15 lines. 0 callees. 0 callers (vtable-dispatched).
+[functions."0x82CD7EA0"]
+name = "ProcessAndProcessAndProcess2531_82CD7EA0"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand four hundred and eighty-third form). It takes a value (a), a structure (b: field at b->0), and a value (c); it checks the value's state, and drives sub-operations (a virtual call, ProcessAndProcessAndProcess2530, and more) based on the result. This is the "process this data" routine (two thousand four hundred and eighty-third form), part of the 0x82CD8 process cluster. 78 lines. 1 callee. 2 callers (sub_82CDB5E0 and ProcessAndProcessAndProcess2089).
+[functions."0x82CD8050"]
+name = "ProcessAndProcessAndProcess2532_82CD8050"
+
+
+# Process a structure by checking its state (two thousand four hundred and eighty-ninth form). It takes a structure (a: fields at a->0, a->8, and a->5) and a value (b); it checks the structure's state, and computes a size based on the result, storing it. This is the "process this data" routine (two thousand four hundred and eighty-ninth form), part of the 0x82CD7 process cluster. 50 lines. 0 callees. 2 callers (sub_82CDA758 and ProcessAndProcessAndProcess2087).
+[functions."0x82CD7FF8"]
+name = "ProcessAndProcessAndProcess2538_82CD7FF8"
+
+
+# Process a structure by checking its state (two thousand four hundred and ninety-seventh form). It takes a structure (a: field at a->36) and a structure (b); it checks the structure's state, and sets a vtable pointer and a field based on the result. This is the "process this data" routine (two thousand four hundred and ninety-seventh form), part of the 0x82CFC process cluster. 25 lines. 0 callees. 0 callers (vtable-dispatched).
+[functions."0x82CFC8A0"]
+name = "ProcessAndProcessAndProcess2546_82CFC8A0"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand four hundred and ninety-eighth form). It takes a value (a) and a value (b); it allocates a small structure, and drives sub-operations (ProcessAndProcessAndProcess1657, a virtual call, and more) based on the result. This is the "process this data" routine (two thousand four hundred and ninety-eighth form), part of the 0x82CFE process cluster. 115 lines. 2 callees. 1 caller (sub_82CFE7F0).
+[functions."0x82CFEB00"]
+name = "ProcessAndProcessAndProcess2547_82CFEB00"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand four hundred and ninety-ninth form). It takes a value (a), a value (b), a value (c), a value (d), and a value (e); it allocates a small structure, and drives sub-operations (ProcessAndProcessAndProcess1657, and more) based on the result. This is the "process this data" routine (two thousand four hundred and ninety-ninth form), part of the 0x82CFE process cluster. 135 lines. 2 callees. 4 callers (sub_82CFF878, sub_82CFDA90, sub_82D03DA8, and sub_82CFCDE8).
+[functions."0x82CFEBC0"]
+name = "ProcessAndProcessAndProcess2548_82CFEBC0"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand four hundred and one hundred and fifth form). It takes a value (a) and a value (b); it checks the value's state, and drives sub-operations (RtlEnterCriticalSection, sub_82CDD4C8, RtlLeaveCriticalSection, and more) based on the result, all under a critical section. This is the "process this data" routine (two thousand four hundred and one hundred and fifth form), part of the 0x82CD3 process cluster. 59 lines. 3 callees. 5 callers.
+[functions."0x82CD3308"]
+name = "ProcessAndProcessAndProcess2554_82CD3308"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand four hundred and one hundred and sixth form). It takes no meaningful arguments; it checks the value's state, and drives sub-operations (ProcessAndProcessAndProcess2094) based on the result. This is the "process this data" routine (two thousand four hundred and one hundred and sixth form), part of the 0x82CDD process cluster. 5 lines. 1 callee. 0 callers (vtable-dispatched).
+[functions."0x82CDD318"]
+name = "ProcessAndProcessAndProcess2555_82CDD318"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand four hundred and one hundred and seventh form). It takes a structure (a: field at a->32) and a value (b); it checks the value's state, and drives sub-operations (ProcessAndProcessAndProcess2281, ProcessAndProcessAndProcess2093, and more) based on the result. This is the "process this data" routine (two thousand four hundred and one hundred and seventh form), part of the 0x82CDD process cluster. 63 lines. 3 callees. 1 caller (sub_82CDD4C8).
+[functions."0x82CDD320"]
+name = "ProcessAndProcessAndProcess2556_82CDD320"
+
+
+# Process a value by checking its state and driving many sub-operations (two thousand four hundred and one hundred and eighth form). It takes a structure (a), a structure (b: field at b->10), and a value (c); it checks the value's state, and drives many sub-operations (ProcessAndProcessAndProcess2091, KeRaiseIrqlToDpcLevel, KeAcquireSpinLockAtRaisedIrql, and more) based on the result, using spin locks and IRQL. This is the "process this data" routine (two thousand four hundred and one hundred and eighth form), part of the 0x82CDD process cluster. 153 lines. 5 callees. 1 caller (sub_82CDD4C8).
+[functions."0x82CDD388"]
+name = "ProcessAndProcessAndProcess2557_82CDD388"
+
+
+# Process a value by checking its state and driving many sub-operations (two thousand four hundred and one hundred and ninth form). It takes a value (a), a value (b), and a value (c); it checks the value's state, and drives many sub-operations (ProcessAndProcessAndProcess2281, ProcessAndProcessAndProcess2092, ProcessAndProcessAndProcess2556, and more) based on the result. This is the "process this data" routine (two thousand four hundred and one hundred and ninth form), part of the 0x82CDD process cluster. 157 lines. 5 callees. 1 caller (ProcessAndProcessAndProcess2554).
+[functions."0x82CDD4C8"]
+name = "ProcessAndProcessAndProcess2558_82CDD4C8"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand four hundred and one hundred and thirtieth form). It takes several values (a through g); it checks the value's state, and drives sub-operations (ExCreateThread, StoreLastErrorCode, and more) based on the result, creating a thread. This is the "process this data" routine (two thousand four hundred and one hundred and thirtieth form), part of the 0x82CC8 process cluster. 68 lines. 2 callees. 2 callers (sub_82CBD280 and sub_82D014A8).
+[functions."0x82CC8758"]
+name = "ProcessAndProcessAndProcess2579_82CC8758"
+
+[functions."0x82CD7948"]
+name = "Func_82CD7948"
+
+[functions."0x82CC04A4"]
+name = "Func_82CC04A4"
+
+[functions."0x82CD182C"]
+name = "Func_82CD182C"
+
+[functions."0x82CD18AC"]
+name = "Func_82CD18AC"
+
+[functions."0x82CD8650"]
+name = "Func_82CD8650"
+
+[functions."0x82CDBAE0"]
+name = "Func_82CDBAE0"
+
+[functions."0x82CE5D98"]
+name = "Func_82CE5D98"

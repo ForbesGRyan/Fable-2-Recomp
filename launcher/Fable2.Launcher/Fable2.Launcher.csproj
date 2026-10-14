@@ -13,6 +13,9 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="..\..\constants\GameVersions.cs" Link="Constants\GameVersions.cs" />
+    <!-- Reusable Xbox 360 disc reader/extractor (GDFX + ISO 9660 + STFS), shared
+         with tools/x360extract. Consumed as a project reference; produces X360ExtractCore.dll. -->
+    <ProjectReference Include="..\..\tools\x360extract\lib\X360Extract.Core.csproj" />
     <Resource Include="..\..\assets\app-icon.png" Link="Assets\app-icon.png" />
   </ItemGroup>
 </Project>

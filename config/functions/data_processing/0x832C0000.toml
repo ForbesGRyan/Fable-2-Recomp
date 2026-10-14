@@ -1,0 +1,29 @@
+# data-processing region 0x832C0000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# Large processor that performs complex vector operations on a structure (five hundred and ninth form). It takes a value (a) and a structure (b: fields at b->0, b->4, and b->8); it performs complex vector operations on the structure, zeroing out various fields and processing the data. This is the "process this data" routine (five hundred and ninth form), part of the 0x832C1 process cluster. 1501 lines. 0 callees. 1 caller (sub_832BB018).
+[functions."0x832C13A8"]
+name = "ProcessAndProcessAndProcess509_832C13A8"
+
+
+# Process a structure by reading multiple 16-bit fields and combining them (five hundred and thirty-fifth form). It takes a structure (a: fields at a->16, a->32, a->48, a->64, a->80, a->96, and a->112); it reads multiple 16-bit fields from the structure, sign-extends them, and combines them using bitwise OR. This is the "process this data" routine (five hundred and thirty-fifth form), part of the 0x832C0 process cluster. 439 lines. 0 callees. 1 caller (sub_832BB018).
+[functions."0x832C0998"]
+name = "ProcessAndProcessAndProcess535_832C0998"
+
+
+# Process a structure by reading multiple 16-bit fields and combining them (five hundred and thirty-ninth form). It takes a value (a), a value (b, an offset), and a structure (c: fields at c->16, c->32, c->48, c->64, c->80, c->96, and c->112); it reads multiple 16-bit fields from the structure, sign-extends them, and combines them using bitwise OR. This is the "process this data" routine (five hundred and thirty-ninth form), part of the 0x832C0 process cluster. 485 lines. 0 callees. 1 caller (sub_832BB018).
+[functions."0x832C0CB8"]
+name = "ProcessAndProcessAndProcess539_832C0CB8"
+
+
+# Process a structure by reading multiple 16-bit fields and combining them (five hundred and forty-second form). It takes a structure (a: fields at a->16, a->32, a->48, a->64, a->80, a->96, and a->112) and a value (b, an offset); it reads multiple 16-bit fields from the structure, sign-extends them, and combines them using bitwise OR. This is the "process this data" routine (five hundred and forty-second form), part of the 0x832C1 process cluster. 485 lines. 0 callees. 1 caller (sub_832BB018).
+[functions."0x832C1030"]
+name = "ProcessAndProcessAndProcess542_832C1030"
+
+
+# Process a large structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and second form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x832C0 process cluster. 309 lines. 0 callees. 1 caller (ProcessAndProcessAndProcess1596).
+[functions."0x832C0798"]
+name = "ProcessAndProcessAndProcess1602_832C0798"

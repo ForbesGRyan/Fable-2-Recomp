@@ -1,0 +1,67 @@
+# data-processing region 0x824C0000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# A processor that, when the flag is set, performs the processing (the reference copy, the hash computation, and the element
+# append). It takes a structure (a: a pointer at a->0, with a flag at a->0->12 and a value at a->0->8) and several values (b,
+# c). When the flag (a->0->12) is zero, it skips the processing. Otherwise it performs the processing (sub_824EF378), and,
+# when the result is non-zero, it copies the reference (CopyAssign_RefCounted_821F0108, on a->0 + 8), computes the hash
+# (FNV1Hash_821F3C28), appends the element (ProcessAndAppendElement_82229208), and performs the setup (sub_821DA550 and
+# others). This is the "when this flag is set, perform the processing (the reference copy, the hash computation, and the
+# element append)" routine for the 0x824EF reference-hash cluster, used by 10 callers (the 0x82513/0x82533/0x825E7/0x827CF/
+# 0x827D4/0x82875/0x82897/0x828B6/0x82955/0x82957 range). Part of the 0x824EF reference-hash cluster (sibling of
+# CopyAssign_RefCounted_821F0108 / FNV1Hash_821F3C28). 235 lines, 9 callees. 10 callers.
+[functions."0x824EF160"]
+name = "ProcessAndCopyReferenceAndHash_824EF160"
+
+
+# A processor that computes the string length (the byte length) and appends the string node. It takes a value (a) and a
+# structure (b: a field at b->8). When the global value (the .data entry) is set, it takes the alternate path. Otherwise it
+# reads the .data pointer (the string base) and walks the bytes (advancing until the zero terminator), computing the byte
+# length. It then appends the string node (ProcessAndAppendStringNode_82A1EA18, on b, the length, and the byte length) and
+# performs the further processing (ProcessAndDispatchTypedValue_822286D0 and sub_822B9510). This is the "compute this string
+# length (the byte length) and append the string node" routine for the 0x824EF string-append cluster, used by 2 callers (sub
+# _824EF160 = ProcessAndCopyReferenceAndHash and sub_825B0D28). Part of the 0x824EF string-append cluster (sibling of
+# ProcessAndAppendStringNode_82A1EA18 / ProcessAndDispatchTypedValue_822286D0). 138 lines, 3 callees. 2 callers.
+[functions."0x824EF378"]
+name = "ProcessAndAppendStringWithLength_824EF378"
+
+
+# A processor that hashes and processes the data (second form). It takes a structure (a: field at a->0), a value (b), and a value (c). It reads a->0 (a pointer); when the pointer is non-zero it reads the pointer's +0 field (a pointer) and +4 field (a value). It then appends an element (ProcessAndAppendElement_82229208, with the pointer, -10000, and the value). It then dispatches and resolves (ProcessAndDispatchAndResolve_822279A0, with the pointer and 4). It then hashes and processes the result. This is the "hash and process this data" routine (second form), part of the 0x824EF process cluster. 89 lines. 5 callees (ProcessAndAppendElement, ProcessAndCopyReferenceAndHash, ProcessAndDispatchAndResolve, ProcessAndHashString, and ProcessAndResolveTypedField). 12 callers (sub_825BD148, sub_8293E9A0, sub_8290B260, sub_825ACEA0, sub_8290B948, sub_82908E20, sub_8253B3F0, sub_827EFE48, sub_82415778, sub_82425680, sub_82845010, and sub_8260C3B8).
+[functions."0x824EF020"]
+name = "ProcessAndHashAndProcess2_824EF020"
+
+
+# A processor that processes the data (twenty-fourth form). It takes a structure (a: field at a->0) and a structure (b: field at b->8). It processes the data (a and b). This is the "process this data" routine (twenty-fourth form), part of the 0x824EF process cluster. 70 lines. 3 callees (ProcessAndAppendStringNode, ProcessAndDispatchTypedValue, and sub_822B9510). 12 callers (sub_8278CFD8, sub_827992D8, sub_823D7960, sub_82602160, sub_823A24A0, sub_82920338, sub_8297F4E8, sub_827EDF10, sub_8243BF10, sub_829957B8, sub_82950618, and sub_82939B88).
+[functions."0x824EF300"]
+name = "ProcessAndProcessAndProcess24_824EF300"
+
+
+# A processor that processes the data (twenty-fifth form). It takes a structure (a: field at a->8), a structure (b: field at b->8), and a structure (c: field at c->8). It processes the data (a, b, and c). This is the "process this data" routine (twenty-fifth form), part of the 0x824EF process cluster. 107 lines. 5 callees (ProcessAndAccessAndShift, ProcessAndAppendElement, ProcessAndHashAndDispatch, ProcessAndHashString, and sub_821E5168). 9 callers (sub_8253B3F0, sub_8260C3B8, sub_827EFE48, sub_827F96B8, sub_82845010, sub_825BD148, sub_8290B260, sub_8290B948, and sub_82903620).
+[functions."0x824EF558"]
+name = "ProcessAndProcessAndProcess25_824EF558"
+
+
+# A processor that processes the data (one hundred and thirty-second form). It takes a value (a), a structure (b: field at b->0), and a value (c). It processes the data (a, b, and c). This is the "process this data" routine (one hundred and thirty-second form), part of the 0x824EE process cluster. 147 lines. 4 callees (ProcessAndAppendElement, ProcessAndHashAndDispatch, Release_RefCounted, and sub_822B9510). 12 callers (sub_823D7120, sub_825EED60, sub_82775898, sub_824C7198, sub_82774D00, sub_8294ECA0, sub_8243BF10, sub_827AA498, sub_82774338, sub_8279B590, sub_8287B7C8, and sub_8297C970).
+[functions."0x824EEE50"]
+name = "ProcessAndProcessAndProcess132_824EEE50"
+
+
+# A processor that processes the data (two hundred and seventy-fourth form). It takes a value (a), a structure (b: field at b->0), and a value (c). It processes the data (a, b, and c). This is the "process this data" routine (two hundred and seventy-fourth form), part of the 0x824EE process cluster. 143 lines. 5 callees (ProcessAndAppendElement, ProcessAndCheckAndProcess6, ProcessAndHashString, Release_RefCounted, and sub_824EEE50). 12 callers (sub_82985AE0, sub_828778C0, sub_82683240, sub_82470C20, sub_82982060, sub_8254AC68, sub_826FB378, sub_82751BF8, sub_8295B958, sub_82967640, sub_825AF6D0, and sub_82425680).
+[functions."0x824EEF40"]
+name = "ProcessAndProcessAndProcess274_824EEF40"
+
+
+# Process a structure by releasing a refcounted object (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and thirteenth form). It takes a structure, releases a refcounted object (Release_RefCounted), and drives a sub-operation (sub_828580F8) based on the result. Part of the 0x824E3 process cluster. 160 lines. 2 callees. 1 caller (ProcessAndProcessAndProcess1301).
+[functions."0x824E3438"]
+name = "ProcessAndProcessAndProcess1313_824E3438"
+
+
+# Process a very large data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and ninety-fourth form). It takes a structure, allocates fresh memory (Allocate_OrDbgBreak), enters a critical section (CriticalSection_EnterOrTry), frees size-bucketed memory (Free_SizeBucketed), gets the current time (GetCurrentTimeMs), decrements and disposes (ProcessAndDecrementDispose), releases a global reference (ReleaseGlobalRef), and drives many sub-operations (ProcessAndProcessAndProcess1215, ProcessAndProcessAndProcess1255, ProcessAndProcessAndProcess313, ProcessAndProcessAndProcess314, ProcessAndProcessAndProcess766, sub_823034F0, sub_824F82F8, sub_824F83B0, sub_824F8508, sub_824F9090, sub_824F9118, sub_824F91A8, sub_82A39078, sub_82A3AD50, sub_82A3B890, sub_82A3BAD0, sub_82A3BB78, sub_82A3BC58, sub_82A48E30, sub_82B38D00, ProcessAndProcessAndProcess1399, sub_82B614D0, sub_82B622F0) based on the result. This is a large state-transition processor in the 0x824F7 cluster. 943 lines. 29 callees. 1 caller (ProcessAndProcessAndProcess1389).
+[functions."0x824F7CA0"]
+name = "ProcessAndProcessAndProcess1394_824F7CA0"
+
+[functions."0x824D56C8"]
+name = "Math_FloatIndexStore_824D56C8"

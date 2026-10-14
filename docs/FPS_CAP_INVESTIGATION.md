@@ -21,7 +21,7 @@ CMake). It sets `REX_VSYNC=0` and calls `fable2.cmd`. To run capped (native
 30 fps), use `fable2.cmd` directly (leaves `REX_VSYNC` unset → default true).
 
 ### Why not the other candidates
-- CPU frame limiter (`sub_82242628`) — no-op'ing it made the main loop free-spin
+- CPU frame limiter (`FrameLimiterWait_82242628`) — no-op'ing it made the main loop free-spin
   at 18M/s but FPS stayed 30 → it is NOT the gate (secondary CPU wait only).
 - GPU `WAIT_REG_MEM` pacing — real, but it's driven by the same vblank counter;
   disabling `vsync` removes the pacing at the source (no SDK patch/rebuild needed).
@@ -50,32 +50,35 @@ CMake). It sets `REX_VSYNC=0` and calls `fable2.cmd`. To run capped (native
 
 | Candidate | Result |
 |---|---|
-| `sub_82BA2568` frame_wait (KeQuerySystemTime poller) | Never called (flag at +23968 off) |
-| `sub_82CBD098` yield | ~150 M calls, negligible duration — not the limiter |
-| `sub_82CC2028` KeDelayExecutionThread wrapper | Not the primary limiter |
-| Host vblank worker at 30 Hz | No — guest vblank cb `sub_82B9B8D8` max interval ≈ 19 ms → ~60 Hz |
-| `sub_82CC2948` GPU cb, `sub_82B9F598` render thread | Never fire on title screen |
+| `FrameWaitPoller_82BA2568` frame_wait (KeQuerySystemTime poller) | Never called (flag at +23968 off) |
+| `Yield_82CBD098` yield | ~150 M calls, negligible duration — not the limiter |
+| `KeDelayExecutionThreadWrapper_82CC2028` KeDelayExecutionThread wrapper | Not the primary limiter |
+| Host vblank worker at 30 Hz | No — guest vblank cb `VblankInterruptCallback_82B9B8D8` max interval ≈ 19 ms → ~60 Hz |
+| `GpuInterruptCallback_82CC2948` GPU cb, `RenderThreadMain_82B9F598` render thread | Never fire on title screen |
 
 ## Key guest functions (recompiled, `generated/default/`)
+
+Naming: `Role_<address>` (originals were `sub_<address>`; see `MainRenderLoop_82B9CD68`).
+These are document-level names only; the recompiled sources keep `sub_` symbols.
 
 | Addr | Role |
 |---|---|
 | `MainRenderLoop_82B9CD68` (was `sub_82B9CD68`; recomp.246:20628) | Main render loop; ~33 ms period at 30 fps |
-| `sub_82242628` | **Frame limiter / GPU-progress wait** (h4; 30–53 ms per call) |
-| `sub_82B9BF90` (h5) | GPU "has it progressed ≥ 5000 ticks?" check, called in the limiter's spin loop |
-| `sub_82B9BA58` (recomp.289:19146) | "Begin frame"; only writer of the limiter struct field +10908 |
-| `sub_82B9B8D8` (recomp.93:20842) | vblank interrupt cb (~60 Hz); clears flag bits under spinlock, calls user cb |
-| `sub_82B9C530` | GPU-interrupt handler (timestamp + counter under spinlock) |
-| `sub_821E8D20` (h13) | Fast helper (maxdur 0.036 ms) — not a sleep |
+| `FrameLimiterWait_82242628` | **Frame limiter / GPU-progress wait** (h4; 30–53 ms per call) |
+| `GpuProgressCheck_82B9BF90` (h5) | GPU "has it progressed ≥ 5000 ticks?" check, called in the limiter's spin loop |
+| `BeginFrame_82B9BA58` (recomp.289:19146) | "Begin frame"; only writer of the limiter struct field +10908 |
+| `VblankInterruptCallback_82B9B8D8` (recomp.93:20842) | vblank interrupt cb (~60 Hz); clears flag bits under spinlock, calls user cb |
+| `GpuInterruptHandler_82B9C530` | GPU-interrupt handler (timestamp + counter under spinlock) |
+| `FastHelper_821E8D20` (h13) | Fast helper (maxdur 0.036 ms) — not a sleep |
 
-## Limiter anatomy (`sub_82242628`)
+## Limiter anatomy (`FrameLimiterWait_82242628`)
 
 Signature: `limiter(limit*, now, r5=flag)`, `r6` mostly 0.
 
 - `limit*+10896` = pointer to a **global counter struct** (live value `0xFFC83000`)
 - `limit*+10908` = **deadline** (counter units)
-- Wait: spin calling `sub_82B9BF90` until `*counter >= deadline`
-- `sub_82B9BF90` reads `*counter` and a command-buffer value (+88 of a ptr at
+- Wait: spin calling `GpuProgressCheck_82B9BF90` until `*counter >= deadline`
+- `GpuProgressCheck_82B9BF90` reads `*counter` and a command-buffer value (+88 of a ptr at
   `r13+256`), and returns ready when progress since last check ≥ **5000** (ticks)
   or the deadline is met; also gates on a flag byte at video-struct +10941 bit 1.
 
@@ -93,7 +96,7 @@ now4=0000018F ... gfc=0000018F f10908=00000193
   counter ≈ 60 units/s (either +1 per 60 Hz vblank, or +2 per 30 Hz frame —
   both consistent so far; high-frequency sampling added to disambiguate)
 
-### Begin-frame deadline math (`sub_82B9BA58`, recomp.289:19537+)
+### Begin-frame deadline math (`BeginFrame_82B9BA58`, recomp.289:19537+)
 
 ```
 lwz  r11, 10908(r31)      ; frame field
@@ -110,7 +113,7 @@ to advance **2 units past the frame start** — i.e. two 60 Hz vblank ticks =
 
 ## Decisive experiment (this session)
 
-`FPS_PROBE_NO_LIMITER=1` makes `sub_82242628` return 1 immediately (no spin).
+`FPS_PROBE_NO_LIMITER=1` makes `FrameLimiterWait_82242628` return 1 immediately (no spin).
 Result: **main loop free-spins at 8–18 M calls/s** (`mainloop summary rate=`),
 yet the F3 overlay still reads **30 fps**.
 → The CPU limiter is NOT the frame gate. The gate is the **GPU command
@@ -127,11 +130,11 @@ when the GPU finishes a frame's commands, which is paced at 33 ms.
   `EVENT_WRITE_SHD` (command_processor.cpp:1209, `data_value = counter_`) at
   the heap address the game set up (observed `0xFFC83000` this session; the
   pointer is stored at `video_struct+10896`).
-- The game's CPU limiter (`sub_82242628`) and its GPU `WAIT_REG_MEM` both wait
+- The game's CPU limiter (`FrameLimiterWait_82242628`) and its GPU `WAIT_REG_MEM` both wait
   on this counter advancing **+2 units = 2 vblanks = 33 ms** per frame → 30 fps.
-- End-of-frame `sub_822981F0` (recomp.33:1934) does `field10908 += 2` (the
+- End-of-frame `EndFrame_822981F0` (recomp.33:1934) does `field10908 += 2` (the
   per-frame deadline advance) and rewrites the counter globals; begin-frame
-  `sub_82B9BA58` sets `*counter = field10908 - 2` and calls the limiter (r5=4).
+  `BeginFrame_82B9BA58` sets `*counter = field10908 - 2` and calls the limiter (r5=4).
 
 ## Uncap plan (GPU-side, in SDK source)
 
@@ -154,6 +157,12 @@ Instrumentation added (temporary): logs every memory `WAIT_REG_MEM` with
   2× (120 Hz) so the guest's "+2 units" = 16.6 ms; that needs a plugin/runtime
   rebuild from `rexglue-sdk-src`.
 - `REX_VSYNC=0` is the shipped solution (fully uncapped).
+- `FrameLimiterWait_82242628` has a hand-tuned hot-function override at
+  `src/core/hotfunc/vblank/FrameLimiterWait_82242628.cpp` (see
+  docs/hotfunc_overrides.md) — a behavior-identical goto-free rewrite; it no
+  longer implements the vblank fast gate. Its loads stay volatile
+  (`REX_LOAD_*`) because the counter it spins on is written by the GPU
+  thread.
 
 ## Vsync on -> host runs at (monitor refresh + 30) fps — root cause + fix
 

@@ -14,18 +14,18 @@ FABLE2_XDK_HOOK(13, "D3DDevice_SetIndices.callee1", sub_82B9B340)
 FABLE2_XDK_HOOK(14, "D3DDevice_SetRenderState.callee1", sub_8228EAF0)
 FABLE2_XDK_HOOK(15, "D3DDevice_SetViewport.callee0", ProcessAndProcessAndProcess529_82206820)
 FABLE2_XDK_HOOK(16, "D3DDevice_SetScissorRect.callee1", ProcessAndProcessAndProcess600_821F9AD8)
-FABLE2_XDK_HOOK(17, "D3DDevice_SetRenderState.callee1.callee1", ProcessAndProcessAndProcess940_821E8D20)
+FABLE2_XDK_HOOK(17, "D3DDevice_SetRenderState.callee1.callee1", FastHelper_821E8D20)
 FABLE2_XDK_HOOK(18, "D3DDevice_SetViewport.callee0.callee1", ProcessAndProcessAndProcess528_822065F0)
 FABLE2_XDK_HOOK(19, "D3DDevice_SetScissorRect.callee1.callee0", ProcessAndProcessAndProcess568_821F97E8)
 FABLE2_XDK_HOOK(20, "D3DDevice_SetRenderState.callee1.callee1.callee0", ProcessAndProcessAndProcess1044_82283530)
 FABLE2_XDK_HOOK(21, "D3DDevice_SetRenderState.callee1.callee1.callee2", ProcessAndProcessAndProcess926_82286430)
 FABLE2_XDK_HOOK(22, "D3DDevice_SetRenderState.callee1.callee1.callee3", ProcessAndProcessAndProcess939_821E8B98)
-// skipped D3DDevice_SetRenderState.callee1.callee1.callee4 (ProcessAndProcessAndProcess1087_82242628): already overridden in src/diagnostics/fps_probe.h
+// skipped D3DDevice_SetRenderState.callee1.callee1.callee4 (FrameLimiterWait_82242628): already overridden in src/diagnostics/fps_probe.h
 FABLE2_XDK_HOOK(24, "D3DDevice_SetViewport.callee0.callee1.callee1", ProcessAndProcessAndProcess527_82206538)
 FABLE2_XDK_HOOK(25, "D3DDevice_SetRenderState.callee1.callee1.callee2.callee2", ProcessAndProcessAndProcess1386_822AAFB8)
 FABLE2_XDK_HOOK(26, "D3DDevice_SetRenderState.callee1.callee1.callee3.callee1", sub_82B9B408)
 // skipped D3DDevice_SetRenderState.callee1.callee1.callee3.callee5 (ProcessAndProcessAndProcess1257_821D17B8): already overridden in src/diagnostics/fps_probe.h
-// skipped D3DDevice_SetRenderState.callee1.callee1.callee4.callee2 (ProcessAndProcessAndProcess523_82B9BF90): already overridden in src/diagnostics/fps_probe.h
+// skipped D3DDevice_SetRenderState.callee1.callee1.callee4.callee2 (GpuProgressCheck_82B9BF90): already overridden in src/diagnostics/fps_probe.h
 // skipped D3DDevice_SetRenderState.callee1.callee1.callee4.callee3 (sub_82B9BEC8): already overridden in src/diagnostics/fps_probe.h
 FABLE2_XDK_HOOK(30, "D3DDevice_SetRenderState.callee1.callee1.callee3.callee5.callee1", sub_82B9B770)
 FABLE2_XDK_HOOK(31, "D3DDevice_SetRenderState.callee1.callee1.callee4.callee2.callee2", sub_82BA0E80)

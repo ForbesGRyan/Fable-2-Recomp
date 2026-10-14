@@ -20,6 +20,27 @@ public static class GameCompatibilityInspector
             path => Directory.Exists(Path.Combine(directory, path)));
     }
 
+    /// <summary>
+    /// Hash-only gate for disc extraction: is this default.xex a build this
+    /// recompile supports? Only the XEX hash is known before extraction, so
+    /// content markers are not checked here — Inspect() verifies them once
+    /// the files exist.
+    /// </summary>
+    public static (bool Ok, string Message) CheckHash(string hash)
+    {
+        foreach (GameVersion version in GameVersions.All)
+        {
+            if (!string.Equals(hash, version.Hash, StringComparison.OrdinalIgnoreCase)) continue;
+            if (!version.Compatible)
+                return (false, version.Reason);
+            if (version.CodeGroup != GameVersions.CodeGroup)
+                return (false, version.Name + " detected, but this executable's guest-code group is not compiled into this build.");
+            return (true, version.Name);
+        }
+        return (false, "Unknown default.xex SHA-256: " + hash +
+            " This project only accepts validated builds, so nothing was extracted.");
+    }
+
     // Pure, catalogue-driven classification; tests supply marker predicates.
     // Adding a validated locale does not require a new hash/locale if-branch.
     public static GameCompatibility Classify(string hash, Func<string, bool> hasFile,

@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Class library: the reusable Xbox 360 disc-reading/extraction engine.
+         Produces X360ExtractCore.dll (namespace X360Extract). Reference this,
+         or pack it as the Fable2.X360Extract NuGet package, from any .NET 8
+         project to get GDFX / ISO 9660 / STFS support. The assembly name is kept
+         distinct from the x360extract CLI's so the CLI can depend on this DLL. -->
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>X360ExtractCore</AssemblyName>
+    <RootNamespace>X360Extract</RootNamespace>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <LangVersion>latest</LangVersion>
+
+    <Version>1.0.0</Version>
+    <Description>Read and extract Xbox 360 disc images: GDFX filesystem, ISO 9660, and STFS containers, with a high-level X360Disc extraction facade.</Description>
+    <Authors>Fable 2 Recompiled</Authors>
+    <PackageId>Fable2.X360Extract</PackageId>
+    <PackageTags>xbox360;gdfx;iso9660;stfs;disc;extract;default.xex</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl></PackageProjectUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+</Project>

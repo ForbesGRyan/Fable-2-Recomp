@@ -1,29 +1,27 @@
-// guest_wait_timer.h - times the game's frame limiter / GPU-fence wait
-// (sub_82242628, see docs/FPS_CAP_INVESTIGATION.md) per guest frame so the F3
-// overlay can show it separately from CPU "work". Same override pattern as
-// fps_meter.h. Waits made from inside the swap call or from non-render threads
-// are ignored (see guest_frame_rate.h add_wait).
-//
-// Only one definition of this symbol may be compiled: fps_probe.h also
-// overrides it but is commented out in fable_2_app.h.
-
+// guest_wait_timer.h - times the frame limiter / GPU-fence wait for the F3
+// overlay. Used by the tuned FrameLimiterWait_82242628 override. Waits inside
+// swap or from non-render threads are ignored by guest_frame_rate::add_wait.
 #pragma once
 
 #include <chrono>
-#include <cstdint>
-
-#include <rex/ppc/func.h>
 
 #include "guest_frame_rate.h"
 
-extern "C" void __imp__ProcessAndProcessAndProcess1087_82242628(PPCContext& __restrict ctx,
-                                                                uint8_t* base);
+namespace fable2::guest_wait_timer {
 
-extern "C" void ProcessAndProcessAndProcess1087_82242628(PPCContext& __restrict ctx,
-                                                         uint8_t* base) {
-  const auto t0 = std::chrono::steady_clock::now();
-  __imp__ProcessAndProcessAndProcess1087_82242628(ctx, base);
-  fable2::guest_frame_rate::add_wait(
-      std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0)
-          .count());
-}
+class Scope {
+ public:
+  Scope() = default;
+  Scope(const Scope&) = delete;
+  Scope& operator=(const Scope&) = delete;
+  ~Scope() {
+    fable2::guest_frame_rate::add_wait(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - start_).count());
+  }
+
+ private:
+  const std::chrono::steady_clock::time_point start_ = std::chrono::steady_clock::now();
+};
+
+}  // namespace fable2::guest_wait_timer

@@ -1,0 +1,248 @@
+# data-processing region 0x829C0000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# Pure no-op stub: "blr" — does nothing, returns whatever was in r3.
+# 396 call sites (one of the hottest functions in the image). The dominant
+# caller pattern is "call a helper (sub_82317E50 / sub_82317F98 / ...), then
+# addi r3,r1,N; bl sub_829CE870" — i.e. it is invoked on a stack slot (often
+# twice, at two different offsets) right after constructing/using an object,
+# and a second common shape is "mr r3,obj; bl sub_829CE870" (called on an
+# object, then another op follows). A no-op called this uniformly on
+# objects/stack slots is the signature of an EMPTY virtual method — most
+# likely a no-op destructor / release / delete for an object type whose
+# teardown does nothing in this build (the call is still emitted for ABI/
+# dispatch correctness). The exact interface slot is not resolvable without
+# the vtables, so the name states the observable fact: it is a no-op.
+[functions."0x829CE870"]
+name = "NoOp_Stub_829CE870"
+
+
+# A value store (the sibling of SetValue3_82A09FB0, with an 8-byte stride): compute counts ((obj->12 - obj->4) >> 3,
+# a capacity, and (obj->8 - obj->4) >> 3, a used count, in 8-byte units), and (if there is room) store a value (8
+# bytes, obj->8->0 and obj->8->4 = the value) and advance the write pointer (obj->8 += 8).
+
+# Args: obj (r3, ->4 = a base, ->8 = a write pointer, ->12 = an end), value (r4, ->0 and ->4 = the value), (more).
+# Computes the capacity ((obj->12 - obj->4) >> 3, a count of 8-byte elements) and the used count ((obj->8 - obj->4)
+# >> 3). If the used count is less than the capacity (there is room), it stores the value: obj->8->0 = value->0 and
+# obj->8->4 = value->4 (an 8-byte value, two words), and advances the write pointer (obj->8 += 8). If there is no
+# room, it takes another path (a grow / full condition, calling sub_8260B008, a sibling in the 0x8260B cluster --
+# the grow path, as in SetValue3_82A09FB0 which calls StoreValueGrow_82A0A040). So it's a "store an 8-byte value
+# into an 8-byte-stride array (with a bounds check, advancing the write pointer)" routine (a value setter for a
+# growing buffer, part of the 0x829FD cluster). 122 lines, 1 callee (sub_8260B008). Many callers (sub_8322C450, sub
+# _82A08EB0, sub_83221548, ...). The buffer's class (->4 = a base, ->8 = a write pointer, ->12 = an end, an 8-byte-
+# stride array) and the value's meaning (an 8-byte record / pointer / pair) aren't resolvable, so the name states
+# the mechanism: store a value (8 bytes, with a bounds check). The "4" distinguishes it from SetValue3_82A09FB0
+# (4 bytes).
+[functions."0x829FD7B8"]
+name = "SetValue4_829FD7B8"
+
+
+# A process (a hash table operation, with a validation): validate a size (r29->8 >= 0x00800002, a minimum-size check
+# ; if too small, raise an error with a string, via SetString_822F2020, and a trap), and (on the normal path)
+# allocate (Allocate_OrDbgBreak_8221F388) and perform a complex computation (a hash table operation, part of the
+# 0x829FC cluster).
+
+# Args: obj (r3, r24), (r4, a global, ->8 = a size), a (r5, r26), b (r6, r31), c (r7, r28), (more). It validates a
+# size (r29->8, a size, from r4->8, a global): if the size is < 0x00800002 (a minimum size, a too-small check), it
+# raises an error (SetString_822F2020, sub_822F2020, a string setter, with a message, and a call to sub_826C3EF0,
+# and a trap). On the normal path (size >= 0x00800002), it allocates (Allocate_OrDbgBreak_8221F388, sub_8221F388, a
+# size-bucketed allocation, for the hash table) and performs a complex computation (a hash table operation, with a
+# large stack frame (224 bytes), and calls to sub_82171810, sub_822F1F00, sub_826C3EF0, sub_826C3FA8, sub_82C239D0,
+# sub_82C23A48 -- siblings in the 0x82171/0x822F1/0x826C3/0x82C23 clusters). So it's a "process (a hash table
+# operation: validate a size, and (on the normal path) allocate and perform a complex computation)" routine (a hash
+# table process, part of the 0x829FC cluster). 344 lines, 8 callees (Allocate_OrDbgBreak_8221F388, SetString_822F2020
+# , sub_82171810, sub_822F1F00, sub_826C3EF0, sub_826C3FA8, sub_82C239D0, sub_82C23A48). 7 callers (sub_824EDE70, sub
+# _824AEBB8, sub_82366FB0, sub_8246E758, sub_82419280, sub_823660D0, sub_829FC180). The object's class (obj, r24, an
+# object with a hash table) and the size's meaning (a size, a minimum-size check) aren't resolvable, so the name
+# states the mechanism: a hash table process (validate a size and (on the normal path) allocate and perform a complex
+# computation).
+[functions."0x829FC3C0"]
+name = "ProcessHashTable_829FC3C0"
+
+
+# A processor that resolves a 40-byte global, then populates its fields. It takes three structures (a, b, and c: each
+# with a value at ->0). It resolves the 40-byte global (ProcessAndResolveGlobal_82CA3C68(40)) and stores the result.
+# When the global is present (non-null) it populates the fields (the value at a->0, b->0, and c->0 into the global's
+# + 0 / + 20 / + 12 fields, with the + 16 and + 36 fields zeroed). This is the "resolve this 40-byte global and
+# populate its fields (from the three structures)" routine for the 0x829FD global-populate cluster, used by 4 callers
+# (sub_8240D938 and the 0x83231/0x83236 range). Part of the 0x829FD global-populate cluster (sibling of
+# ProcessAndResolveGlobal_82CA3C68 / ProcessAndResolveGlobal2_82CA3C68). 113 lines, 1 callee. 4 callers.
+[functions."0x829FD060"]
+name = "ProcessAndPopulateGlobal_829FD060"
+
+
+# A processor that locks and processes the data. It takes a structure (a: a field at a->12) and a structure (b: a field at b->0). It enters a critical section
+# (CriticalSection_EnterOrTry_82200688, with a stack descriptor and a .data descriptor). It then reads b->0 (a node); when the node is non-zero it reads the node's
+# +0 field as a descriptor. It then reads a->12 and calls sub_82BFD600 (with a->12 and the descriptor). When the result is non-zero it performs further processing
+# (sub_82BFC9C0) and destructs the refcounted object (DestructRefCounted_82214F08). This is the "lock and process this data" routine, part of the 0x829F8 lock cluster.
+# 132 lines. 4 callees (CriticalSection_EnterOrTry, sub_82BFD600, sub_82BFC9C0, DestructRefCounted). 2 callers (ProcessAndCompareAndConstruct_822F3D20, sub_823419E0).
+[functions."0x829F84E0"]
+name = "ProcessAndLockAndProcess_829F84E0"
+
+
+# A processor that processes the data (thirty-second form). It takes a structure (a: field at a->32) and a value (b). It processes the data (a and b). This is the "process this data" routine (thirty-second form), part of the 0x829DD process cluster. 138 lines. 2 callees (ParseLine and ScanLineLength). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x829DD350"]
+name = "ProcessAndProcessAndProcess32_829DD350"
+
+
+# A freer that frees the data (tenth form). It takes a structure (a: fields at a->4, a->8, and a->12). It frees the data (a). This is the "free this data" routine (tenth form), part of the 0x829EA free cluster. 54 lines. 2 callees (DestructRange and Free_SizeBucketed_Thunk). 12 callers (sub_8223C950, sub_8226D580, sub_82515540, sub_8270A080, sub_826EA288, sub_829E9C68, sub_82B723E8, sub_82B80D70, sub_829B8890, sub_829E9CD0, sub_82B828C8, and sub_828BFFF8).
+[functions."0x829EA980"]
+name = "ProcessAndFreeAndProcess10_829EA980"
+
+
+# A processor that processes the data (one hundred and thirty-seventh form). It takes a structure (a: fields at a->4 and a->8) and a structure (b: field at b->0). It processes the data (a and b). This is the "process this data" routine (one hundred and thirty-seventh form), part of the 0x829FA process cluster. 155 lines. 4 callees (Allocate_OrDbgBreak, Free_SizeBucketed_Thunk, HashTable_Find, and MemSet_SdkRuntime). 1 caller (sub_829FB530).
+[functions."0x829FAC30"]
+name = "ProcessAndProcessAndProcess137_829FAC30"
+
+
+# A processor that processes the data (one hundred and thirty-eighth form). It takes a structure (a: field at a->0), a value (b), and a value (c). It processes the data (a, b, and c). This is the "process this data" routine (one hundred and thirty-eighth form), part of the 0x829FB process cluster. 144 lines. 8 callees (ConstructRefCounted, DestructRefCounted, ProcessAndVcallAndDestruct3, SetString, ProcessAndFreeAndProcess9, ProcessAndProcessAndProcess124, sub_829FB280, and sub_82C63FB8). 6 callers (sub_825B4CC8, sub_8241DC68, sub_825F3050, sub_822F33B8, sub_8233AE50, and sub_82354BB8).
+[functions."0x829FB018"]
+name = "ProcessAndProcessAndProcess138_829FB018"
+
+
+# An allocator that allocates the data (twenty-first form). It takes a structure (a: field at a->12), a value (b), and a value (c). It allocates the data (a, b, and c). This is the "allocate this data" routine (twenty-first form), part of the 0x829FB allocate cluster. 157 lines. 5 callees (Allocate_OrDbgBreak, ProcessAndAllocateAndProcess20, sub_829FB530, sub_829FC9A8, and sub_829FCBE0). 1 caller (ProcessAndProcessAndProcess138).
+[functions."0x829FB280"]
+name = "ProcessAndAllocateAndProcess21_829FB280"
+
+
+# A processor that processes the data (one hundred and thirty-ninth form). It takes a value (a) and a structure (b: field at b->0). It processes the data (a and b). This is the "process this data" routine (one hundred and thirty-ninth form), part of the 0x829FB process cluster. 116 lines. 3 callees (Free_SizeBucketed_Thunk, ProcessAndProcessAndProcess137, and sub_829FCDF8). 2 callers (sub_829FB390 and ProcessAndAllocateAndProcess21).
+[functions."0x829FB530"]
+name = "ProcessAndProcessAndProcess139_829FB530"
+
+
+# A processor that processes the data (one hundred and fortieth form). It takes a structure (a: field at a->0) and a structure (b: field at b->0). It processes the data (a and b). This is the "process this data" routine (one hundred and fortieth form), part of the 0x829FC process cluster. 189 lines. 5 callees (Allocate_OrDbgBreak, Free_SizeBucketed_Thunk, HashTable_Find2, HashTable_InsertGrow, and sub_829FAB50). 1 caller (sub_829FCBE0).
+[functions."0x829FC858"]
+name = "ProcessAndProcessAndProcess140_829FC858"
+
+
+# A processor that processes the data (one hundred and forty-first form). It takes a structure (a: field at a->32) and a value (b). It processes the data (a and b). This is the "process this data" routine (one hundred and forty-first form), part of the 0x829FC process cluster. 297 lines. 10 callees (Allocate_OrDbgBreak, CheckAndExtractBit, ConstructRefCounted, DestructRefCounted, ProcessAndConstructAndAtomicIncrement, ProcessAndDestructAndZeroField, ProcessAndDestructAndZero, VcallSlot3_AdvancePosition, WriteRange_AtPos, and ProcessAndProcessAndProcess140). 1 caller (ProcessAndAllocateAndProcess21).
+[functions."0x829FCBE0"]
+name = "ProcessAndProcessAndProcess141_829FCBE0"
+
+
+# A processor that processes the data (one hundred and forty-second form). It takes a structure (a: fields at a->0 and a->4) and a value (b). It processes the data (a and b). This is the "process this data" routine (one hundred and forty-second form), part of the 0x829FC process cluster. 58 lines. 2 callees (Allocate_OrDbgBreak and Free_SizeBucketed_Thunk). 1 caller (ProcessAndProcessAndProcess139).
+[functions."0x829FCDF8"]
+name = "ProcessAndProcessAndProcess142_829FCDF8"
+
+
+# A processor that processes the data (two hundred and seventy-ninth form). It takes a value (a). It processes the data (a). This is the "process this data" routine (two hundred and seventy-ninth form), part of the 0x829F8 process cluster. 197 lines. 5 callees (Allocate_OrDbgBreak, Construct12Byte, CriticalSection_EnterOrTry, ProcessAndVcallAndProcess10, and sub_82BFCDD0). 4 callers (ProcessAndProcessAndProcess226, sub_829F7C40, sub_825AB3D0, and sub_821D9258).
+[functions."0x829F8250"]
+name = "ProcessAndProcessAndProcess279_829F8250"
+
+
+# A processor that processes the data (two hundred and eightieth form). It takes a structure (a: fields at a->0 and a->4) and a value (b). It processes the data (a and b). This is the "process this data" routine (two hundred and eightieth form), part of the 0x829FA process cluster. 131 lines. 3 callees (Allocate_OrDbgBreak, Free_SizeBucketed_Thunk, and MemSet_SdkRuntime). 3 callers (sub_829FC858, HashTable_InsertGrow, and sub_829FC9A8).
+[functions."0x829FAB50"]
+name = "ProcessAndProcessAndProcess280_829FAB50"
+
+
+# A processor that processes the data (two hundred and eighty-first form). It takes nothing. It processes the data. This is the "process this data" routine (two hundred and eighty-first form), part of the 0x829FA process cluster. 131 lines. 3 callees (Allocate_OrDbgBreak, MemSet_SdkRuntime, and sub_829FC9A8). 3 callers (ProcessAndProcessAndProcess211, sub_8233AE50, and sub_82354BB8).
+[functions."0x829FAF40"]
+name = "ProcessAndProcessAndProcess281_829FAF40"
+
+
+# A processor that processes the data (two hundred and eighty-second form). It takes a structure (a: field at a->0). It processes the data (a). This is the "process this data" routine (two hundred and eighty-second form), part of the 0x829FC process cluster. 73 lines. 2 callees (Allocate_OrDbgBreak and ProcessAndProcessAndProcess280). 2 callers (ProcessAndProcessAndProcess281 and sub_829FB280).
+[functions."0x829FC9A8"]
+name = "ProcessAndProcessAndProcess282_829FC9A8"
+
+
+# Insert a node into a tree by driving sub-operations (seven hundred and one hundred and one hundred and twenty-third form). It takes a structure, allocates fresh memory (Allocate_OrDbgBreak), finds tree leaves (FindTreeLeaf), inserts into the tree (Tree_Insert), and drives many sub-operations (ProcessAndProcessAndProcess516, ProcessAndProcessAndProcess517, ProcessAndProcessAndProcess808, sub_8321D848, sub_8321E160, sub_83221D10, sub_83222238, sub_83228F28) based on the result. This is a tree insertion routine in the 0x829FF cluster. 581 lines. 11 callees. 0 callers.
+[functions."0x829FFC48"]
+name = "ProcessAndProcessAndProcess923_829FFC48"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and sixty-second form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x829FD process cluster. 61 lines. 0 callees. 2 callers (sub_82261558 and sub_82261668).
+[functions."0x829FDF28"]
+name = "ProcessAndProcessAndProcess962_829FDF28"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and twenty-first form). It takes a structure and drives a sub-operation (sub_82A734D0). This is a frequently-called helper in the 0x829FD process cluster. 83 lines. 1 callee. 36 callers.
+[functions."0x829FD4B8"]
+name = "ProcessAndProcessAndProcess1121_829FD4B8"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and fourteenth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x829FA process cluster. 68 lines. 0 callees. 2 callers (ProcessAndProcessAndProcess1280 and sub_822A9B20).
+[functions."0x829FA2E0"]
+name = "ProcessAndProcessAndProcess1314_829FA2E0"
+
+
+# Process a very large data structure by inserting into a tree (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and ninety-third form). It takes a structure, allocates fresh memory (Allocate_OrDbgBreak), finds a tree leaf (FindTreeLeaf), inserts into a tree (Tree_Insert), and drives sub-operations (ProcessAndProcessAndProcess516, ProcessAndProcessAndProcess517, ProcessAndProcessAndProcess808, ProcessAndProcessAndProcess1594, sub_8321E160, sub_83221D10, sub_83222238, sub_83228F28) based on the result. This is a tree-insertion processor in the 0x829FF cluster. 581 lines. 11 callees. 0 callers.
+[functions."0x829FF798"]
+name = "ProcessAndProcessAndProcess1593_829FF798"
+
+
+# Process a structure by destroying tree nodes (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and twenty-fifth form). It takes a structure and destroys tree nodes (DestroyTreeNodes). Part of the 0x829FD process cluster. 54 lines. 1 callee. 2 callers (sub_829FEC30 and ProcessAndProcessAndProcess1627).
+[functions."0x829FDAE8"]
+name = "ProcessAndProcessAndProcess1625_829FDAE8"
+
+
+# Process a structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and fifty-fourth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess1753, sub_8229CA50) based on the result. This is a very frequently-called helper in the 0x829FB process cluster. 64 lines. 2 callees. 203 callers.
+[functions."0x829FB978"]
+name = "ProcessAndProcessAndProcess1754_829FB978"
+
+
+# Process a structure by releasing a refcounted object (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and one hundred and twenty-third form). It takes a structure and releases a refcounted object (Release_RefCounted). Part of the 0x829FD process cluster. 61 lines. 1 callee. 1 caller (ProcessAndProcessAndProcess1627).
+[functions."0x829FD878"]
+name = "ProcessAndProcessAndProcess1823_829FD878"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and one hundred and thirty-eighth form). It takes a structure and checks its state, with no external sub-operations. This is a frequently-called helper in the 0x829FD process cluster. 71 lines. 0 callees. 2 callers (ProcessAndProcessAndProcess1820 and ProcessAndProcessAndProcess1822).
+[functions."0x829FDF90"]
+name = "ProcessAndProcessAndProcess1838_829FDF90"
+
+
+# Process a structure by releasing a refcounted object (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and two hundred and thirty-second form). It takes a structure and releases a refcounted object (Release_RefCounted). This is a frequently-called helper in the 0x829FF process cluster. 82 lines. 1 callee. 24 callers.
+[functions."0x829FF3E8"]
+name = "ProcessAndProcessAndProcess1932_829FF3E8"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and two hundred and thirty-fourth form). It takes a structure and drives a sub-operation (sub_829FA700). This is a frequently-called helper in the 0x829FA process cluster. 104 lines. 1 callee. 6 callers.
+[functions."0x829FA5E8"]
+name = "ProcessAndProcessAndProcess1934_829FA5E8"
+
+
+# Process a very large data structure by computing a special function (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and two hundred and seventy-eighth form). It takes a structure, computes a special function (ComputeSpecialFunction), computes a special function 2 (ComputeSpecialFunction2), and drives a sub-operation (ProcessAndProcessAndProcess1977) based on the result. This is a frequently-called processor in the 0x829FA process cluster. 513 lines. 3 callees. 6 callers.
+[functions."0x829FA020"]
+name = "ProcessAndProcessAndProcess1978_829FA020"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and four hundred and twentieth form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess1754). This is a frequently-called helper in the 0x829FB process cluster. 57 lines. 1 callee. 16 callers.
+[functions."0x829FB600"]
+name = "ProcessAndProcessAndProcess2120_829FB600"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and four hundred and twenty-second form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess1754). Part of the 0x829FB process cluster. 91 lines. 1 callee. 1 caller (sub_829FBC40).
+[functions."0x829FBA70"]
+name = "ProcessAndProcessAndProcess2122_829FBA70"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and four hundred and twenty-third form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess1754). Part of the 0x829FB process cluster. 88 lines. 1 callee. 1 caller (sub_829FBC40).
+[functions."0x829FBB10"]
+name = "ProcessAndProcessAndProcess2123_829FBB10"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and four hundred and twenty-fourth form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess1754). This is a frequently-called helper in the 0x829FB process cluster. 85 lines. 1 callee. 7 callers.
+[functions."0x829FBBA8"]
+name = "ProcessAndProcessAndProcess2124_829FBBA8"
+
+
+# Process a large structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and four hundred and twenty-fifth form). It takes a structure, checks its state, processes a chain (ProcessChain2), and processes a hash table (ProcessHashTable) based on the result. Part of the 0x829FC process cluster. 209 lines. 2 callees. 1 caller (sub_829FBC40).
+[functions."0x829FC180"]
+name = "ProcessAndProcessAndProcess2125_829FC180"
+
+
+# Process a large structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and four hundred and twenty-sixth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x829FC process cluster. 111 lines. 0 callees. 1 caller (sub_829FBC40).
+[functions."0x829FC2F0"]
+name = "ProcessAndProcessAndProcess2126_829FC2F0"
+
+
+# Process a structure by checking its state (two thousand four hundred and thirty-second form). It takes a value (a) and a structure (b: fields at b->0 and b->4); it checks the structure's state. This is the "process this data" routine (two thousand four hundred and thirty-second form), part of the 0x829FE process cluster. 71 lines. 0 callees. 2 callers (ProcessAndProcessAndProcess1820 and ProcessAndProcessAndProcess1822).
+[functions."0x829FE010"]
+name = "ProcessAndProcessAndProcess2431_829FE010"
+
+
+# Process a structure by checking its state and driving sub-operations (two thousand four hundred and fifty-third form). It takes a structure (a: fields at a->480, a->0, and a->484); it checks the structure's state, and drives sub-operations (Release_RefCounted, ProcessAndProcessAndProcess2171, and more) based on the result. This is the "process this data" routine (two thousand four hundred and fifty-third form), part of the 0x829FF process cluster. 126 lines. 2 callees. 1 caller (sub_82A00580).
+[functions."0x829FFB80"]
+name = "ProcessAndProcessAndProcess2452_829FFB80"

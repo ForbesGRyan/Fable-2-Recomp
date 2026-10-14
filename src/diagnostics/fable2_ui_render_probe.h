@@ -28,7 +28,7 @@
 //                                    "name@start-end" (seconds from the first
 //                                    hook call) so several functions can be
 //                                    ablated in sequence within one run, e.g.
-//                                    UIText_FrameRender@34-39,ProcessAndProcessAndProcess1637_82B4EEE0@39-44
+//                                    UIText_FrameRender@34-39,UITextElement_DrawDispatch@39-44
 //   FABLE2_UIR_SKIP=a,b              comma list of names excluded from the
 //                                    timeline log (high-frequency noise)
 //
@@ -39,8 +39,8 @@
 //
 // This header also owns strong overrides for pipeline functions no other
 // probe owns: sub_82BFD850, UITextItem_Render (0x82BFD9E8),
-// UIText_RenderWithFont (0x82C000F8), ProcessAndProcessAndProcess2382_82C09B50, ProcessAndProcessAndProcess2069_82C0A230,
-// ProcessAndProcessAndProcess1637_82B4EEE0 (element draw vtable [13]).
+// UIText_RenderWithFont (0x82C000F8), UITextElement_GrowBuffer, UITextElement_FieldByIndex,
+// UITextElement_DrawDispatch (element draw vtable [13]).
 //
 // Wiring: each existing probe hook calls fable2::uir::hook("Name", ctx,
 // base) just before its __imp__ forward; hook() returns true when the
@@ -303,21 +303,21 @@ extern "C" void UIText_RenderWithFont(PPCContext& ctx, uint8_t* base) {
   __imp__UIText_RenderWithFont(ctx, base);
 }
 
-extern "C" void __imp__ProcessAndProcessAndProcess2382_82C09B50(PPCContext& ctx, uint8_t* base);
-extern "C" void ProcessAndProcessAndProcess2382_82C09B50(PPCContext& ctx, uint8_t* base) {
-  if (fable2::uir::hook("ProcessAndProcessAndProcess2382_82C09B50", ctx, base)) return;
-  __imp__ProcessAndProcessAndProcess2382_82C09B50(ctx, base);
+extern "C" void __imp__UITextElement_GrowBuffer(PPCContext& ctx, uint8_t* base);
+extern "C" void UITextElement_GrowBuffer(PPCContext& ctx, uint8_t* base) {
+  if (fable2::uir::hook("UITextElement_GrowBuffer", ctx, base)) return;
+  __imp__UITextElement_GrowBuffer(ctx, base);
 }
 
-extern "C" void __imp__ProcessAndProcessAndProcess2069_82C0A230(PPCContext& ctx, uint8_t* base);
-extern "C" void ProcessAndProcessAndProcess2069_82C0A230(PPCContext& ctx, uint8_t* base) {
-  if (fable2::uir::hook("ProcessAndProcessAndProcess2069_82C0A230", ctx, base)) return;
-  __imp__ProcessAndProcessAndProcess2069_82C0A230(ctx, base);
+extern "C" void __imp__UITextElement_FieldByIndex(PPCContext& ctx, uint8_t* base);
+extern "C" void UITextElement_FieldByIndex(PPCContext& ctx, uint8_t* base) {
+  if (fable2::uir::hook("UITextElement_FieldByIndex", ctx, base)) return;
+  __imp__UITextElement_FieldByIndex(ctx, base);
 }
 
 // The per-element DRAW (element vtable [13], invoked via sub_82C09870).
-extern "C" void __imp__ProcessAndProcessAndProcess1637_82B4EEE0(PPCContext& ctx, uint8_t* base);
-extern "C" void ProcessAndProcessAndProcess1637_82B4EEE0(PPCContext& ctx, uint8_t* base) {
-  if (fable2::uir::hook("ProcessAndProcessAndProcess1637_82B4EEE0", ctx, base)) return;
-  __imp__ProcessAndProcessAndProcess1637_82B4EEE0(ctx, base);
+extern "C" void __imp__UITextElement_DrawDispatch(PPCContext& ctx, uint8_t* base);
+extern "C" void UITextElement_DrawDispatch(PPCContext& ctx, uint8_t* base) {
+  if (fable2::uir::hook("UITextElement_DrawDispatch", ctx, base)) return;
+  __imp__UITextElement_DrawDispatch(ctx, base);
 }

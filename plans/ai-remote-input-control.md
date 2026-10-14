@@ -116,6 +116,40 @@ The `game_state` command returns `{"code":N,"name":"...","front_end":"..."}`;
 `fable2_control.py game-state` wraps it. State changes are logged via `REXSYS_INFO`
 (transition-only, to avoid spam) and every sample to `fable2_state_probe.log`.
 
+### Frame capture (`screenshot` command, implemented)
+
+`{"cmd":"screenshot","path":"..."}` saves the **current game frame** as a PNG
+file (parent directories are created automatically). The frame is read
+**in-process from the renderer's guest output texture** — the exact frame the
+game just rendered, still in GPU memory — so the picture is the complete game
+frame even while other windows cover it, the taskbar overlaps it, or the window
+is unfocused. It is *not* a desktop screenshot, so occluding windows never
+appear in the image. (Verified: with a full opaque window covering the game,
+the capture still shows the game and none of the occluder.)
+
+Mechanics (`src/diagnostics/fable2_frame_capture.h`): the command gets the
+renderer presenter attached to the game window (via a small accessor, since
+`rex::ui::Window::presenter()` is protected) and calls
+`Presenter::CaptureGuestOutput()`, which does a device-side copy of the guest
+output texture into a readback buffer, awaits the fence, and returns the pixels
+as an 8-bit `R8G8B8X8` image at the guest's native resolution (1280x720 for
+Fable 2). The unused alpha lane is dropped and the RGB is written with a small
+self-contained PNG encoder (stored / uncompressed zlib deflate blocks — no
+dependency on GDI+, libpng, or a codec DLL). It is backend-agnostic: both the
+D3D12 and Vulkan presenters implement `CaptureGuestOutput`, so it works for
+`--gpu_plugin=xenos` and `--gpu_plugin=xenos-vulkan` alike. Reading the guest
+output straight from GPU memory is also reliable in this virtualized / headless
+environment, where DWM redirection-surface readback of a foreground window
+comes back black. Each capture blocks the connection for a few hundred
+milliseconds.
+
+Response: `{"ok":true,"path":"...","width":W,"height":H,"bytes":N,"avg_luma":L}`
+(with `avg_luma` a 0..255 brightness diagnostic) plus the echoed `id`. Errors:
+missing `path`, no graphics presenter yet (game not up), or "no frame captured
+yet" (nothing rendered) — each with a specific message. The command also lands
+in the usual `REXSYS_INFO` audit log with the saved size, byte count and
+brightness.
+
 ---
 
 ## 1. Background: how input works today
@@ -361,6 +395,7 @@ Commands:
 | `{"cmd":"clear"}` | — | Release everything remote (baseline + timed). |
 | `{"cmd":"script","steps":[...],"id_tag":"jump_over_pit"}` | steps = ordered list; each step: an input op (`press`/`stick`/`state` fragment) + optional `delay_ms` (wait *before* this step) + optional `hold_ms` | Atomically enqueue a sequence. Server returns the total duration. This is the primitive for reproducible bug scripts. |
 | `{"cmd":"get_state"}` | — | Reply with current resolved snapshot: `{buttons:["A","RT"], triggers:{...}, sticks:{...}, packet_number, ms_until_release: {A: 120}}`. |
+| `{"cmd":"screenshot","path":"C:/shots/step1.png"}` | `path` (required) | Save the current game frame as a PNG (reads the renderer's guest output from the GPU, so it is complete even while other windows cover the game). Reply `{ok, path, width, height, bytes, avg_luma}`. Blocks for a few hundred ms. |
 | `{"cmd":"cvar","name":"mouse_look_scale","value":"512"}` | `name`, optional `value` | Get/set any cvar by name via `rex::cvar` — gives the AI access to the existing knob surface (input map, patches toggles, etc.) for free. |
 | `{"cmd":"enable"}` / `{"cmd":"disable"}` | — | Toggle the remote pad device (reconnect/disconnect from the guest's view). |
 | `{"cmd":"ping"}` | — | `{"ok":true,"ms":<server processing time>}`. |
@@ -378,6 +413,7 @@ Examples (what an AI harness would actually send):
   {"delay_ms":2200,"op":"press","input":"B","hold_ms":80}
 ]}
 {"cmd":"cvar","name":"mouse_look_scale"}
+{"cmd":"screenshot","path":"C:/shots/after_landing.png"}
 ```
 
 A "script" is a single message, so it is **atomic** from the guest's perspective — no
@@ -394,6 +430,7 @@ python tools/fable2_control.py state --set-buttons A,RT --ly 1000
 python tools/fable2_control.py clear
 python tools/fable2_control.py script --file repro.json
 python tools/fable2_control.py get-state
+python tools/fable2_control.py screenshot C:/shots/step1.png
 python tools/fable2_control.py cvar set mouse_look_scale 512
 ```
 
@@ -456,9 +493,9 @@ python tools/fable2_control.py cvar set mouse_look_scale 512
 Input is the actuation half. For *automatic* investigations the AI also wants cheap
 observations over the same channel (all Phase 2-style additions, same transport):
 
-- `{"cmd":"screenshot"}` — grab the rendered frame (the GPU plugin already owns the
-  final image; the existing `tools/capgame*.ps1` scripts prove capture works
-  externally — exposing it in-process avoids that indirection).
+- ~~`{"cmd":"screenshot"}`~~ — **implemented** (with a required `path` field;
+  in-process GPU readback of the renderer's guest output, so it is complete
+  even while other windows cover the game — see §0).
 - `{"cmd":"log","since_ms":...}` — tail `logs/` or an in-memory ring of `REXSYS_*`
   lines, so the harness correlates "my command at t=X" with "guest error at t=X+Y".
 - `{"cmd":"mem_read","addr":0x83496BD4,"count":4,"u32":true}` and a `mem_write` —

@@ -1,5 +1,7 @@
 using Fable2Launcher;
 using Fable2Launcher.Constants;
+using System.Security.Cryptography;
+using System.Text;
 using System.Xml.Linq;
 
 string testDirectory = Path.Combine(Path.GetTempPath(), "fable2-launcher-config-test-" + Guid.NewGuid());
@@ -143,6 +145,98 @@ try
         }
     }
     Require(!GameCompatibilityInspector.Classify("unknown", _ => true, _ => true).Supported, "unknown hash accepted");
+
+    // Extraction hash gate: the only signal available before any content exists.
+    foreach (GameVersion version in GameVersions.All)
+    {
+        (bool gateOk, string gateMessage) = GameCompatibilityInspector.CheckHash(version.Hash);
+        Require(gateOk == supported.Contains(version), "extraction hash gate differs: " + version.Id);
+        if (gateOk) Require(gateMessage == version.Name, "extraction hash gate identity differs: " + version.Id);
+        Require(GameCompatibilityInspector.CheckHash(version.Hash.ToUpperInvariant()).Ok == gateOk,
+            "case-insensitive SHA-256 gate failed: " + version.Id);
+    }
+    (bool unknownGateOk, string unknownGateMessage) = GameCompatibilityInspector.CheckHash(new string('f', 64));
+    Require(!unknownGateOk && unknownGateMessage.Contains(new string('f', 64)),
+        "unknown hash gate accepted or hid the hash");
+    Console.WriteLine("Extraction hash gate (known-good default.xex hashes) passed.");
+
+    // Synthetic GDFX disc image: proves the two-phase, hash-gated extraction
+    // path without needing a 6.3 GB retail dump.
+    byte[] xexBytes = Encoding.UTF8.GetBytes("SYNTHETIC-DEFAULT-XEX-" + new string('x', 4096));
+    byte[] nestedBytes = Encoding.UTF8.GetBytes("hello from data/nested.txt");
+    byte[] artBytes = new byte[3000];
+    Random.Shared.NextBytes(artBytes);
+    // GDFX layout, one region per sector group (no overlaps):
+    //   sector 0: root directory, sector 1: data/ directory,
+    //   sectors 2-4: default.xex, sectors 5-6: nxeart, sector 7: data/nested.txt
+    const long gdfxBase = 0x10000; // headerOffset 0x20000 - 0x10000
+    string imagePath = Path.Combine(testDirectory, "synthetic.iso");
+    string gdfxOut = Path.Combine(testDirectory, "gdfx-out");
+    using (FileStream image = new(imagePath, FileMode.Create))
+    {
+        image.SetLength(0x20000 + 0x24); // must extend past the GDFX header
+        image.Seek(gdfxBase + 0 * 2048, SeekOrigin.Begin);          // root directory (sector 0)
+        WriteGdfxEntry(image, 2, (uint)xexBytes.Length, 0x80, "default.xex");
+        WriteGdfxEntry(image, 1, 0x800, 0x10, "data");
+        WriteGdfxEntry(image, 5, (uint)artBytes.Length, 0x80, "nxeart");
+        image.Write(BitConverter.GetBytes(uint.MaxValue));
+        image.Seek(gdfxBase + 1 * 2048, SeekOrigin.Begin);          // data/ directory (sector 1)
+        WriteGdfxEntry(image, 7, (uint)nestedBytes.Length, 0x80, "nested.txt");
+        image.Write(BitConverter.GetBytes(uint.MaxValue));
+        image.Seek(gdfxBase + 2 * 2048, SeekOrigin.Begin); image.Write(xexBytes);
+        image.Seek(gdfxBase + 5 * 2048, SeekOrigin.Begin); image.Write(artBytes);
+        image.Seek(gdfxBase + 7 * 2048, SeekOrigin.Begin); image.Write(nestedBytes);
+        image.Seek(0x20000, SeekOrigin.Begin);                      // GDFX header
+        image.Write("MICROSOFT*XBOX*MEDIA"u8.ToArray());
+        image.Write(BitConverter.GetBytes(0u));                     // rootSector
+        image.Write(BitConverter.GetBytes(0x800u));                 // rootSize
+        image.Write(BitConverter.GetBytes(0L));                     // creation time
+    }
+    using (DiscExtraction disc = DiscExtraction.Open(imagePath, _ => { }))
+    {
+        Require(disc.DefaultXex is not null, "synthetic default.xex was not found");
+        var progress = new ExtractionProgress(disc.Plan);
+        var rootsDone = new List<string>();
+        progress.RootCompleted += name => rootsDone.Add(name);
+        string xexHash = disc.ExtractXex(gdfxOut, _ => { }, progress);
+        string expectedHash = Convert.ToHexString(SHA256.HashData(xexBytes)).ToLowerInvariant();
+        Require(xexHash == expectedHash, "extracted default.xex hash does not match source bytes");
+        Require(File.ReadAllBytes(Path.Combine(gdfxOut, "default.xex")).SequenceEqual(xexBytes),
+            "extracted default.xex bytes differ");
+        (bool syntheticGateOk, string syntheticGateMessage) = GameCompatibilityInspector.CheckHash(xexHash);
+        Require(!syntheticGateOk && syntheticGateMessage.Contains(xexHash),
+            "synthetic (unsupported) XEX passed the extraction gate");
+        (int remainingFiles, long remainingBytes) = disc.ExtractRemaining(gdfxOut, _ => { }, progress);
+        Require(remainingFiles == 2 && remainingBytes == nestedBytes.Length + artBytes.Length,
+            "remaining extraction counts differ");
+        Require(File.ReadAllBytes(Path.Combine(gdfxOut, "data/nested.txt")).SequenceEqual(nestedBytes),
+            "nested extracted file bytes differ");
+        Require(File.ReadAllBytes(Path.Combine(gdfxOut, "nxeart")).SequenceEqual(artBytes),
+            "root extracted file bytes differ");
+        // Structured progress: the whole disc is accounted for and every top-level
+        // item is reported complete by the time both phases finish.
+        Require(progress.TotalBytes == (long)xexBytes.Length + artBytes.Length + nestedBytes.Length,
+            "progress total bytes differ");
+        Require(progress.CompletedBytes == progress.TotalBytes, "completed bytes do not reach the total");
+        Require(progress.Percent == 100.0, "progress did not reach 100%");
+        Require(rootsDone.Count == 3, "expected 3 top-level items reported complete");
+        foreach (string root in new[] { "default.xex", "data", "nxeart" })
+            Require(rootsDone.Contains(root), "root item not reported complete: " + root);
+
+        // Cancellation: flipping the stop flag mid-extraction aborts with a clean
+        // stop (ExtractionCancelledException), not a generic error.
+        bool stop = false;
+        var cancelProgress = new ExtractionProgress(disc.Plan, () => stop);
+        string _ = disc.ExtractXex(gdfxOut, _ => { }, cancelProgress);  // completes (not yet stopped)
+        stop = true;
+        Exception? cancelEx = null;
+        try { disc.ExtractRemaining(gdfxOut, _ => { }, cancelProgress); }
+        catch (Exception ex) { cancelEx = ex; }
+        Require(cancelEx is ExtractionCancelledException,
+            "cancellation did not abort with ExtractionCancelledException: "
+            + (cancelEx?.GetType().Name ?? "no exception"));
+    }
+    Console.WriteLine("Synthetic GDFX two-phase extraction (hash-gated) passed.");
     // A synthetic extra locale proves that no classifier branch needs adding.
     GameVersion extra = supported[0] with { Id = "synthetic-locale", Hash = new string('a', 64),
         Name = "Synthetic locale", Language = 6 };
@@ -155,9 +249,14 @@ try
 
     File.WriteAllText(Path.Combine(testDirectory, "fable_2.exe"), "synthetic fixture, not an executable");
     string descriptorPath = Path.Combine(testDirectory, "fable2_build.json");
+    // Marker predicates: every required file present, but never the version's
+    // own reject markers, so classification cannot fall into "mixed content".
+    bool HasFile(GameVersion version, string path) => !version.RejectFiles.Contains(path, StringComparer.Ordinal);
+    bool HasDirectory(GameVersion version, string path) => !version.RejectDirectories.Contains(path, StringComparer.Ordinal);
     foreach (GameVersion version in supported)
     {
-        var result = GameCompatibilityInspector.Classify(version.Hash, _ => true, _ => false);
+        var result = GameCompatibilityInspector.Classify(version.Hash, p => HasFile(version, p), p => HasDirectory(version, p));
+        Require(result.Supported, "launch-planner fixture classified unsupported: " + version.Id);
         if (version.Id == GameVersions.DefaultProfile)
             GameLaunchPlanner.Create(testDirectory, testDirectory, result);
         else
@@ -168,7 +267,7 @@ try
         File.WriteAllText(descriptorPath, System.Text.Json.JsonSerializer.Serialize(new { profiles = new[] { selected.Id } }));
         foreach (GameVersion version in supported)
         {
-            var result = GameCompatibilityInspector.Classify(version.Hash, _ => true, _ => false);
+            var result = GameCompatibilityInspector.Classify(version.Hash, p => HasFile(version, p), p => HasDirectory(version, p));
             if (version == selected) GameLaunchPlanner.Create(testDirectory, testDirectory, result);
             else RequireThrows(() => GameLaunchPlanner.Create(testDirectory, testDirectory, result), "wrong single-edition descriptor accepted");
         }
@@ -176,14 +275,65 @@ try
     File.WriteAllText(descriptorPath, System.Text.Json.JsonSerializer.Serialize(new { profiles = supported.Select(v => v.Id) }));
     foreach (GameVersion version in supported)
     {
-        var result = GameCompatibilityInspector.Classify(version.Hash, _ => true, _ => false);
+        var result = GameCompatibilityInspector.Classify(version.Hash, p => HasFile(version, p), p => HasDirectory(version, p));
         var plan = GameLaunchPlanner.Create(testDirectory, testDirectory, result);
         Require(plan.GameRoot == Path.GetFullPath(testDirectory), "game root was not preserved");
     }
+    GameVersion malformedProbe = supported[0];
     File.WriteAllText(descriptorPath, "{malformed");
     RequireThrows(() => GameLaunchPlanner.Create(testDirectory, testDirectory,
-        GameCompatibilityInspector.Classify(supported[0].Hash, _ => true, _ => false)), "malformed descriptor accepted");
+        GameCompatibilityInspector.Classify(malformedProbe.Hash, p => HasFile(malformedProbe, p), p => HasDirectory(malformedProbe, p))), "malformed descriptor accepted");
     Console.WriteLine("Catalogue-driven allow/deny, marker, extra-locale and native-profile tests passed.");
+
+    // Fable2ConfigFile (the Advanced Options page config, fable2_config.toml).
+    string advPath = Path.Combine(testDirectory, "fable2_config.toml");
+    var advanced = new Fable2ConfigValues
+    {
+        KeyboardGamepadMap = "LMB:X,RMB:Y,Shift:A,E:A",
+        MouseLook = true,
+        MouseLookScale = 512,
+        UnlockWebsite = true,
+        UnlockCe = false,
+        SkipIntroVideos = true,
+        HighTickRate = true,
+        HigherHfTickRate = false,
+        DisableMotionBlur = true,
+        RealtimeTextureMorphing = true,
+        HeroDogTextureReadback = false,
+        HotFuncYieldEvery = 4,
+    };
+    Fable2ConfigFile.Write(advPath, advanced);
+    string writtenAdv = File.ReadAllText(advPath);
+    Require(writtenAdv.Contains("config_version = 1"), "config_version was not written");
+    var readBack = Fable2ConfigFile.Read(advPath);
+    Require(readBack.MouseLook, "mouse look roundtrip failed");
+    Require(readBack.MouseLookScale == 512, "mouse scale roundtrip failed");
+    Require(!readBack.UnlockCe, "unlock_ce roundtrip failed");
+    Require(readBack.SkipIntroVideos, "skip_intro_videos roundtrip failed");
+    Require(readBack.DisableMotionBlur, "disable_motion_blur roundtrip failed");
+    Require(readBack.HighTickRate, "high_tick_rate roundtrip failed");
+    Require(!readBack.HigherHfTickRate, "higher_hf_tick_rate roundtrip failed");
+    Require(readBack.HotFuncYieldEvery == 4, "hotfunc_yield_every roundtrip failed");
+    Require(writtenAdv.Contains("[perf]"), "[perf] section was not written");
+    List<KeybindEntry> parsed = Fable2ConfigFile.ParseKeybinds(readBack.KeyboardGamepadMap);
+    Require(parsed.Count == 4, "keybind parse count failed");
+    Require(parsed[0].Key == "LMB" && parsed[0].Button == "X" && parsed[3].Key == "E" && parsed[3].Button == "A",
+        "keybind parse failed");
+    Require(string.Equals(Fable2ConfigFile.BuildKeybinds(Fable2ConfigFile.ParseKeybinds("LMB:X,E:A")), "LMB:X,E:A"),
+        "keybind build roundtrip failed");
+    Require(string.IsNullOrEmpty(Fable2ConfigFile.BuildKeybinds(Fable2ConfigFile.ParseKeybinds(""))),
+        "empty map should build to empty");
+    // Second write: update a value and preserve unknown sections/keys.
+    File.AppendAllText(advPath, "\n[custom_section]\nsome_key = \"keep me\"\n");
+    advanced.MouseLookScale = 1024;
+    Fable2ConfigFile.Write(advPath, advanced);
+    string advContent = File.ReadAllText(advPath);
+    Require(advContent.Contains("mouse_look_scale = 1024"), "mouse scale update failed");
+    Require(advContent.Contains("[custom_section]") && advContent.Contains("some_key = \"keep me\""),
+        "unknown section/keys not preserved");
+    Require(Fable2ConfigFile.Read(advPath).MouseLookScale == 1024, "mouse scale re-read failed");
+    Require(File.Exists(advPath + ".launcher-backup"), "fable2_config backup missing");
+    Console.WriteLine("Advanced options (fable2_config.toml) roundtrip and preservation passed.");
 
     if (args.Length > 0)
     {
@@ -208,4 +358,20 @@ static void RequireThrows(Action action, string message)
     try { action(); }
     catch { return; }
     throw new InvalidOperationException(message);
+}
+
+// GDFX directory entry: u32 unknown, u32 sector, u32 size, u8 attributes,
+// u8 nameLen, name bytes (little-endian, per tools/x360extract/Gdfx.cs).
+static void WriteGdfxEntry(Stream stream, uint sector, uint size, byte attributes, string name)
+{
+    byte[] nameBytes = Encoding.ASCII.GetBytes(name);
+    stream.Write(BitConverter.GetBytes(0u));
+    stream.Write(BitConverter.GetBytes(sector));
+    stream.Write(BitConverter.GetBytes(size));
+    stream.WriteByte(attributes);
+    stream.WriteByte((byte)nameBytes.Length);
+    stream.Write(nameBytes);
+    // Entries are 4-byte aligned in GDFX directories.
+    int padding = (4 - (14 + nameBytes.Length) % 4) % 4;
+    for (int i = 0; i < padding; i++) stream.WriteByte(0);
 }

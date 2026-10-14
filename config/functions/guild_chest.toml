@@ -1,0 +1,35 @@
+# guild_chest functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# === Guild chest (fable2.com website items / CE content unlock) ===
+# The Guild chest holds items obtainable from the fable2.com website and the
+# Collectors Edition content. An unregistered player who clicks it sees
+# "Go to www.fable2.com for information on how to access the gold and items
+# your heroic ancestors left behind." These are the functions on the
+# chest-click path (see docs/patches.md). Names are best-effort from runtime
+# tracing; refine them as behaviour is confirmed.
+
+# Website-item getter. The Xenia "Unlock Website Items" patch targets its
+# GATE2 branch (0x8256E4B8) and return-0 tail (0x8256E4E3) inside this fn.
+[functions."0x8256E368"]
+name = "GuildChest_GetWebsiteItem_8256E368"
+
+
+# CE-content getter. The Xenia "Unlock CE Content" patch forces r9=1 at
+# 0x824B366C (a load) inside this fn.
+[functions."0x824B3528"]
+name = "GuildChest_GetCEContent_824B3528"
+
+
+# Per-item worker: called once per chest item on the click; calls the item op
+# method (0x8256E4F8) through the website-object vtable.
+[functions."0x82228830"]
+name = "GuildChest_ProcessItem_82228830"
+
+
+# Item-processing loop: the click handler that calls ProcessItem per item.
+[functions."0x822DE008"]
+name = "GuildChest_ProcessItems_822DE008"

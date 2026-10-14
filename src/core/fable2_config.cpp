@@ -56,17 +56,19 @@ R"TOML_EOF(# ===================================================================
 config_version = 1
 
 [input]
-# Host keyboard -> guest gamepad map: "Key:Button,Key:Button,..." (one line;
-# do not add spaces or newlines inside the string). Key = Windows virtual-key
-# name (see README.md, Keyboard controls); Button = A/B/X/Y, LB/RB, LT/RT,
-# Up/Down/Left/Right, Pause, Select, L3/R3, StickUp/StickDown/StickLeft/
-# StickRight. Empty string disables the keyboard gamepad.
+# Host keyboard/mouse -> guest gamepad map: "Key:Button,Key:Button,..." (one
+# line; do not add spaces or newlines inside the string). Key = Windows
+# virtual-key name (see README.md, Keyboard controls) or a mouse button
+# (LMB/RMB/MMB, or XMB1/XMB2 for the side buttons); Button = A/B/X/Y, LB/RB,
+# LT/RT, Up/Down/Left/Right, Pause, Select, L3/R3, StickUp/StickDown/
+# StickLeft/StickRight. Empty string disables the keyboard gamepad.
 # --keyboard_gamepad_map, REX_* environment variables and fable_2.toml still
 # take priority over this value; the F3 console can change it live.
 # Default: the built-in layout
-#   E:A,2:B,1:X,3:Y,W:StickUp,S:StickDown,A:StickLeft,D:StickRight,
-#   Escape:Pause,M:Select,Q:LT,Tab:RT,F1:Up,F2:Down,F3:Left,F4:Right
-keyboard_gamepad_map = "E:A,2:B,1:X,3:Y,W:StickUp,S:StickDown,A:StickLeft,D:StickRight,Escape:Pause,M:Select,Q:LT,Tab:RT,F1:Up,F2:Down,F3:Left,F4:Right"
+#   LMB:X,RMB:Y,MMB:B,Shift:A,E:A,Q:LT,Tab:RB,R:RT,Z:LB,B:B,
+#   W:StickUp,S:StickDown,A:StickLeft,D:StickRight,Escape:Pause,M:Select,
+#   Up:Up,Down:Down,Left:Left,Right:Right
+keyboard_gamepad_map = "LMB:X,RMB:Y,MMB:B,Shift:A,E:A,Q:LT,Tab:RB,R:RT,Z:LB,B:B,W:StickUp,S:StickDown,A:StickLeft,D:StickRight,Escape:Pause,M:Select,Up:Up,Down:Down,Left:Left,Right:Right"
 
 # Map mouse movement to the guest right stick (camera look): sweep to look,
 # stop to stop. false disables mouse look entirely.
@@ -80,8 +82,7 @@ mouse_look_scale = 256
 
 [patches]
 # Toggles for the recomp-level (mid-asm hook) patches, consulted at runtime
-# by the hook bodies (src/core/fable2_hooks.cpp) - no rebuild needed. Guest-image
-# DATA patches are a different file: fable2_patches.toml next to the exe.
+# by the hook bodies (src/core/fable2_hooks.cpp) - no rebuild needed.
 # Unlock Website Items (mid-asm hooks fable2_hook_website_g1/g1b/grantnew;
 # Xenia "Unlock Website Items" by Guy): forces the website-registration gates
 # AND the grant-method result in the Guild-chest item getter so the website
@@ -96,14 +97,66 @@ unlock_website = true
 # Default: true
 unlock_ce = true
 
+# Skip Intro Videos (mid-asm hook fable2_hook_skip_intro_videos; just-harry's
+# "Skip intro videos" patch from his Unofficial Xenia femtofork): skips the
+# Microsoft and Lionhead logo videos at boot. false = videos play (original).
+# Default: false
+skip_intro_videos = false
+
+# High Tick Rate (Xenia patch by Guy, plus mid-asm hook
+# fable2_hook_high_tick_rate_skip_store): doubles the game's LF tick from
+# 15 Hz to 30 Hz. Vastly improves in-game UI framerate and input delay.
+# Use together with higher_hf_tick_rate. false = original 15 Hz.
+# Default: false
+high_tick_rate = false
+
+# Higher HF Tick Rate (Xenia patch by Ultra, plus mid-asm hook
+# fable2_hook_high_hf_tick_rate_skip_store): doubles the HF tick from 30 Hz to
+# 60 Hz. The game expects HF to run at twice LF; with high_tick_rate alone
+# both run at 30 Hz and cloth physics misbehaves. Turn this on whenever
+# high_tick_rate is on. Requires high_tick_rate: ignored when that is false.
+# false = original 30 Hz.
+# Default: false
+higher_hf_tick_rate = false
+
+# Disable Motion Blur (mid-asm hook fable2_hook_disable_motion_blur): the
+# camera's full-screen motion blur amount (what scripts set via Camera.SetBlur)
+# is zeroed on its way to the renderer each frame. The camera's own value is
+# untouched. The log shows "[motion-blur] game requested ..." the first time
+# the game asks for blur. false = blur as in the original game.
+# Default: false
+disable_motion_blur = false
+
+# Realtime Texture Morphing (mid-asm hook fable2_hook_realtime_texture_morphing):
+# the hero's and dog's morphed skin textures are rendered straight into their
+# final texture on the GPU (the game's own RealTimeTextureMorphing mode)
+# instead of being read back to the CPU and DXT-compressed. This fixes the
+# black hero/dog without hero_dog_texture_readback. The textures are stored
+# uncompressed, so they use a few MB more memory. See
+# plans/hero-dog-realtime-texture-morphing.md. false = original baked mode.
+# Default: true
+realtime_texture_morphing = true
+
 # Force a CPU readback of the render-to-texture resolve that regenerates the
 # hero/dog face+skin texture, so the character does not render black on a
 # split-memory host (see plans/hero-dog-texture-readback.md). Approach + the
 # guest base 0x12704000 come from just-harry's Unofficial Xenia femtofork for
 # Fable II. Seeds the SDK cvar readback_resolve_force_addresses; readback then
-# happens only for that resolve, not every frame. false = original black bug.
+# happens only for that resolve, not every frame. Superseded by
+# realtime_texture_morphing; only needed (and only effective) with that off.
+# false = original black bug.
+# Default: false
+hero_dog_texture_readback = false
+
+# Dog Fur Depth Bias: the dog's fur is drawn as 15 thin layers over its body
+# that rely on exact depth ties in the Xbox 360's 24-bit depth buffer. The PC's
+# 32-bit depth breaks those ties at random, which shows as flickering, blocky
+# patches on the dog (worse at higher internal resolutions). This gives the fur
+# draws (pixel shader 014F8A02DB7B19CA) a small depth bias so the ties pass as
+# on the console. Seeds the SDK cvars depth_bias_shader(_units).
+# false = no bias (flickering patches).
 # Default: true
-hero_dog_texture_readback = true
+dog_fur_depth_bias = true
 
 [perf]
 # NtYieldExecution batching for the hot-function overrides (see
@@ -229,9 +282,27 @@ bool Load(const std::filesystem::path& path) {
                                        values.unlock_website);
     values.unlock_ce = Read<bool>(patches_table, "patches", "unlock_ce",
                                   "boolean", values.unlock_ce);
+    values.skip_intro_videos =
+        Read<bool>(patches_table, "patches", "skip_intro_videos", "boolean",
+                   values.skip_intro_videos);
+    values.high_tick_rate =
+        Read<bool>(patches_table, "patches", "high_tick_rate", "boolean",
+                   values.high_tick_rate);
+    values.higher_hf_tick_rate =
+        Read<bool>(patches_table, "patches", "higher_hf_tick_rate", "boolean",
+                   values.higher_hf_tick_rate);
+    values.disable_motion_blur =
+        Read<bool>(patches_table, "patches", "disable_motion_blur", "boolean",
+                   values.disable_motion_blur);
+    values.realtime_texture_morphing =
+        Read<bool>(patches_table, "patches", "realtime_texture_morphing", "boolean",
+                   values.realtime_texture_morphing);
     values.hero_dog_texture_readback =
         Read<bool>(patches_table, "patches", "hero_dog_texture_readback", "boolean",
                    values.hero_dog_texture_readback);
+    values.dog_fur_depth_bias =
+        Read<bool>(patches_table, "patches", "dog_fur_depth_bias", "boolean",
+                   values.dog_fur_depth_bias);
   }
   const toml::path perf_path{"perf"};
   const auto perf = root[perf_path];

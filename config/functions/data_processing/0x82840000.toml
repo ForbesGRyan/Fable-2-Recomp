@@ -1,0 +1,50 @@
+# data-processing region 0x82840000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# A recursive tree/list destructor that frees its nodes.
+
+# Args: obj (r3, the owning object, passed down unchanged), node (r4). Reads
+# node->17 (a byte flag): if it is nonzero, STOP (this node is a leaf/sentinel).
+# Otherwise loop: (1) recurse on the child node->8 -- sub_82859340(obj, node->8);
+# (2) FREE the current node via Free_SizeBucketed_Thunk_8221BE68(node); (3)
+# advance node = node->0 (next) and continue while the new node->17 is 0. So it
+# recursively destroys the child subtree at +8, frees each node on the way, and
+# walks the +0 chain, stopping at a node whose +17 flag is set. 19 callers
+# (sub_829FDAE8, sub_825F0248, sub_824FF8B8, ...). The node class isn't
+# resolvable, so the name states the mechanism: a recursive destroy that frees
+# the nodes of this tree/list.
+[functions."0x82859340"]
+name = "DestroyTreeNodes_82859340"
+
+
+# Process a structure by comparing signed strings (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and fiftieth form). It takes a structure and compares signed strings (StrCmp_Signed). This is a frequently-called helper in the 0x82859 process cluster. 100 lines. 1 callee. 4 callers.
+[functions."0x82859208"]
+name = "ProcessAndProcessAndProcess1750_82859208"
+
+
+# Process a structure by comparing strings (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and one hundred and fourth form). It takes a structure, compares strings (CompareStrings), and drives a sub-operation (ProcessAndProcessAndProcess1750) based on the result. This is a frequently-called helper in the 0x82858 process cluster. 86 lines. 2 callees. 18 callers.
+[functions."0x82858A30"]
+name = "ProcessAndProcessAndProcess1804_82858A30"
+
+
+# Process a large structure by comparing strings (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and three hundred and seventy-second form). It takes a structure, compares strings (CompareStrings), copy-assigns a refcounted object (CopyAssign_RefCounted), destructs a refcounted object (DestructRefCounted), and drives sub-operations (ProcessAndProcessAndProcess1750, sub_82858CA0) based on the result. This is a frequently-called helper in the 0x82858 process cluster. 117 lines. 5 callees. 17 callers.
+[functions."0x82858910"]
+name = "ProcessAndProcessAndProcess2072_82858910"
+
+
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and five hundred and fifty-seventh form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess1764). This is a frequently-called helper in the 0x82858 process cluster. 50 lines. 1 callee. 4 callers (ProcessAndProcessAndProcess2258, sub_82AFDD58, sub_82B03E50, sub_82B128E8).
+[functions."0x828589D8"]
+name = "ProcessAndProcessAndProcess2257_828589D8"
+
+
+# Process a large structure by validating (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and five hundred and fifty-eighth form). It takes a structure, validates (ProcessAndValidateAndProcess3), and drives sub-operations (sub_825D93B0, ProcessAndProcessAndProcess2257) based on the result. This is a frequently-called helper in the 0x82859 process cluster. 137 lines. 3 callees. 24 callers.
+[functions."0x82859120"]
+name = "ProcessAndProcessAndProcess2258_82859120"
+
+
+# Process a structure by freeing size-bucketed memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and five hundred and sixty-sixth form). It takes a structure, frees size-bucketed memory (Free_SizeBucketed), and drives a sub-operation (ProcessAndProcessAndProcess2258) based on the result. This is a frequently-called helper in the 0x82858 process cluster. 61 lines. 2 callees. 20 callers.
+[functions."0x82858F30"]
+name = "ProcessAndProcessAndProcess2266_82858F30"

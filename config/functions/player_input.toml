@@ -1,0 +1,48 @@
+# player_input functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# Read the merged pad state for the active player (Xbox user index 1). The
+# guest's XamInputGetState wrapper and the single entry point of Fable 2's
+# input path: it takes a destination X_INPUT_STATE pointer (r4), pins the user
+# index to 1, and fills that pointer with the driver-merged pad state (all
+# drivers OR-merged). Called from ~15 per-frame pollers. This is where the
+# synthetic keyboard/gamepad driver's state is observed and where the state and
+# attack probes watch button edges (see src/input/keyboard_gamepad.h,
+# src/diagnostics/fable2_state_probe.h, fable2_attack_probe.h). Renamed from
+# the generic auto-name (ProcessAndProcessAndProcess1013) per the
+# FABLE2_ATTACK_PROBE input-chain analysis.
+[functions."0x822B2D60"]
+name = "GetUser1InputState_822B2D60"
+
+
+# Process a large structure by copying data (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and eighty-seventh form). It takes a structure, copies its data (MemCpy), and drives sub-operations (sub_829FA5E8, sub_82A666A8, sub_82BE3F30) based on the result. Part of the 0x82185 process cluster. 317 lines. 4 callees. 1 caller (ProcessAndProcessAndProcess1294).
+# Per-frame front-end input poller: walks the menu input-element list and, when
+# a pending button event is queued, builds the event struct and calls
+# InputEvent_Handle. Fires ~once per frame (30 Hz) while the menu is open.
+[functions."0x82185C90"]
+name = "InputEvent_PollQueue"
+
+
+# Process a value by checking its state and driving many sub-operations (two thousand four hundred and one hundred and twelfth form). It takes a value (a), a structure (b: field at b->0), a mask (c), a value (d), a value (e), and a float (f); it checks the value's state, and drives many sub-operations (GetTimebase, MemCpy_SdkRuntime, ProcessAndProcessAndProcess1934, and more) based on the result. This is the "process this data" routine (two thousand four hundred and one hundred and twelfth form), part of the 0x82188 process cluster. 187 lines. 3 callees. 1 caller (ProcessAndProcessAndProcess1288).
+# Raw press bit-dispatch for the front-end (main) menu: ANDs the currently
+# pressed button mask (r5: Up=1, Down=2, Back=32, A=4096) against the element's
+# supported buttons (r10, u16 at r4) and drives per-button handling. Fires
+# ~twice per physical press (once per menu input element).
+[functions."0x82188F20"]
+name = "InputEvent_DispatchButtonPress"
+
+
+# Query a method on the active player entity. Checks a global flag, dereferences a global context chain, calls an indirect vtable method, and returns the result. 114 lines. 0 direct callees. Called from the main game loop.
+[functions."0x821EC8A0"]
+name = "QueryActivePlayerMethod_821EC8A0"
+
+
+# Main-menu input event handler (one call per pending UI button press:
+# Up/Down/A/Back, incl. clamped presses). Called from
+# ProcessAndProcessAndProcess1287_82185C90 (per-frame event queue poller).
+# Named for the mod-menu hook (see src/diagnostics/fable2_modmenu.h).
+[functions."0x82BE3F30"]
+name = "InputEvent_Handle"

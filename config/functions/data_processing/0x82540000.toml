@@ -1,0 +1,25 @@
+# data-processing region 0x82540000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# A node insert (with a chain lookup): if the node is empty, insert it (sub_82551330); otherwise look up
+# the chain root (FindChainRoot2_823D4F20) and process the node.
+
+# Args: obj (r3, the container), node (r4, ->4 = data, ->8 = a "filled" field), (r5, r6 = args). If node->8
+# is 0 (the node is empty / not yet filled), it inserts the node (sub_82551330, an insert, passing obj,
+# node->4, 1, and the args) and returns obj. Otherwise it processes the node: it looks up the chain root
+# (FindChainRoot2_823D4F20, sub_823D4F20) and calls sub_82498700 and sub_825511F0 (siblings in the 0x8249/0x8255
+# cluster). So it's a "insert the node if empty, otherwise find the chain root and process" routine (a
+# node insertion with a chain lookup, part of the 0x8255 chain/lookup cluster). 306 lines, 4 callees (sub
+# _82551330, FindChainRoot2_823D4F20, sub_82498700, sub_825511F0). 1 caller: ChainLookup_82550638 (sub_82550638).
+# The node's class (->4 = data, ->8 = a filled flag) and the container's meaning aren't resolvable, so the
+# name states the mechanism: insert the node (with a chain lookup).
+[functions."0x82550F90"]
+name = "InsertNodeChain_82550F90"
+
+
+# Free a size-bucketed object (seven hundred and twenty-first form). It takes a structure and frees its size-bucketed memory (Free_SizeBucketed). Part of the 0x82546 process cluster. 45 lines. 1 callee. 0 callers.
+[functions."0x825469A0"]
+name = "ProcessAndProcessAndProcess721_825469A0"

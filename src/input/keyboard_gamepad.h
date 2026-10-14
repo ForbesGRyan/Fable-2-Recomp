@@ -15,8 +15,12 @@
 // The keyboard mapping is data-driven via the `keyboard_gamepad_map` cvar
 // (defined in main.cpp): "Key:Button,Key:Button,..." where Key is a host key
 // name understood by rex::ui::ParseVirtualKey ("E", "Space", "LeftShift", ...)
-// and Button is a guest gamepad button name (A/B/X/Y/LB/RB/LT/RT/Up/Down/
-// Left/Right/Start/Back/L3/R3/StickUp/StickDown/StickLeft/StickRight).
+// or a mouse-button name ("LMB"/"RMB"/"MMB", plus "XMB1"/"XMB2" for the side
+// buttons; mouse names are also accepted case-insensitively, see
+// input_detail::ParseKey). Mouse-button state is polled with
+// GetAsyncKeyState, the same path as keyboard keys. Button is a guest gamepad
+// button name (A/B/X/Y/LB/RB/LT/RT/Up/Down/Left/Right/Start/Back/L3/R3/
+// StickUp/StickDown/StickLeft/StickRight).
 // The cvar's default is seeded from fable2_config.toml [input] at startup
 // (src/core/fable2_config.{h,cpp} + Fable2App::OnPostInitLogging), so remapping
 // can be done in the config file without a rebuild or CLI arg.
@@ -52,6 +56,15 @@ REXCVAR_DECLARE(std::string, keyboard_gamepad_map);
 REXCVAR_DECLARE(bool, mouse_look);
 REXCVAR_DECLARE(int32_t, mouse_look_scale);
 REXCVAR_DECLARE(std::string, mouse_unlock_key);
+
+// Input-press function probe (src/diagnostics/fable2_attack_probe.h,
+// single-TU include from main.cpp): fed the buttons this driver contributes
+// so a host-key press is detected even if the guest input wrapper is not
+// observed. No-op unless the probe is enabled (FABLE2_ATTACK_PROBE=1 or
+// Fable2AttackProbeSetEnabled).
+extern "C" void Fable2AttackProbeObserve(uint16_t buttons, uint8_t lt,
+                                        uint8_t rt, int16_t lx, int16_t ly,
+                                        int16_t rx, int16_t ry);
 
 namespace fable2 {
 
@@ -151,6 +164,37 @@ inline void FillGuestTarget(Mapping& m, std::string_view name) {
   }
 }
 
+// Case-insensitive upper helper (shared by the name parsers below).
+inline std::string ToUpper(std::string_view s) {
+  std::string u;
+  u.reserve(s.size());
+  for (char c : s) u.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+  return u;
+}
+
+// Host key-name -> VirtualKey. The SDK table (rex::ui::ParseVirtualKey) is
+// authoritative and already recognizes LMB/RMB/MMB; this fallback additionally
+// accepts mouse-button names case-insensitively ("lmb") and covers the side
+// buttons the SDK table does not spell out (VK_XBUTTON1/2). Returns kNone when
+// the name is not a known key.
+inline rex::ui::VirtualKey ParseKey(std::string_view name) {
+  // Tolerate stray spaces/tabs around the name ("LMB", " LMB ").
+  while (!name.empty() && (name.front() == ' ' || name.front() == '\t')) name.remove_prefix(1);
+  while (!name.empty() && (name.back() == ' ' || name.back() == '\t')) name.remove_suffix(1);
+  auto vk = rex::ui::ParseVirtualKey(name);
+  if (vk != rex::ui::VirtualKey::kNone) return vk;
+  using V = rex::ui::VirtualKey;
+  std::string u = ToUpper(name);
+  if (u == "LMB" || u == "LEFTMOUSE") return V::kLButton;   // VK_LBUTTON
+  if (u == "RMB" || u == "RIGHTMOUSE") return V::kRButton;  // VK_RBUTTON
+  if (u == "MMB" || u == "MIDDLEMOUSE") return V::kMButton;  // VK_MBUTTON
+  if (u == "XMB1" || u == "XBUTTON1" || u == "SIDEBUTTON1")
+    return V::kXButton1;  // mouse side button 1
+  if (u == "XMB2" || u == "XBUTTON2" || u == "SIDEBUTTON2")
+    return V::kXButton2;  // mouse side button 2
+  return V::kNone;
+}
+
 // Parse "Key:Button,Key:Button,...". Entries whose key or target name does not
 // parse are skipped. Returns an empty vector on empty input.
 inline std::vector<Mapping> ParseMap(std::string_view text) {
@@ -163,7 +207,7 @@ inline std::vector<Mapping> ParseMap(std::string_view text) {
     if (!entry.empty()) {
       size_t colon = entry.find(':');
       if (colon != std::string_view::npos) {
-        auto vk = rex::ui::ParseVirtualKey(entry.substr(0, colon));
+        auto vk = ParseKey(entry.substr(0, colon));
         if (vk != rex::ui::VirtualKey::kNone) {
           Mapping m;
           m.vk = static_cast<uint16_t>(vk);
@@ -321,6 +365,10 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver {
       mouse_centered_ = false;  // re-prime on (re)focus to avoid a jump
     }
 #endif
+
+    Fable2AttackProbeObserve(buttons, left_trigger, right_trigger,
+                             static_cast<int16_t>(lx), static_cast<int16_t>(ly),
+                             static_cast<int16_t>(rx), static_cast<int16_t>(ry));
 
     out_state->packet_number.set(packet_number_++);
     out_state->gamepad.buttons.set(buttons);

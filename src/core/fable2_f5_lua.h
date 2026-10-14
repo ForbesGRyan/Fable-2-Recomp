@@ -103,13 +103,16 @@ inline bool g_f5_down_prev = false;
 inline std::mutex& log_mtx() { static std::mutex m; return m; }
 inline std::FILE* logf() {
   static std::FILE* f = [] {
+    // Release build: don't create the F5-Lua log file. logline() is
+    // null-guarded, so the F5 feature runs without logging.
+    return nullptr;
 #if defined(_WIN32)
-    // Open with shared read/write so the log can be read live while the game
-    // holds it open (plain fopen() takes an exclusive lock on Windows).
-    std::FILE* out = ::_fsopen("fable2_f5_lua.log", "a", _SH_DENYNO);
-    return out;
+    // // Open with shared read/write so the log can be read live while the game
+    // // holds it open (plain fopen() takes an exclusive lock on Windows).
+    // std::FILE* out = ::_fsopen("fable2_f5_lua.log", "a", _SH_DENYNO);
+    // return out;
 #else
-    return std::fopen("fable2_f5_lua.log", "a");
+    // return std::fopen("fable2_f5_lua.log", "a");
 #endif
   }();
   return f;

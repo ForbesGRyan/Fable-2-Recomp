@@ -147,7 +147,7 @@ inline void shift_run_x(uint8_t* base, uint32_t draw, uint32_t shift) {
 // Shift the per-glyph VERTEX x (the first float in each record's vertex data,
 // record+0x2C) to move the on-screen text. The vertex data is built by the
 // state builder (sub_82C09018) and read by the per-element draw (0x82B4EEE0),
-// so this must run in ProcessAndProcessAndProcess1384_82C09870 (after the build, before the draw).
+// so this must run in UITextElement_PostQuery (after the build, before the draw).
 inline void shift_vertex_x(uint8_t* base, uint32_t el, uint32_t shift) {
   if (shift == 0 || el < 0x3F000000u || el >= 0x84000000u) return;
   if (!wr(host_addr(base, el + 16), 4)) return;
@@ -380,11 +380,11 @@ extern "C" void UIText_RenderElement(PPCContext& ctx, uint8_t* base) {
   __imp__UIText_RenderElement(ctx, base);
 }
 
-// Hook: ProcessAndProcessAndProcess1384_82C09870 (r3 = element). This is a query (element.vtable[13]) that
+// Hook: UITextElement_PostQuery (r3 = element). This is a query (element.vtable[13]) that
 // runs AFTER the vertex-emitting calls, so it is NOT the draw. The vertex shift
 // is applied in the sub_82C09018 hook instead (right after the state builder).
-extern "C" void __imp__ProcessAndProcessAndProcess1384_82C09870(PPCContext& ctx, uint8_t* base);
-extern "C" void ProcessAndProcessAndProcess1384_82C09870(PPCContext& ctx, uint8_t* base) {
-  if (fable2::uir::hook("ProcessAndProcessAndProcess1384_82C09870", ctx, base)) return;
-  __imp__ProcessAndProcessAndProcess1384_82C09870(ctx, base);
+extern "C" void __imp__UITextElement_PostQuery(PPCContext& ctx, uint8_t* base);
+extern "C" void UITextElement_PostQuery(PPCContext& ctx, uint8_t* base) {
+  if (fable2::uir::hook("UITextElement_PostQuery", ctx, base)) return;
+  __imp__UITextElement_PostQuery(ctx, base);
 }

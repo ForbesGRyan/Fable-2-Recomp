@@ -1,0 +1,9 @@
+# data-processing region 0x82780000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and twenty-second form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x8279D process cluster. 8 lines. 0 callees. 0 callers.
+[functions."0x8279DEC0"]
+name = "ProcessAndProcessAndProcess1122_8279DEC0"

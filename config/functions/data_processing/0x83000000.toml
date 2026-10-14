@@ -1,0 +1,116 @@
+# data-processing region 0x83000000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# Unlock side: NtReleaseMutant(handle, NULL). Returns 1 on success; on
+# failure logs the NTSTATUS through sub_82CC1C38 (same error logger as
+# KeWaitForSingleObject_Guest) and returns 0. 22 call sites, the release half of
+# the lock pairs that acquire via MutexLock_WaitInfinite.
+[functions."0x83004F30"]
+name = "MutexUnlock_ReleaseMutant"
+
+
+# Create side: NtCreateMutant(outHandle, attrs, initialCount). r3 = out
+# handle pointer, r4 = initial owned count, r5 = optional object-attributes
+# pointer (built via sub_82CC1DF0 when non-null). Sanity-checks the returned
+# handle (0x10000 check, error code 183 via sub_82CC0750) and returns it;
+# logs and returns 0 on NtCreateMutant failure.
+[functions."0x83004EA8"]
+name = "MutexCreate_OutHandle"
+
+
+# A processor that returns a value. It returns a value (0xC0004001, with no arguments). This is the "return this value" routine, part of the 0x8302B process cluster. 10 lines. 0 callees (leaf function — performs raw memory operations). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x8302B3E0"]
+name = "ProcessAndReturnAndProcess_8302B3E0"
+
+
+# Process a structure by copying its data (seven hundred and one hundred and one hundred and eighth form). It takes a structure, copies its data (MemCpy), and drives a sub-operation (ProcessAndProcessAndProcess878) based on the result. Part of the 0x83004 process cluster. 162 lines. 2 callees. 2 callers (sub_82BA7298 and ProcessAndProcessAndProcess915).
+[functions."0x83004A90"]
+name = "ProcessAndProcessAndProcess918_83004A90"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and sixty-fourth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x83004 process cluster. 30 lines. 0 callees. 1 caller (ProcessAndProcessAndProcess1262).
+[functions."0x83004BB0"]
+name = "ProcessAndProcessAndProcess1264_83004BB0"
+
+
+# Process a very large data structure by copying memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and two hundred and forty-third form). It takes a structure, copies memory (MemCpy_SdkRuntime), drives a sub-operation (ProcessAndProcessAndProcess1657), and processes (sub_821F5F18, sub_830055C8) based on the result. Part of the 0x83005 process cluster. 517 lines. 4 callees. 2 callers (sub_830060B0 and ProcessAndProcessAndProcess1944).
+[functions."0x83005800"]
+name = "ProcessAndProcessAndProcess1943_83005800"
+
+
+# Process a very large data structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and two hundred and forty-fourth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess1943, ProcessAndProcessAndProcess1945, ProcessAndProcessAndProcess1946) based on the result. This is a frequently-called processor in the 0x83006 process cluster. 342 lines. 3 callees. 6 callers.
+[functions."0x830060B8"]
+name = "ProcessAndProcessAndProcess1944_830060B8"
+
+
+# Process a large structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and two hundred and forty-fifth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess514, sub_82B91D00) based on the result. This is a frequently-called helper in the 0x8300A process cluster. 238 lines. 2 callees. 5 callers.
+[functions."0x8300A198"]
+name = "ProcessAndProcessAndProcess1945_8300A198"
+
+
+# Process a structure by dispatching by type code (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and two hundred and forty-sixth form). It takes a structure and dispatches by type code (DispatchByTypeCode). This is a frequently-called helper in the 0x8300A process cluster. 58 lines. 1 callee. 9 callers.
+[functions."0x8300A370"]
+name = "ProcessAndProcessAndProcess1946_8300A370"
+
+
+# Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and two hundred and ninety-fourth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x83005 process cluster. 85 lines. 0 callees. 1 caller (sub_83005FA0).
+[functions."0x83005528"]
+name = "ProcessAndProcessAndProcess1994_83005528"
+
+
+# Process a structure by setting memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and four hundred and eighty-fourth form). It takes a structure and sets memory (MemSet_SdkRuntime). This is a frequently-called helper in the 0x83005 process cluster. 88 lines. 1 callee. 3 callers (sub_82AB0728, sub_82B850B8, sub_82FE9608).
+[functions."0x830052A8"]
+name = "ProcessAndProcessAndProcess2184_830052A8"
+
+
+# Process a value by checking its state and driving sub-operations (two thousand four hundred and one hundred and tenth form). It takes a value (a), a value (b), a value (c), and a structure (d); it checks the value's state, and drives sub-operations (MemSet_SdkRuntime, and more) based on the result, setting fields and checking bits. This is the "process this data" routine (two thousand four hundred and one hundred and tenth form), part of the 0x83005 process cluster. 78 lines. 1 callee. 2 callers (sub_82B1A348 and sub_82B8B960).
+[functions."0x830053D0"]
+name = "ProcessAndProcessAndProcess2559_830053D0"
+
+[functions."0x83000858"]
+name = "Func_83000858"
+
+[functions."0x830009AC"]
+name = "Func_830009AC"
+
+[functions."0x83000AF0"]
+name = "Func_83000AF0"
+
+[functions."0x83000CF4"]
+name = "Func_83000CF4"
+
+[functions."0x83001060"]
+name = "Func_83001060"
+
+[functions."0x83001318"]
+name = "Func_83001318"
+
+[functions."0x83001514"]
+name = "Func_83001514"
+
+[functions."0x8300172C"]
+name = "Func_8300172C"
+
+[functions."0x83002974"]
+name = "Func_83002974"
+
+[functions."0x8300298C"]
+name = "Func_8300298C"
+
+[functions."0x83002E84"]
+name = "Func_83002E84"
+
+[functions."0x8300338C"]
+name = "Func_8300338C"
+
+[functions."0x830033E0"]
+name = "Func_830033E0"
+
+[functions."0x830046B4"]
+name = "Func_830046B4"
+
+[functions."0x830046C0"]
+name = "Func_830046C0"

@@ -312,10 +312,14 @@ inline void sample_text_item(const uint8_t* base, PPCContext& ctx) {
 
 // The dynamic (heap) region where the front-end allocates its live UI strings
 // (the "to start" prompt sits at 0x4266xxxx; the menu option labels are
-// allocated in the same front-end heap). Scan it once per sample for the
-// marker words that identify the front-end screens.
-constexpr uint32_t kTextLo = 0x42000000u;
-constexpr uint32_t kTextHi = 0x42800000u;
+// allocated in the front-end heap). Scan it once per sample for the marker
+// words that identify the front-end screens. The prompt ("to start") and the
+// menu option labels are allocated at a NON-DETERMINISTIC heap address that
+// spans roughly 0x405xxxxx-0x42xxxxxx across runs, so the window must be wide
+// enough to cover that whole span (the old 0x42000000-0x42800000 window
+// routinely missed them, leaving the classifier stuck in PreMainMenu).
+constexpr uint32_t kTextLo = 0x40000000u;
+constexpr uint32_t kTextHi = 0x44000000u;
 
 // Builds the UTF-16BE byte pattern for an ASCII name.
 inline std::vector<uint8_t> utf16be_pat(const char* s) {
@@ -340,33 +344,58 @@ inline const char* kMenuWords[] = {"New Game", "Load Game",
                                    "License", "Quit", "Language"};
 
 // Scans the front-end heap window for the marker words. Runs on the 1 Hz
-// classifier thread (the window is small and the read is page-guarded).
+// classifier thread (the read is page-guarded; uncommitted pages are skipped
+// quickly). Each pattern is located by memchr on its first non-zero byte
+// (UTF-16BE patterns are 0x00,c0,0x00,c1,... so c0 is a good key) and then
+// verified with a single memcmp -- this keeps the wide window scan fast
+// (~tens of ms) instead of a naive O(window*pattern) memcmp storm.
+struct Pat {
+  std::string name;
+  std::vector<uint8_t> bytes;
+  uint8_t key = 0;
+  size_t key_off = 0;
+};
 inline FrontEndText scan_front_end() {
   FrontEndText e;
-  std::vector<std::pair<std::string, std::vector<uint8_t>>> pats;
-  pats.emplace_back("to start", utf16be_pat("to start"));
+  std::vector<Pat> pats;
+  auto add_pat = [&](const std::string& name, const std::vector<uint8_t>& b) {
+    Pat p;
+    p.name = name;
+    p.bytes = b;
+    for (size_t i = 0; i < b.size(); ++i)
+      if (b[i] != 0) { p.key = b[i]; p.key_off = i; break; }
+    pats.push_back(std::move(p));
+  };
+  add_pat("to start", utf16be_pat("to start"));
   for (const char* m : kMenuWords) {
-    pats.emplace_back(std::string(m), utf16be_pat(m));
-    pats.emplace_back(std::string(m) + "|asc",
-                      std::vector<uint8_t>(m, m + std::strlen(m)));
+    add_pat(std::string(m), utf16be_pat(m));
+    add_pat(std::string(m) + "|asc", std::vector<uint8_t>(m, m + std::strlen(m)));
   }
-  uint8_t buf[65536];
-  for (uint32_t off = kTextLo; off + 65536 <= kTextHi; off += 65536) {
-    if (!aread(off, buf, sizeof buf)) continue;
-    for (const auto& [name, pat] : pats) {
+  const size_t BS = 65536;
+  uint8_t buf[BS];
+  for (uint32_t off = kTextLo; off + BS <= kTextHi; off += BS) {
+    if (!aread(off, buf, BS)) continue;
+    for (const auto& p : pats) {
       bool found = false;
-      for (size_t i = 0; i + pat.size() <= sizeof buf; ++i)
-        if (std::memcmp(buf + i, pat.data(), pat.size()) == 0) {
+      size_t from = p.key_off;
+      while (!found && from + p.bytes.size() <= BS) {
+        const uint8_t* pos =
+            (const uint8_t*)std::memchr(buf + from, p.key, BS - from);
+        if (!pos) break;
+        const size_t i = (size_t)(pos - buf);  // position of the key byte
+        if (i >= p.key_off &&
+            std::memcmp(buf + (i - p.key_off), p.bytes.data(),
+                        p.bytes.size()) == 0)
           found = true;
-          break;
-        }
+        else from = i + 1;
+      }
       if (!found) continue;
-      if (name == "to start") e.prompt = true;
+      if (p.name == "to start") e.prompt = true;
       else {
         const std::string base =
-            name.rfind("|asc") == std::string::npos
-                ? name
-                : name.substr(0, name.rfind("|asc"));
+            p.name.rfind("|asc") == std::string::npos
+                ? p.name
+                : p.name.substr(0, p.name.rfind("|asc"));
         if (std::find(e.menu_words.begin(), e.menu_words.end(), base) ==
             e.menu_words.end()) {
           e.menu_words.push_back(base);
@@ -560,6 +589,7 @@ inline void do_sample() {
   // signal -- the prompt/menu text stays composited over the movie, so ui stays
   // ~700-800/s the entire time. Hence render_active is pe-only.
   const bool render_active = pe_rate > 8.0;
+  const int64_t a_press_t = last_a_press_ms().load(std::memory_order_relaxed);
 
   // --- sticky "in the front-end menu" flag --------------------------------
   // The prompt and the menu both run the UI element manager (pe ~15-17), so
@@ -569,11 +599,11 @@ inline void do_sample() {
   // (movie).
   static bool in_menu = false;
   static int movie_run = 0;
-  const int64_t a_press_t = last_a_press_ms().load(std::memory_order_relaxed);
-  if (a_press_t > 0 && a_press_t != last_press_seen) {
-    last_press_seen = a_press_t;
-    if (prompt_alloc && render_active && !in_menu) in_menu = true;  // A on prompt
-  }
+  // The menu option words appearing in the heap is the reliable "menu is
+  // open" signal (the prompt string alone is not -- it is allocated at a
+  // non-deterministic address and can fall outside the scan window, and an
+  // A-press on the prompt used to latch in_menu here, which false-positived
+  // the main menu a frame before the menu words were allocated).
   if (menu_hits >= 2) in_menu = true;          // menu option words in the heap
   // B-press backs out of the menu to the prompt: clear in_menu.
   const int64_t b_press_t = last_b_press_ms().load(std::memory_order_relaxed);
@@ -582,7 +612,11 @@ inline void do_sample() {
     last_b_seen = b_press_t;
     if (in_menu && prompt_alloc && render_active) in_menu = false;  // B on menu
   }
-  if (!ready || !front_end || !prompt_alloc) in_menu = false;  // left the front end
+  // Note: prompt_alloc is deliberately NOT used here -- the "to start" prompt
+  // string is allocated at a non-deterministic heap address that can fall
+  // outside the scan window, so gating in_menu on it would drop the main menu
+  // back to PreMainMenu. in_menu is driven by the menu option words instead.
+  if (!ready || !front_end) in_menu = false;  // left the front end
   if (render_active) movie_run = 0;
   else if (++movie_run >= 2) in_menu = false;  // UI manager paused (movie/attract)
 
@@ -595,14 +629,16 @@ inline void do_sample() {
     raw = kUnknown;
   } else if (!front_end) {
     raw = kUnknown;  // gameplay, cutscenes, pause/options, loading, ...
-  } else if (!prompt_alloc) {
-    raw = kPreMainMenu;  // splash / logos (prompt text not allocated yet)
-  } else if (!render_active) {
-    raw = kMainMenuMovie;  // front end, no UI being drawn -> attract video
   } else if (in_menu) {
-    raw = kMainMenu;  // the menu is open
-  } else {
+    raw = kMainMenu;  // menu option words present -> the menu is open
+  } else if (!render_active) {
+    // Front end, no UI being drawn: the attract video if the prompt has been
+    // seen, otherwise the splash/logos before it.
+    raw = prompt_alloc ? kMainMenuMovie : kPreMainMenu;
+  } else if (prompt_alloc) {
     raw = kPressAScreen;  // the "to start" prompt is drawn
+  } else {
+    raw = kPreMainMenu;  // front end + render active, but no prompt/menu yet
   }
 
   // 2-sample hysteresis: a single one-second dip (e.g. the prompt blink-off
@@ -708,9 +744,16 @@ extern "C" void ProcessAndProcessAndProcess573_82B458C0(PPCContext& ctx, uint8_t
 // The guest's XamInputGetState wrapper: reads the FINAL merged pad state (all
 // drivers OR-merged: remote + keyboard + physical). Capture the A button from
 // it so the A-press is detected no matter which input source drives it.
-extern "C" void ProcessAndProcessAndProcess1013_822B2D60(PPCContext& ctx, uint8_t* base) {
+namespace fable2::attackprobe {
+// Input-press function probe (src/diagnostics/fable2_attack_probe.h, single-TU
+// include from main.cpp): also feed it the merged pad state for its press
+// edges. Forward-declared here to avoid the include.
+void observe_state(const uint8_t* base, uint32_t state_ptr);
+}
+extern "C" void GetUser1InputState_822B2D60(PPCContext& ctx, uint8_t* base) {
   const uint32_t state_ptr = ctx.r4.u32;
-  __imp__ProcessAndProcessAndProcess1013_822B2D60(ctx, base);
+  __imp__GetUser1InputState_822B2D60(ctx, base);
   fable2::stateprobe::observe_a_button(state_ptr);
+  fable2::attackprobe::observe_state(base, state_ptr);
 }
 #endif  // FABLE2_REMOTE_CONTROL

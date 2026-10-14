@@ -32,6 +32,7 @@
 #include "autoplay.h"
 #include "boot_save.h"
 #include "dir_manifest_heal.h"
+#include "fable2_address_scan.h"
 #include "fable2_config.h"
 #include "fable2_native_render.h"
 #include "fable2_patches.h"
@@ -60,6 +61,24 @@ void record_a_press(std::int64_t ms);
 #endif  // FABLE2_REMOTE_CONTROL
 #include "xex_verify.h"
 #include "game_branding.h"
+
+namespace {
+// The `screenshot` command reads the game's rendered frame from the renderer's
+// presenter, but rex::ui::Window keeps presenter() protected. Window is a
+// non-final polymorphic base with Window as its only/first base, and
+// presenter() is a non-virtual inline that merely returns the presenter_
+// pointer - so the standard derived-class accessor idiom (reinterpret to a
+// first-base-derived type) safely reads the member without touching any
+// vtable. This keeps the fix self-contained in the app (no SDK edits).
+class WindowPresenterAccessor final : public rex::ui::Window {
+ public:
+  rex::ui::Presenter* PresenterPtr() const { return presenter(); }
+};
+rex::ui::Presenter* GetWindowPresenter(rex::ui::Window* w) {
+  return w ? reinterpret_cast<const WindowPresenterAccessor*>(w)->PresenterPtr()
+           : nullptr;
+}
+}  // namespace
 
 class Fable2App : public rex::ReXApp {
  public:
@@ -139,8 +158,9 @@ class Fable2App : public rex::ReXApp {
     // LoadGpuPlugin("xenos") -> the prebuilt D3D12 plugin.
 
     // Build on top of the default input system (SDL gamepad + NOP) and add a
-    // synthetic "keyboard gamepad" driver so host keys can drive the guest.
-    // The mapping is the `keyboard_gamepad_map` cvar (default "E:A"). See
+    // synthetic "keyboard gamepad" driver so host keys/mouse buttons can drive
+    // the guest. The mapping is the `keyboard_gamepad_map` cvar (default from
+    // fable2_config.toml [input], see fable2_config.h). See
     // src/input/keyboard_gamepad.h.
     config.input_factory = [this](bool tool_mode) ->
         std::unique_ptr<rex::system::IInputSystem> {
@@ -227,6 +247,19 @@ class Fable2App : public rex::ReXApp {
           REXSYS_WARN("[fable2-config] cvar guest_vblank_pacing rejected 'false'; the game "
                       "stays at 30 fps unless REX_VSYNC=0");
         }
+      }
+    }
+    // Dog fur Z-fighting fix (docs/RUNTIME_FIXES.md): the shell-fur pixel shader
+    // relies on exact 24-bit depth ties; a small host depth bias restores them.
+    // depth_bias_shader is a GPU-plugin cvar, so it is seeded here too.
+    if (fable2::config::Get().dog_fur_depth_bias &&
+        rex::cvar::GetFlagSource("depth_bias_shader") == rex::cvar::Source::kDefault) {
+      if (rex::cvar::SetFlagByName("depth_bias_shader", "014F8A02DB7B19CA") &&
+          rex::cvar::SetFlagByName("depth_bias_shader_units", "16")) {
+        REXSYS_INFO("[fable2-config] seeded dog fur depth bias (dog_fur_depth_bias=true)");
+      } else {
+        REXSYS_WARN("[fable2-config] dog fur depth bias cvars missing "
+                    "(SDK without depth_bias_shader?)");
       }
     }
 
@@ -432,6 +465,13 @@ class Fable2App : public rex::ReXApp {
           "input disabled (see logs/)");
     }
 
+    // The `screenshot` command reads the game's rendered frame from the
+    // renderer's presenter (CaptureGuestOutput). Query it at command time, not
+    // at startup: this hook runs before SetupPresentation, so the window and
+    // its presenter may not exist yet when the server starts.
+    remote_server_.SetPresenterProvider(
+        [this]() -> rex::ui::Presenter* { return GetWindowPresenter(window()); });
+
     // Observe remote A-presses (the state machine's input transition). The
     // press is brief, so latch its timestamp here (on the server thread) and
     // compare against it in the 1-second classifier sample.
@@ -554,14 +594,13 @@ class Fable2App : public rex::ReXApp {
 
   // Apply the game patches (see src/core/fable2_patches.h) once the SDK has
   // decrypted default.xex into the guest arena, before the module launches.
-  // The patch table is data-driven: fable2_patches.toml next to the exe
-  // (created with built-in defaults on first launch; a broken file falls
-  // back to the built-ins, so a hand edit can never wedge the launch).
+  // Each patch is switched on by a [patches] key in fable2_config.toml
+  // (loaded earlier, in OnPostInitLogging).
   void OnPostLoadXexImage() override {
-    const std::filesystem::path exe_dir =
-        rex::filesystem::GetExecutableFolder();
-    fable2::patches::Load(exe_dir / "fable2_patches.toml");
     fable2::patches::ApplyAll(runtime()->memory(), PPCImageConfig);
+    // Lets the address-scan hook (src/core/fable2_address_scan.cpp) read the
+    // guest page tables.
+    fable2::addressscan::SetMemory(runtime()->memory());
   }
 
   // Startup integrity check: this build was recompiled against a specific
@@ -593,6 +632,14 @@ class Fable2App : public rex::ReXApp {
     if (cache.empty()) cache = game_data_root() / "cache";
     const std::filesystem::path marker = cache / "default.xex.sha256";
 
+    // --skipHash (cvar, see main.cpp): compute and log the default.xex hash,
+    // but do not let a mismatch (or an unreadable file) block the launch.
+    const bool skip_hash = rex::cvar::GetFlagByName("skipHash") == "true";
+    if (skip_hash) {
+      REXSYS_INFO("[xex-verify] --skipHash is set: the default.xex hash will be "
+                  "logged but NOT enforced (a mismatch will not block the launch)");
+    }
+
     REXSYS_INFO("[xex-verify] {}", xex.string());
     REXSYS_INFO("[xex-verify] accepted SHA-256: {}", fable2::xexverify::kExpectedHashes);
     const auto r = fable2::xexverify::Check(xex, marker);
@@ -608,6 +655,12 @@ class Fable2App : public rex::ReXApp {
                     r.actual_hash, marker.string());
         break;
       case fable2::xexverify::Result::Mismatch: {
+        if (skip_hash) {
+          REXSYS_INFO("[xex-verify] actual SHA-256: {} (MISMATCH vs expected {}; "
+                      "not enforced because --skipHash is set)",
+                      r.actual_hash, fable2::xexverify::kExpectedHashes);
+          break;
+        }
         REXSYS_ERROR("[xex-verify] actual SHA-256: {}", r.actual_hash);
         REXSYS_ERROR("[xex-verify] expected SHA-256: {} (MISMATCH)",
                      fable2::xexverify::kExpectedHashes);
@@ -631,13 +684,22 @@ class Fable2App : public rex::ReXApp {
       }
       case fable2::xexverify::Result::ReadFailed:
       default:
+        if (skip_hash) {
+          REXSYS_WARN("[xex-verify] could not hash {} (not enforced because "
+                      "--skipHash is set)",
+                      xex.string());
+          break;
+        }
         REXSYS_ERROR("[xex-verify] could not hash {}; refusing to load unverified content", xex.string());
         rex::ShowSimpleMessageBox(rex::SimpleMessageBoxType::Error,
             "default.xex could not be read. Check the selected game folder and file permissions.");
         std::exit(1);
+        break;
     }
     const auto root = game_data_root();
-    if (!fable2::xexverify::HasCompatibleContent(root, r.actual_hash)) {
+    // The content-compatibility gate depends on the XEX hash identifying a
+    // known version, so it is also bypassed by --skipHash.
+    if (!skip_hash && !fable2::xexverify::HasCompatibleContent(root, r.actual_hash)) {
       REXSYS_ERROR("[build-profile] incomplete or mixed GOTY content: {}", root.string());
       rex::ShowSimpleMessageBox(rex::SimpleMessageBoxType::Error,
           "Incomplete or mixed GOTY content. Select an original matching GOTY dump; do not replace its XEX with another version.");

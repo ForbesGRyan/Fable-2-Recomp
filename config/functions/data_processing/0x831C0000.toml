@@ -1,0 +1,18 @@
+# data-processing region 0x831C0000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# A trivial 2-instruction stub: `li r3,0; blr` (returns 0). 20 call sites, all
+# in the SDK region (sub_82CAB7E0, sub_82C00C90, sub_82CADF00, ...). This is a
+# no-op default method / interface fallback (the same shape as NoOp_Stub_829CE870
+# but returning 0 instead of void). Named for the mechanism: a return-zero stub.
+[functions."0x831FD318"]
+name = "Stub_ReturnZero_831FD318"
+
+[functions."0x831C5D28"]
+name = "Func_831C5D28"
+
+[functions."0x831FFA08"]
+name = "Func_831FFA08"

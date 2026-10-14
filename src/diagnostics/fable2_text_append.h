@@ -3,7 +3,7 @@
 // Hooks the guest UI text rendering pipeline:
 //   UIText_RenderSegment (0x82C0A8F8)  - walks one segment's glyph/element
 //                                       linked list once per frame.
-//   ProcessAndProcessAndProcess1334_82C09018                      - the per-element draw called for every
+//   UITextElement_Draw                      - the per-element draw called for every
 //                                       visible element (r3 = element object,
 //                                       r4 = render context).
 //
@@ -285,8 +285,8 @@ inline void dump_char_cands(const char* name, const uint8_t* base, uint32_t el) 
 
 extern "C" void __imp__Allocate_SizeBucketed_Thunk_8221F3F0(PPCContext& __restrict,
                                                             uint8_t*);
-extern "C" void __imp__ProcessAndProcessAndProcess1334_82C09018(PPCContext& __restrict, uint8_t*);
-// Full per-element draw (setup + state build + ProcessAndProcessAndProcess1334_82C09018 + vertex emit).
+extern "C" void __imp__UITextElement_Draw(PPCContext& __restrict, uint8_t*);
+// Full per-element draw (setup + state build + UITextElement_Draw + vertex emit).
 extern "C" void __imp__UIText_RenderElement(PPCContext& __restrict, uint8_t*);
 
 inline uint32_t guest_alloc(PPCContext& ctx, uint8_t* base, size_t size) {
@@ -389,7 +389,7 @@ constexpr uint32_t kCloneSize = 256;   // element object
 constexpr uint32_t kDrawSize = 1024;    // draw object (>=672 bytes)
 constexpr uint32_t kSubSize = 128;      // glyph sub-item object
 
-// Last element actually drawn (tracked by the ProcessAndProcessAndProcess1334_82C09018 hook). The
+// Last element actually drawn (tracked by the UITextElement_Draw hook). The
 // RenderSegment hook reads this AFTER __imp__ returns to anchor the append
 // on the last glyph of the segment just drawn.
 inline uint32_t& last_drawn_el() {
@@ -487,7 +487,7 @@ inline void write_ptr_be(uint8_t* base, uint32_t a, uint32_t v) {
   std::memcpy(base + (a >= 0xE0000000u ? a + 0x1000u : a), &w, 4);
 }
 
-// Recently-drawn element ring (filled by the ProcessAndProcessAndProcess1334_82C09018 hook). Only
+// Recently-drawn element ring (filled by the UITextElement_Draw hook). Only
 // elements that were actually drawn this frame are safe append targets.
 inline std::vector<uint32_t>& recent_draws() {
   static std::vector<uint32_t> v;
@@ -633,7 +633,7 @@ inline void append_segment(PPCContext& ctx, uint8_t* base, uint32_t seg, uint32_
   uint32_t s4 = (uint32_t)ctx.r4.u64;
   ctx.r3.u64 = sc.clones[0];
   ctx.r4.u64 = rtx;
-  // Full per-element draw: setup + state build + ProcessAndProcessAndProcess1334_82C09018 + vertex emit.
+  // Full per-element draw: setup + state build + UITextElement_Draw + vertex emit.
   __imp__UIText_RenderElement(ctx, base);
   ctx.r3.u64 = s3;
   ctx.r4.u64 = s4;
@@ -841,7 +841,7 @@ extern "C" void ProcessAndProcessAndProcess758_82C52A80(PPCContext& __restrict c
 // Hook: per-element draw (r3 = element, r4 = render context)
 // ===========================================================================
 
-extern "C" void ProcessAndProcessAndProcess1334_82C09018(PPCContext& __restrict ctx, uint8_t* base) {
+extern "C" void UITextElement_Draw(PPCContext& __restrict ctx, uint8_t* base) {
   // Track which elements are actually being drawn (for safe append targets).
   {
     uint32_t el = (uint32_t)ctx.r3.u64;
@@ -861,10 +861,10 @@ extern "C" void ProcessAndProcessAndProcess1334_82C09018(PPCContext& __restrict 
     if (n.fetch_add(1) % step == 0 && n.load() < 6000)
       fable2::textappend::probe_element(base, (uint32_t)ctx.r3.u64, (uint32_t)ctx.r4.u64);
   }
-  if (fable2::uir::hook("ProcessAndProcessAndProcess1334_82C09018", ctx, base)) return;
-  __imp__ProcessAndProcessAndProcess1334_82C09018(ctx, base);
+  if (fable2::uir::hook("UITextElement_Draw", ctx, base)) return;
+  __imp__UITextElement_Draw(ctx, base);
   // Shift the per-glyph vertex x AFTER the state builder built the vertex data
-  // (and BEFORE the vertex-emitting calls ProcessAndProcessAndProcess2382_82C09B50/sub_82C0A230 run), so
+  // (and BEFORE the vertex-emitting calls UITextElement_GrowBuffer/sub_82C0A230 run), so
   // the draw uses the shifted x.
   {
     static uint32_t shift = 0xFFFFFFFFu;

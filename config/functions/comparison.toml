@@ -1,0 +1,1107 @@
+# comparison functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# Gap-region leaf with NO callers in the current code (registered by the
+# gap walk over 0x832B3D6C-0x832B3DE0; the original branch source was
+# re-segmented away, so it is unreachable/dead in this build). Mechanism:
+# v = *(r3 - 4); if (v == r4) return 0; else return ~v
+# (0xFFFFFFFF - v). Looks like a tag/checksum verifier over a 32-bit word
+# stored immediately before a buffer, returning 0 on match and a
+# non-zero token encoding the actual value on mismatch. Purpose not
+# recoverable without the lost caller; name describes the mechanism only.
+[functions."0x832B3D78"]
+name = "CheckPrefixedWord_ReturnZeroOrComplement_832B3D78"
+
+
+# A chain-root finder: validate, then walk up a chain (via node->0) to the topmost node
+# (the one whose byte-17 flag is set) and store it in obj->4.
+
+# Arg: obj (r3, obj->0 = a base, obj->4 = a starting node). Validates (obj->0 != 0, else
+# `trap 22`; the head node's byte-17 == 0, else `trap 22`). Then walks up the chain via
+# node->0 (the parent link) until it reaches a node whose byte-17 flag is nonzero (the
+# root/top of the chain), and stores that node in obj->4. There are two entry paths
+# (depending on an intermediate node->17 check), but both converge on the same walk-up. 
+# Returns void. 62 callers (sub_82B6A088, sub_83233B40, sub_825D3100, sub_82C7DC58, ...). 
+# The node/chain class and the exact meaning of the byte-17 flag aren't resolvable, so
+# the name states the mechanism: walk up the chain to find the root node and store it.
+[functions."0x82A596F0"]
+name = "FindChainRoot_82A596F0"
+
+
+# A string comparator (3-way): compare two string-wrapper objects (their ->0 holds the
+# string pointer) using the signed string compare.
+
+# Args: (r3), a (r4, a->0 = a pointer to a's string), b (r5, b->0 = a pointer to b's
+# string). If a->0 == b->0, return 0 (equal). If a->0 == 0, return 1 (a is null). If
+# b->0 == 0, return 0 (b is null). Otherwise both are non-null: StrCmp_Signed_8226D7A8
+# (*a->0, *b->0) and return the sign bit of the result (negative/zero/positive -- a
+# 3-way ordering). 42 callers (sub_825D8308, sub_822B84F0, sub_825D7718, ...). A
+# string-ordering predicate for the string-wrapper class. Named CompareStrings to state
+# the mechanism: compare two (wrapper) strings and return the ordering.
+[functions."0x8228B5A0"]
+name = "CompareStrings_8228B5A0"
+
+
+# A chain-root finder (the byte-25-flag variant): validate, then walk up a chain (via
+# node->0) to the topmost node (the one whose byte-25 flag is set) and store it in obj->4.
+# Structurally identical to FindChainRoot_82A596F0 (which uses byte 17), but uses byte 25
+# and validates more aggressively.
+
+# Arg: obj (r3, ->0 = a base, ->4 = a starting node). Validates (obj->0 != 0, else `trap 22`;
+# the head node's byte-25 == 0, else `trap 22`). Then walks up the chain via node->0 (the
+# parent link) until it reaches a node whose byte-25 flag is nonzero (the root/top), and
+# stores that node in obj->4. Returns void. 93 lines, 0 external callees (all inline). 108
+# callers (sub_8267D818, sub_825D6FE8, sub_82367898, ...) -- a high-value chain-root lookup.
+# A sibling of FindChainRoot_82A596F0 (the byte-17 variant); the "2" distinguishes the two.
+# The node/chain class and the byte-25 flag's meaning aren't resolvable.
+[functions."0x823D4F20"]
+name = "FindChainRoot2_823D4F20"
+
+
+# A chain-root finder (the byte-33-flag variant): validate, then walk up a chain (via
+# node->0) to the topmost node (the one whose byte-33 flag is set) and store it in obj->4.
+# A third variant, structurally identical to FindChainRoot_82A596F0 (byte 17) and
+# FindChainRoot2_823D4F20 (byte 25), but uses byte 33.
+
+# Arg: obj (r3, ->0 = a base, ->4 = a starting node). Validates (obj->0 != 0, else `trap 22`;
+# the head node's byte-33 == 0, else `trap 22`). Then walks up the chain via node->0 (the
+# parent link) until it reaches a node whose byte-33 flag is nonzero (the root/top), and
+# stores that node in obj->4. Returns void. 93 lines, 0 external callees (all inline). 64
+# callers (sub_8278C8E0, sub_8292C840, sub_823B0DB8, ...) -- a high-value chain-root lookup.
+# Siblings: FindChainRoot_82A596F0 (byte 17), FindChainRoot2_823D4F20 (byte 25); the "3"
+# distinguishes this byte-33 variant. The node/chain class and the byte-33 flag's meaning
+# aren't resolvable.
+[functions."0x82A962B0"]
+name = "FindChainRoot3_82A962B0"
+
+
+# A chain-root finder (a byte-33-flag variant): validate, then walk a chain (via node->8 / node->0)
+# to the topmost node (byte-33 flag set) and store it in obj->4.
+
+# Arg: obj (r3, ->0 = a base, ->4 = a starting node). Validates (obj->0 != 0, else `trap 22`).
+# Reads the head node (obj->4): if the head's byte-33 flag is set, it advances to the next node
+# (obj->4 = head->8) and returns if that node's byte-33 flag is 0 (else `trap 22`). Otherwise it
+# walks up the chain via node->0 / node->8 until it reaches a node whose byte-33 flag is set (the
+# root/top), and stores that node in obj->4. Returns void. 112 lines, 0 external callees (all
+# inline). Many callers (sub_82883068, sub_822FF270, sub_82616CA0, ...). Siblings:
+# FindChainRoot_82A596F0 (byte 17), FindChainRoot2_823D4F20 (byte 25), FindChainRoot3_82A962B0
+# (byte 33, via node->0); this one also uses byte 33 but walks via node->8/node->0, hence the
+# "4". The node/chain class and the byte-33 flag's meaning aren't resolvable.
+[functions."0x828836E8"]
+name = "FindChainRoot4_828836E8"
+
+
+# A structure validator + chain-root finder: validate obj->32 (non-null, not self-referential,
+# else trap 22), then find the chain root (FindChainRoot_82A596F0).
+
+# Args: obj (r3, ->28 = a field, ->32 = a pointer), (r4). Reads obj->32 and validates it (it must
+# be non-null and must not equal obj + 28 -- a self-reference check -- else it raises `trap 22`).
+# Then it walks/validates the structure (a loop checking obj->32 against obj + 28 and a stored
+# value) and calls FindChainRoot_82A596F0 (sub_82A596F0) to find the chain root. So it's a
+# "validate the structure, then find its chain root" routine. 90 lines. 0 direct callers (it's
+# reached via a dispatch/vcall, not a direct call). Part of the 0x83217 constructor cluster. The
+# structure class and the exact validation invariants aren't resolvable, so the name states the
+# mechanism: validate and find the root.
+[functions."0x83217AF8"]
+name = "ValidateAndFindRoot_83217AF8"
+
+
+# A u16 / UTF-16 string compare (a 16-bit memcmp): compare count 16-bit elements, return 0 if
+# equal, else (a - b) as a 3-way result.
+
+# Args: a (r3, a u16 array), b (r4, a u16 array), count (r5, the number of u16 elements). If count
+# is 0, returns 0 (equal). Otherwise it walks the arrays (2 bytes at a time), comparing each u16;
+# if all are equal it returns 0. On the first difference it computes (a_u16 - b_u16) (a
+# sign-extended 3-way comparison result: negative if a < b, positive if a > b, 0 if equal) and
+# returns that. So it's a "memcmp for 16-bit (UTF-16) strings" routine. 55 lines, 0 external
+# callees (all inline u16 compares). 3 callers (sub_822F6480, sub_8217A858, sub_82377FD8 -- in the
+# TODO). Part of the string-compare family (StrCmp_Signed_8226D7A8, CompareStrings_8228B5A0); this
+# one operates on 16-bit elements. The string's context (UTF-16 text, a locale string, ...) isn't
+# resolvable, so the name states the mechanism: compare u16 elements.
+[functions."0x822F85C8"]
+name = "CompareU16_822F85C8"
+
+
+# A string compare (with two cases): if a->0 is null, compare b byte-by-byte against a global
+# charset string; otherwise compare a->0 to b via StrCmp_Signed_8226D7A8.
+
+# Args: a (r3, ->0 = a string or a null flag), b (r4, a string). If a->0 is 0 (null), it compares
+# b against a global charset string byte-by-byte (a per-byte difference test). Otherwise it
+# compares a->0 (the string) to b via StrCmp_Signed_8226D7A8 (sub_8226D7A8). It then derives a
+# small result (via a leading-zero count of the comparison result) and returns it. So it's a
+# "compare the string (charset match, or a signed compare)" routine. 74 lines, 1 callee
+# (StrCmp_Signed_8226D7A8). Many callers (sub_824389E0, sub_82357550, sub_828214A8, ...). A
+# sibling of CompareStrings_8228B5A0 and StrCmp_Signed_8226D7A8 (the string-compare family); this
+# one adds a charset branch. The string/charset context isn't resolvable, so the name states the
+# mechanism: compare the string.
+[functions."0x8229AD78"]
+name = "CompareString_8229AD78"
+
+
+# A global-array search: linearly search a global 20-byte-stride array for a value; on a match,
+# compact the array (MemMove_SdkRuntime_82CAA2E0) -- i.e. find-and-remove.
+
+# Args: value (r3). Loads a global base and its count (from base + 10244). If the count is > 0, it
+# linearly scans the array (20-byte stride), comparing each element's ->0 field to value. On a match
+# it computes the position (count - index) and compacts the array by calling MemMove_SdkRuntime_82CAA2E0
+# (sub_82CAA2E0) to shift the trailing elements down (removing the matched one). So it's a "find the
+# value in the global array and remove it" routine (part of the 0x82BAA indexed-region / range
+# subsystem). 97 lines. 2 callers: AdvanceRangesDispatch_82BAA570 (sub_82BAA570) and sub_82BA8D90.
+# The array's element class (20-byte records) and the value's meaning aren't resolvable, so the name
+# states the mechanism: find the value in the global array.
+[functions."0x82BAA5D8"]
+name = "FindInGlobalArray_82BAA5D8"
+
+
+# A chain-root finder (the sibling of the FindChainRoot family): validate the object, then walk the
+# chain (via node->8, checking the flag at node->17) to find the root node.
+
+# Args: obj (r3, ->0 = a value, ->4 = the current node). Validates obj->0 (a trap-22 on a null value,
+# the same invariant the FindChainRoot family checks). It then walks the chain: it reads the current
+# node (obj->4), checks a flag byte (node->17); while the flag is set, it advances to the next node
+# (node->8) and updates obj->4, until the flag is clear (the root). So it's a "walk the chain to the
+# root" routine (the 0x8247 / node-chain traversal, a sibling of FindChainRoot_82B1D0F0 and its
+# variants). 112 lines, no callees (pure data manipulation). 8 callers: LookupString2_8246C010
+# (sub_8246C010), sub_825BF630, sub_82BFC138, sub_822FF960, ... The node class (->8 = next, ->17 = a
+# flag) and the object's meaning aren't resolvable, so the name states the mechanism: find the chain
+# root. The "5" distinguishes it from FindChainRoot, FindChainRoot2, FindChainRoot3, and
+# FindChainRoot4.
+[functions."0x824708F8"]
+name = "FindChainRoot5_824708F8"
+
+
+# A count-compare + dispatch (the 0x82A0B / float-data cluster): compute two 16-byte-stride counts
+# from the object, compare them, and dispatch (to Construct3FloatPayload_82A0C0A0).
+
+# Args: obj (r3, ->4 = a base, ->8 = an end, ->12 = another end). Computes two 16-byte-stride counts:
+# ((obj->12 - obj->4) >> 4) and ((obj->8 - obj->4) >> 4) (each >> 4 divides a byte span into 16-byte
+# elements). It compares the two counts; when one is larger, it dispatches (calling
+# Construct3FloatPayload_82A0C0A0, sub_82A0C0A0 -- the 3-float payload builder -- and sub_82A0BAA0, a
+# sibling in the 0x82A0B cluster). So it's a "compare the float-data counts and dispatch" routine
+# (part of the float-data processing, the 0x82A0B/0x82A0C cluster). 96 lines. 2 callers:
+# ProcessFloatData_832206E8 (sub_832206E8) and sub_832207B8. The object's class (a float-data buffer)
+# and the field semantics aren't resolvable, so the name states the mechanism: compare the float-data
+# counts.
+[functions."0x82A0B5C8"]
+name = "CompareFloatCounts_82A0B5C8"
+
+
+# A chain validation + find/remove: validate the pointers (trap-22), compare the node to the value,
+# then look up the chain root (FindChainRoot2_823D4F20) and find/remove the node (Tree_FindAndRemove_82A14AE0).
+
+# Args: obj (r3, ->12 = a sub-pointer, ->16 = a node). Validates the pointers (a trap-22 if a pointer is
+# null or mismatched -- the same invariant the FindChainRoot family checks). It compares the node (obj->16)
+# to a value, and on a match tears down / finds / removes: it looks up the chain root (FindChainRoot2_823D4F20,
+# sub_823D4F20), finds and removes the node (Tree_FindAndRemove_82A14AE0, sub_82A14AE0), and destroys the
+# list (DestroyList_Recursive_82443440, sub_82443440). So it's a "validate the node, then find/remove it from
+# the tree" routine. 120 lines, 3 callees (FindChainRoot2_823D4F20, Tree_FindAndRemove_82A14AE0,
+# DestroyList_Recursive_82443440). 2 callers: sub_83218C10 and sub_83219DF8. The node's class (->16 = a node,
+# ->12 = a sub-pointer) and the tree's meaning aren't resolvable, so the name states the mechanism: validate
+# and find/remove the node.
+[functions."0x83218350"]
+name = "ValidateAndFindRemove_83218350"
+
+
+# An index validation: set a result field (obj->0) to 0, then validate an index against a container (a bounds
+# check), raising an assertion (trap 22) if the index is out of range.
+
+# Args: obj (r3, ->0 = a result), index (r4), container (r5, ->4 = a base, ->20 = a count, ->24 = a capacity). Sets
+# obj->0 to 0 (the result). If the container is null or the index is 0, it skips the validation (an early return).
+# Otherwise it validates the index: it reads the container's base (container->4, or container->4->0 if the
+# container is large), its count (container->20), and capacity (container->24), computes a bound, and checks the
+# index against it. If the index is out of range (index > bound), it raises an assertion (twi 31, r0, 22 -- a
+# trap 22, the game's debug-assert instruction). So it's a "validate an index (assert it is in range)" routine.
+# 63 lines, no callees (pure data manipulation). 3 callers (sub_822F2238, sub_8217AA20, sub_8217A7F8). The
+# container's class (a container with a base, count, and capacity) and the index's meaning aren't resolvable,
+# so the name states the mechanism: validate an index (assert bounds).
+[functions."0x822F6EE8"]
+name = "ValidateIndex_822F6EE8"
+
+
+# A validate-and-search: zero the result fields (obj->0, obj->4), search the tree (Tree_Search2_82C343A0), and
+# validate the result (raising an assertion, trap 22, if it is invalid).
+
+# Args: obj (r3, ->0, ->4 = result fields), src (r4, ->4, ->8), (r5). Zeros the result fields (obj->0, obj->4).
+# It then searches the tree: it calls Tree_Search2_82C343A0 (sub_82C343A0, a binary-tree search, passing the
+# source). It validates the result: if the result's ->0 field is 0, or differs from src->4 (a source / parent
+# pointer), it raises an assertion (twi 31, r0, 22 -- a trap 22, the game's debug-assert instruction). In a path it
+# also calls ChainLookup_82550638 (sub_82550638, a chain lookup) and Release_RefCounted_829FF648 (sub_829FF648, a
+# refcounted release). So it's a "search the tree (Tree_Search2) and validate the result (assert it is valid)"
+# routine (a validated tree search, part of the 0x8323A cluster). 109 lines, 3 callees (Tree_Search2_82C343A0,
+# ChainLookup_82550638, Release_RefCounted_829FF648). 4 callers (sub_83225920, sub_832254B8, sub_83225D80, sub
+# _832273F8). The tree's class (a binary tree, a node's ->0 / ->4 = parent / source) and the search's meaning
+# aren't resolvable, so the name states the mechanism: validate and search the tree.
+[functions."0x8323A058"]
+name = "ValidateAndSearch_8323A058"
+
+
+# A search-and-assign (the sibling of LookupAndAssign_8323A1E8): call ValidateAndSearch_8323A058 (a validated tree
+# search), and (if the found value differs from the object's current value) release the old value (Release_RefCounted
+# _829FF648) and assign the new one (obj->0 and obj->4 = the found value).
+
+# Args: obj (r3, ->0 and ->4 = a refcounted value), value (r4), (more). Zeros the object (obj->0 = 0, obj->4 = 0),
+# then calls ValidateAndSearch_8323A058 (sub_8323A058, a validated tree search with a trap 22 assertion, with a stack
+# buffer and the value). It compares the found value (obj->4, from the search) against the object's current value
+# (stack[84]): if they differ, it releases the old value (Release_RefCounted_829FF648, sub_829FF648, a refcounted
+# release), and assigns the new value (obj->0 = the found pointer, obj->4 = the found refcount). So it's a "search
+# for a value (a validated tree search) and assign it (a refcounted assign: release the old value and assign the new
+# one)" routine (a search-and-assign, part of the 0x83225 cluster). 75 lines, 2 callees (ValidateAndSearch_8323A058,
+# Release_RefCounted_829FF648). 2 callers (sub_83225E80, sub_83225F18). The object's class (->0 = a refcounted value,
+# ->4 = a refcount) and the tree's meaning (a searched tree) aren't resolvable, so the name states the mechanism:
+# search for a value (and assign it, a refcounted assign). A sibling of LookupAndAssign_8323A1E8 (a chain-lookup +
+# refcounted assign).
+[functions."0x83225D80"]
+name = "SearchAndAssign_83225D80"
+
+
+# A validate-and-dispatch: validate (a trap 22 debug assertion: obj->4 <= obj->8, checked twice), build a stack
+# struct (obj, obj->8, obj->4), and dispatch (sub_82BFA510).
+
+# Args: obj (r3, ->4, ->8), (more). Validates: it checks that obj->4 <= obj->8 (a debug assertion, a trap 22 (ppc_trap
+# (ctx, base, 22)) if the assertion fails -- a bounds / index check). It builds a stack struct (obj, obj->8, obj->4,
+# saved at stack[80], stack[88], and stack[92]), re-validates (another trap 22), and dispatches: it calls sub_82BFA5
+# 10 (a sibling in the 0x82BFA cluster, with the stack struct). So it's a "validate (a trap 22 debug assertion: obj->
+# 4 <= obj->8) and dispatch (a call with a stack struct)" routine (a validated dispatch, part of the 0x8236F cluster).
+# 58 lines, 1 callee (sub_82BFA510). 4 callers (sub_825C4EE8, sub_823722E0, sub_8236ED00, sub_82B1BF08). The object's
+# class (->4 = an index, ->8 = a count / capacity, an object with a bounds check) and the dispatch's meaning (a
+# particular operation) aren't resolvable, so the name states the mechanism: validate (a trap 22 assertion) and
+# dispatch (a call). A sibling of ValidateAndSearch_8323A058 (a validated tree search with a trap 22 assertion).
+[functions."0x8236FC88"]
+name = "ValidateAndDispatch_8236FC88"
+
+
+# A validate-and-copy: validate (a trap 22 debug assertion: count == 0 or count == index), and (if the source differs
+# from the destination) copy the data (CheckedCopy_82CA3808, a size-checked copy).
+
+# Args: a (r3, a source), obj (r4, ->8), count (r5), index (r6), (more). Validates: it checks that count is 0, or
+# count == index (a debug assertion, a trap 22 (ppc_trap (ctx, base, 22)) if the assertion fails -- a bounds / index
+# check). If the source (a) differs from the destination (r5), it computes a count ((obj->8 - r5) >> 2, a count of
+# 4-byte elements), and copies the data (CheckedCopy_82CA3808, sub_82CA3808, a size-checked copy, with the source, the
+# count * 4, and the destination). So it's a "validate (a trap 22 debug assertion: count == 0 or count == index) and
+# copy the data (a size-checked copy)" routine (a validated copy, part of the 0x82BFA cluster). 80 lines, 1 callee
+# (CheckedCopy_82CA3808). 4 callers (sub_8236FC88, sub_823723F0, sub_82BF96E8, sub_82628158). The source/destination's
+# meaning (a 4-byte-stride array, a copy) and the count/index's meaning (a bounds check) aren't resolvable, so the
+# name states the mechanism: validate (a trap 22 assertion) and copy the data (a size-checked copy). A sibling of
+# ValidateAndDispatch_8236FC88 (a validated dispatch with a trap 22 assertion).
+[functions."0x82BFA510"]
+name = "ValidateAndCopy_82BFA510"
+
+
+# A process (a validation, with a bounds check and a call to ValidateIndex_822F6EE8, the sibling of ProcessElementAcce
+# ss_8217A400): compute a pointer (a base (value->4, or value + 4, a base, a particular offset), plus a 2-byte element
+# stride (value->20 * 2, a size, a 2-byte element, a particular range)), and call a validation (ValidateIndex_822F6EE8
+# , on the pointer and an object, a particular index / a particular validation).
+
+# Args: obj (r3, r31, an object), value (r4, r5, ->4 = a base, ->20 = a size, ->24 = a size, a particular structure),
+# (more). It checks a size (value->24, a size, a particular bound): if it is >= 8 (a particular threshold, a particular
+# size), it reads a base (value->4, a base, a particular offset); otherwise it uses a base (value + 4, a base, a
+# particular offset, a relative offset). It computes a pointer (a base (r11, a base, a particular offset) plus a 2-byte
+# element stride (r10, value->20 * 2, a size (r10, value->20, a size, a particular range), a 2-byte element, rlwinm r1
+# 0, r10, 1, 0, 30, a left shift by 1, a multiplication by 2, a 2-byte element stride, a particular range), a pointer,
+# a particular element). It calls a validation (ValidateIndex_822F6EE8, sub_822F6EE8, an index validation, on the
+# pointer (r4, a pointer, a particular element) and the object (r3, r31, an object, a particular structure), a
+# particular index / a particular validation). So it's a "process (a validation: compute a pointer (a base, plus a 2-
+# byte element stride, value->20 * 2, a size, a particular range), and call a validation (ValidateIndex_822F6EE8, on
+# the pointer and an object, a particular index / a particular validation))" routine (a validation process, part of the
+# 0x8217A allocation cluster, a sibling of ProcessElementAccess_8217A400). 56 lines, 1 callee (ValidateIndex_822F6EE8,
+# sub_822F6EE8, an index validation). 2 callers: sub_822F2238, sub_8217AA20 (siblings in the 0x822F2/0x8217A
+# clusters). The object's class (obj, an object, a particular structure, a range / a table object) and the value's
+# meaning (a value, a base, a size, a particular structure, a particular range) aren't resolvable, so the name states
+# the mechanism: a validation process (compute a pointer (a base, plus a 2-byte element stride, value->20 * 2, a size,
+# a particular range), and call a validation (ValidateIndex_822F6EE8, on the pointer and an object)).
+[functions."0x8217A7F8"]
+name = "ValidateElementAccess_8217A7F8"
+
+
+# A validation (a bounds check, with a 4-byte element stride and traps, the sibling of ValidateIndex_822F6EE8 / the
+# caller of sub_82BEC540): (if obj->0 is 0, a null state) raise a trap (trap 22, a particular error, a null / a
+# particular invalid state), and (otherwise) perform a bounds check (a 4-byte element stride, index * 4, with a base
+# (obj->0->4, a base, a particular offset) and a limit (obj->0->8, a limit, a particular bound), and (if the pointer is
+# below the base or above the limit, or above the limit, a below/above-threshold check) raise a trap (trap 22, a
+# particular error, an out-of-range / a particular invalid state)).
+
+# Args: obj (r3, ->0 = a value, a 64-bit, a pointer), index (r4, an index, a particular element), (more). It checks a
+# value (obj->0, a value, a 64-bit, a pointer, a particular state): if it is 0 (a null state, a particular invalid
+# state), it raises a trap (ppc_trap 22, a particular error, a null / a particular invalid state, a particular
+# assertion). Otherwise (a valid state), it performs a bounds check (a 4-byte element stride, rlwinm r10, r4, 2, 0, 29
+# , a left shift by 2, a multiplication by 4, a 4-byte element stride, an index (r4, an index, a particular element),
+# with a base (r9, obj->0->4, a base, a particular offset) and a limit (r11, obj->0->8, a limit, a particular bound), a
+# particular range, a 4-byte element, a particular element). It computes a pointer (r3 = r10 + r9, a pointer, a
+# particular element) and checks it (if it is above the limit (r3 > r11, an above-threshold check), or below the base
+# (r3 < obj->0->4, a below-threshold check), or above the limit (r3 >= r11, an above-threshold check), it raises a trap
+# (ppc_trap 22, a particular error, an out-of-range / a particular invalid state, a particular assertion)). So it's a
+# "validate (a bounds check: (if obj->0 is 0, a null state) raise a trap (trap 22), and (otherwise) perform a bounds
+# check (a 4-byte element stride, index * 4, with a base (obj->0->4) and a limit (obj->0->8), and (if the pointer is
+# below the base or above the limit) raise a trap (trap 22)))" routine (a bounds check validation, part of the 0x82BEC
+# cluster, a sibling of ValidateIndex_822F6EE8). ~45 lines, no direct callees (pure data manipulation, with traps). 10
+# + callers: sub_82BEC540, sub_82BF1A40, sub_82BEF360, sub_82BEC8B0, sub_82BF07C0, sub_82BEDC10, sub_82BF06F8, sub
+# _82BECFA0, sub_82BED548, sub_82BF1268 (a widely-called bounds check validation, part of the game's data validation
+# subsystem). The object's class (obj, ->0 = a value, a 64-bit, a pointer, a particular structure, a range / a table
+# object) and the index's meaning (an index, a particular element, a particular offset) aren't resolvable, so the name
+# states the mechanism: a bounds check validation ((if obj->0 is 0, a null state) raise a trap (trap 22), and
+# (otherwise) perform a bounds check (a 4-byte element stride, index * 4, with a base (obj->0->4) and a limit (obj
+# ->0->8), and (if the pointer is below the base or above the limit) raise a trap (trap 22))).
+[functions."0x82BEC300"]
+name = "ValidateBounds4_82BEC300"
+
+
+# A getter (a size-bucket search, with a loop, the sibling of HeapAllocate_83231590 / the callee of PoolAllocate_8240D
+# AA8 and Free_SizeBucketed_83231BE8): (if a size is 0, a null state) take one path, and (otherwise) search for a size
+# bucket (a loop, over a bucket list (obj->24, a bucket list, a set of size buckets), comparing the size against the
+# buckets, finding the first bucket that is large enough, a particular size bucket, a particular pool / a particular
+# allocation bucket).
+
+# Args: obj (r3, ->4 = a base, ->24 = a bucket list, a set of size buckets), size (r4, a size, a particular size / a
+# particular allocation), (more). It checks the size (r4, a size, a particular size / a particular allocation): if it
+# is 0 (a null state, a particular invalid state), it takes one path (a no-op / a return, a particular state). Otherwise
+# (a valid size), it searches for a size bucket (a loop, over a bucket list (obj->24, a bucket list, a set of size
+# buckets, a particular set of size buckets): it reads a bucket (r5->0, a size, a particular size bucket, a particular
+# bucket), compares the size (r4, a size, a particular size) against the bucket (r5->0, a size, a particular size
+# bucket, a particular bucket), and (if the size is large enough, a size >= the bucket, a particular size / a
+# particular allocation) finds the bucket (a particular size bucket, a particular pool / a particular allocation bucket
+# , returning the bucket, a particular result). If the size is not large enough (a size < the bucket, a particular size
+# / a particular allocation), it advances to the next bucket (r5 = r5->8, a next, a particular bucket), and continues
+# the loop (a particular search, a particular size bucket search). If the bucket list is exhausted (r5 = 0, a null
+# state, a particular end), it returns 0 (a not-found, a particular state, a particular result). So it's a "get a size
+# bucket (a size-bucket search: (if a size is 0, a null state) take one path, and (otherwise) search for a size bucket
+# (a loop, over a bucket list (obj->24, a bucket list, a set of size buckets), comparing the size against the buckets,
+# finding the first bucket that is large enough, a particular size bucket))" routine (a size-bucket search, part of the
+# 0x83231 heap cluster, a sibling of HeapAllocate_83231590, a callee of PoolAllocate_8240DAA8 and Free_SizeBucketed
+# _83231BE8). ~50 lines, no direct callees (pure data manipulation). 3 callers: PoolAllocate_8240DAA8 (sub_8240DAA8, a
+# pool allocation), Free_SizeBucketed_83231BE8 (sub_83231BE8, a size-bucketed free), sub_828456C8 (a sibling in the
+# 0x82845 cluster). The object's class (obj, ->4 = a base, ->24 = a bucket list, a set of size buckets, a particular
+# structure, a heap / a pool object) and the size's meaning (a size, a particular size / a particular allocation)
+# aren't resolvable, so the name states the mechanism: a size-bucket search ((if a size is 0, a null state) take one
+# path, and (otherwise) search for a size bucket (a loop, over a bucket list (obj->24, a bucket list, a set of size
+# buckets), comparing the size against the buckets, finding the first bucket that is large enough)).
+[functions."0x83231518"]
+name = "FindSizeBucket_83231518"
+
+
+# A find (with a spin lock and a list traversal, the sibling of HashTable_Find3_821CF1D0 / the caller of
+# SpinLock_Acquire_822D7408, the callee of Pool_FreeNode_83230320): acquire a spin lock (SpinLock_Acquire_822D7408, on
+# a value (obj + 32, a value, a particular lock, a particular state, a particular size / a particular allocation), a
+# particular lock / a particular state, a particular size / a particular allocation), and (if a list (obj->12, a list,
+# a particular list / a particular sequence, a particular size / a particular allocation) is non-zero, a particular
+# state) traverse the list (a list traversal, a particular traversal / a particular sequence, a particular size / a
+# particular allocation: loop over a list (r30, a list, a particular list / a particular sequence, a particular size /
+# a particular allocation), and for each node (r30, a node, a particular node / a particular value, a particular size
+# / a particular allocation), (if the node's key (r30->0, a key, a particular value, a particular key) matches a masked
+# key (r29 & ~(obj->4 - 1), a masked key, a particular key / a particular value, a particular mask, a particular state
+# ), a particular match / a particular state), return the node (a found, a particular match / a particular state, a
+# particular node / a particular value), and (otherwise) continue to the next node (r30->8, a next, a particular
+# node / a particular value, a particular size / a particular allocation)), and (otherwise) take one path (a no-op / a
+# return, a particular state, a particular result).
+
+# Args: obj (r3, r31, ->4 = a size, ->12 = a list, a particular structure, a list / a hash object), key (r4, r29, a
+# key, a particular value, a particular key), (more). It acquires a spin lock (SpinLock_Acquire_822D7408, sub
+# _822D7408, a spin lock, on a value (obj + 32, a value, a particular lock, a particular state, a particular size / a
+# particular allocation), a particular lock / a particular state, a particular size / a particular allocation, a
+# particular state / a particular operation). It checks a list (r30, obj->12, a list, a particular list / a particular
+# sequence, a particular size / a particular allocation): if it is non-zero (a particular state, a particular list / a
+# particular sequence), it traverses the list (a list traversal, a particular traversal / a particular sequence, a
+# particular size / a particular allocation: it computes a mask (r11, obj->4 - 1, a mask, a particular mask / a
+# particular value, a particular state, a particular size / a particular allocation), and a masked key (r28, r29 &
+# ~r11, a masked key, a particular key / a particular value, a particular mask, a particular state, a particular size
+# / a particular allocation), and loops over a list (r30, a list, a particular list / a particular sequence, a
+# particular size / a particular allocation): for each node (r30, a node, a particular node / a particular value, a
+# particular size / a particular allocation), it checks the node's key (r11, r30->0, a key, a particular value, a
+# particular key) against the masked key (r28, a masked key, a particular key / a particular value, a particular mask,
+# a particular state): if it matches (a particular match / a particular state, a particular key / a particular value,
+# a particular mask, a particular size / a particular allocation), it returns the node (a found, a particular match /
+# a particular state, a particular node / a particular value, a particular size / a particular allocation); if it
+# doesn't match (a particular miss / a particular state, a particular key / a particular value, a particular mask, a
+# particular size / a particular allocation), it continues to the next node (r30, r30->8, a next, a particular node /
+# a particular value, a particular size / a particular allocation, a particular state / a particular operation). If the
+# list is zero (a null state, a particular state, a particular list / a particular sequence), it takes one path (a no
+# -op / a return, a particular state, a particular result, a particular size / a particular allocation). So it's a
+# "find (with a spin lock and a list traversal: acquire a spin lock (SpinLock_Acquire_822D7408, on a value (obj + 32, a
+# value, a particular lock, a particular state, a particular size / a particular allocation), a particular lock / a
+# particular state, a particular size / a particular allocation), and (if a list (obj->12, a list, a particular list /
+# a particular sequence, a particular size / a particular allocation) is non-zero, a particular state) traverse the
+# list (a list traversal, a particular traversal / a particular sequence, a particular size / a particular allocation:
+# loop over a list (r30, a list, a particular list / a particular sequence, a particular size / a particular
+# allocation), and for each node (r30, a node, a particular node / a particular value, a particular size / a
+# particular allocation), (if the node's key (r30->0, a key, a particular value, a particular key) matches a masked
+# key (r29 & ~(obj->4 - 1), a masked key, a particular key / a particular value, a particular mask, a particular
+# state), a particular match / a particular state), return the node (a found, a particular match / a particular state,
+# a particular node / a particular value), and (otherwise) continue to the next node (r30->8, a next, a particular
+# node / a particular value, a particular size / a particular allocation)), and (otherwise) take one path (a no-op / a
+# return, a particular state, a particular result))" routine (a find, with a spin lock and a list traversal, part of
+# the 0x83235 cluster, a sibling of HashTable_Find3_821CF1D0, a caller of SpinLock_Acquire_822D7408, a callee of
+# Pool_FreeNode_83230320). 217 lines, 4 callees (SpinLock_Acquire_822D7408, sub_829FD240, sub_8322FB30, sub_8322FDB0)
+# . 1 caller: Pool_FreeNode_83230320 (sub_83230320, a pool free, which calls this to find a node in the list, a
+# particular match / a particular state, a particular node / a particular value, a particular size / a particular
+# allocation). The object's class (obj, ->4 = a size, ->12 = a list, a particular structure, a list / a hash object, a
+# particular list / a particular sequence) and the key's meaning (a key, a particular value, a particular key) aren't
+# resolvable, so the name states the mechanism: a find (with a spin lock and a list traversal) (acquire a spin lock
+# (SpinLock_Acquire_822D7408, on a value (obj + 32, a value, a particular lock, a particular state, a particular size
+# / a particular allocation), a particular lock / a particular state, a particular size / a particular allocation), and
+# (if a list (obj->12, a list, a particular list / a particular sequence, a particular size / a particular allocation)
+# is non-zero, a particular state) traverse the list (a list traversal, a particular traversal / a particular
+# sequence, a particular size / a particular allocation: loop over a list (r30, a list, a particular list / a
+# particular sequence, a particular size / a particular allocation), and for each node (r30, a node, a particular node
+# / a particular value, a particular size / a particular allocation), (if the node's key (r30->0, a key, a particular
+# value, a particular key) matches a masked key (r29 & ~(obj->4 - 1), a masked key, a particular key / a particular
+# value, a particular mask, a particular state), a particular match / a particular state), return the node (a found, a
+# particular match / a particular state, a particular node / a particular value), and (otherwise) continue to the next
+# node (r30->8, a next, a particular node / a particular value, a particular size / a particular allocation)), and
+# (otherwise) take one path (a no-op / a return, a particular state, a particular result)).
+[functions."0x83235FC0"]
+name = "FindNodeInList_83235FC0"
+
+
+# A validate (a bounds check, with a 16-byte element and a complex computation, the sibling of ValidateBounds4_82BEC30
+# 0, the caller of sub_82CD12C8): (if a size (obj->20, a size, a particular value) is < a value (a, a value, a
+# particular value), a particular threshold, a particular size) call a complex computation (sub_82CD12C8, a complex
+# computation, a particular computation / a particular operation), and (otherwise) compute a bounds check (a size
+# (obj->20 - a, a size, a particular size), a count, a particular count, a particular threshold, a particular size, a
+# particular size / a particular allocation, a 16-byte element, a particular size / a particular allocation, a
+# particular operation).
+
+# Args: obj (r3, r31, ->20 = a size, ->24 = a size, a particular structure, a range / a bounds object), a (r4, r30, a
+# value, a particular value, a particular size / a particular allocation), b (r5, r29, a value, a particular value, a
+# particular size / a particular allocation), c (r6, r28, a value, a particular value, a particular size / a
+# particular allocation), d (r7, r27, a value, a particular value, a particular size / a particular allocation), (more
+# ). It checks a size (r11, obj->20, a size, a particular value, a particular size / a particular allocation) against a
+# value (a, r30, a value, a particular value, a particular size / a particular allocation): if the size is < the value
+# (a particular threshold, a particular size, a particular value, a particular state, a particular size / a particular
+# allocation), it calls a complex computation (sub_82CD12C8, a complex computation, a particular computation / a
+# particular operation, a particular size / a particular allocation); if the size is >= the value (a particular
+# threshold, a particular size, a particular value, a particular state, a particular size / a particular allocation), it
+# takes one path (a no-op / a continue, a particular state, a particular result, a particular size / a particular
+# allocation). It computes a bounds check (a size (obj->20 - a, a size, a particular size, a particular size / a
+# particular allocation), a count, a particular count, a particular threshold, a particular size, a particular size / a
+# particular allocation, a 16-byte element, a particular size / a particular allocation: it computes a size (r11, obj
+# ->20 - r30, a size, a particular size, a particular size / a particular allocation), and (if the size is < b (r29, a
+# value, a particular value, a particular size / a particular allocation), a particular threshold, a particular size, a
+# particular value, a particular state, a particular size / a particular allocation), it stores it (r29, a value, a
+# particular value, a particular size / a particular allocation, a particular state / a particular operation); if the
+# size is >= b (a particular threshold, a particular size, a particular value, a particular state, a particular size / a
+# particular allocation), it takes one path (a no-op / a continue, a particular state, a particular result, a
+# particular size / a particular allocation). It checks a size (r29, a value, a particular value, a particular size / a
+# particular allocation) against d (r27, a value, a particular value, a particular size / a particular allocation): if
+# it is < d (a particular threshold, a particular size, a particular value, a particular state, a particular size / a
+# particular allocation), it stores it (r8, a value, a particular value, a particular size / a particular allocation, a
+# particular state / a particular operation); if it is >= d (a particular threshold, a particular size, a particular
+# value, a particular state, a particular size / a particular allocation), it stores d (r8, d, a value, a particular
+# value, a particular size / a particular allocation, a particular state / a particular operation). So it's a "validate
+# (a bounds check, with a 16-byte element and a complex computation: (if a size (obj->20, a size, a particular value)
+# is < a value (a, a value, a particular value), a particular threshold, a particular size) call a complex computation
+# (sub_82CD12C8, a complex computation, a particular computation / a particular operation), and (otherwise) compute a
+# bounds check (a size (obj->20 - a, a size, a particular size), a count, a particular count, a particular threshold, a
+# particular size, a particular size / a particular allocation, a 16-byte element, a particular size / a particular
+# allocation, a particular operation))" routine (a bounds check, with a 16-byte element and a complex computation, part
+# of the 0x82BEB cluster, a sibling of ValidateBounds4_82BEC300, a caller of sub_82CD12C8). 128 lines, 1 callee (sub
+# _82CD12C8, a complex computation). 8 callers: sub_82BEFC70, sub_82BF1518, sub_82BF04F8, sub_82BEC778, sub_82BF16E0,
+# sub_82BEC8B0, sub_82BEC640, sub_82BF1268 (siblings in the 0x82BEC/0x82BEF/0x82BF1/0x82BF0 clusters). The object's
+# class (obj, ->20 = a size, ->24 = a size, a particular structure, a range / a bounds object, a particular size / a
+# particular allocation) and the value's meaning (a value, a particular value, a particular size / a particular
+# allocation) aren't resolvable, so the name states the mechanism: a bounds check (with a 16-byte element and a complex
+# computation) ((if a size (obj->20, a size, a particular value) is < a value (a, a value, a particular value), a
+# particular threshold, a particular size) call a complex computation (sub_82CD12C8, a complex computation, a
+# particular computation / a particular operation), and (otherwise) compute a bounds check (a size (obj->20 - a, a size,
+# a particular size), a count, a particular count, a particular threshold, a particular size, a particular size / a
+# particular allocation, a 16-byte element, a particular size / a particular allocation, a particular operation)). The
+# "16" refers to the 16-byte element (a 16-byte element, a particular size / a particular allocation).
+[functions."0x82BEBD20"]
+name = "ValidateBounds16_82BEBD20"
+
+
+# Scans a C-style string for the first occurrence of a character, returning the pointer to it or
+# 0 if the string ends first. It walks the string byte by byte; for each byte it stops if the byte
+# is 0 (end of string -> returns 0 unless the wanted character was also 0) or equals the target
+# character c (r4, returns the current position). If c is 0 it simply scans to the end and reports
+# the terminator. This is the project's own strchr()-style helper (avoids a bare libc name so the
+# guest symbol stays distinct from the host's strchr). No direct calls - pure byte scan.
+# Part of the 0x82CA3 cluster (the SDK libc/string cluster). ~40 lines, 0 callees. 10 callers
+# (spread across the 0x821x/0x82BDx/0x82E8x/0x82F1x/0x830x/0x831x string-handling code).
+[functions."0x82CA3980"]
+name = "FindChar_82CA3980"
+
+
+# Validates a size/length field and raises a range error when it is zero (or otherwise invalid). When
+# b->8 is 0 it calls RaiseRangeError_8236F5A8 (flag=1) to report the bad size; when b->8 is non-zero it
+# goes on to inspect the payload (b->4 / the value c) and route through the rest of the 0x82371 size
+# pipeline (sub_82370FD8 / sub_8236E5E0) or the 0x82C70 log helpers. This is the "check the declared size
+# then proceed or bail" entry point that pairs with RaiseRangeError.
+# Part of the 0x82371 cluster (sibling of RaiseRangeError_8236F5A8 / ConstructErrorInfo_823702B8).
+# 298 lines, 4 callees (sub_8236E5E0, RaiseRangeError_8236F5A8, sub_82370FD8, sub_82C705D8). 2 callers:
+# sub_823714A0, sub_82371AA0.
+[functions."0x82371CD8"]
+name = "ValidateSizeOrRaise_82371CD8"
+
+
+# Finds and re-caches the tail node of a linked list. It asserts obj->0 is non-null (debug trap
+# otherwise), then walks the ->0 "next" chain starting at obj->4, stepping through nodes while the byte
+# flag at offset 45 (a valid/occupied marker) on each node's target is zero. When it reaches a node
+# whose flag is set, it stores that node back into obj->4 as the cached tail. Widely used (10 callers)
+# to keep a list's tail pointer up to date before appending. Part of the 0x82C70 list/exception cluster.
+# 93 lines, 0 direct callees (pure linked-list walk with debug asserts). 10 callers (the
+# 0x822Ex/0x822Fx/0x8237x/0x8249x/0x82C6x/0x82C7x clusters).
+[functions."0x82C705D8"]
+name = "FindListTail_82C705D8"
+
+
+# Compares two adjacent pointers in a 4-byte element array and swaps them if they are out of order - the
+# sort step that keeps the array sorted. It dereferences both entries (a->0 and b->0, each pointing at a
+# small struct) and orders them by the ->4 field, using the ->8 field as a tie-breaker; when the right one
+# is smaller than the left it exchanges the two array slots (and mirrors the swap via
+# Process2DRegion_82C3C010 for the associated bookkeeping). This is the low-level "bubble one pair into
+# place" routine driven by BinarySearch_82C27A00 (its only caller). Part of the 0x82C22 sort / compare
+# cluster. 135 lines, 1 callee (Process2DRegion_82C3C010). 1 caller: BinarySearch_82C27A00.
+[functions."0x82C22D80"]
+name = "CompareSwapAdjacent_82C22D80"
+
+
+# Compares two objects (or their sub-objects) for equality. It takes two objects (a, b). It first bails
+# early when the pointers are identical (a == b). Otherwise it dereferences each object's sub-object pointer
+# (a->4 and b->4), loads the sub-objects' leading values (a->4->0 and b->4->0), and compares them, walking
+# the remaining fields as needed to decide equality. The comparison bookkeeping is kept in a stack frame
+# (the r1 + 80..108 slots hold the two sub-objects and their current fields). When the comparison reaches a
+# range it forwards to ProcessRangeCheck_82A0F290. This is the "are these two values equal" predicate for
+# the 0x82A0F object-compare cluster, called only by BuildStructure_82A118B0. Part of the 0x82A0F cluster
+# (sibling of ProcessRangeCheck_82A0F290). 210 lines, 1 callee (ProcessRangeCheck_82A0F290). 1 caller:
+# BuildStructure_82A118B0.
+[functions."0x82A0F120"]
+name = "CompareObjects_82A0F120"
+
+
+# Validates a size and constructs a sized descriptor / allocation for it. It takes a size (a). When a is
+# non-zero and fits the constraint that 0xFFFFFFFF / a < 36 (i.e. a is large enough that a * 9 cannot
+# overflow a 32-bit value), it builds a small on-stack descriptor (r1 + 80 / + 84 holding a .data template
+# and a zero) and drives the construction through sub_822F1F00, then allocates the final backing storage
+# (Allocate_OrDbgBreak_8221F388). The tail always computes the aligned size as a + a * 8 (= a * 9) rounded
+# up to 4 bytes. This is the "check the size is safe to grow and build the descriptor" step for the 0x82377
+# construct cluster, used by 3 callers (sub_82376200 / sub_82376A90 / sub_82B41E28). Part of the 0x82377
+# construct cluster (sibling of sub_822F1F00). 70 lines, 2 callees (Allocate_OrDbgBreak_8221F388,
+# sub_822F1F00). 3 callers.
+[functions."0x82377F60"]
+name = "ValidateAndConstruct_82377F60"
+
+
+# Searches a tree down to the leaf that matches a key. It takes a tree root handle (a), a search context
+# (b), and a key (c). It descends from the tree's first node (b->4 -> 4), at each node comparing the
+# node's key field (node->12) against the requested key (c->0): when the node's key is at least the target
+# it moves to the left child (node->0), otherwise it climbs to the parent / right side (node->8). A node's
+# flag byte (node->21) marks the terminal / matching node. Once the matching leaf is located it records the
+# path (the parent and node into the stack) and continues the per-leaf processing. This is the "find the
+# tree leaf owning this key" descent for the 0x825CB tree cluster, used by 10 callers (the 0x821F5/0x823C1/
+# 0x82431/0x8257C/0x82593/0x828C6/0x82A00/0x82C54 range). Part of the 0x825CB tree cluster (sibling of
+# Tree_FindNode2_82A12230 / FindChainRoot_82A596F0). 87 lines, 0 direct callees (pure tree walk). 10 callers.
+[functions."0x825CB448"]
+name = "FindTreeLeaf_825CB448"
+
+
+# Validates a range of 36-byte elements, trapping when the range is corrupt. It takes a context (a), a
+# range descriptor (b), and a value (c). It reads the range's start (b->4) and end (b->8). When the start
+# is null or (b->8 - b->4) / 36 rounds to zero there is nothing to validate, so it returns early. When the
+# start pointer is past the end pointer (b->4 > b->8) the range is corrupt and it raises a trap
+# (ppc_trap 22) - a deliberate abort on bad memory. Otherwise it validates the element count and drives the
+# per-element processing through sub_82376A90. This is the "make sure this {36-byte element} range is sane,
+# else trap" validator for the 0x82376 element-range cluster, called only by Array_PushElement_823758C0.
+# Part of the 0x82376 element-range cluster (sibling of DestructElementRange_82378088). 136 lines, 1
+# callee (sub_82376A90). 1 caller: Array_PushElement_823758C0.
+[functions."0x82376118"]
+name = "ValidateElementRange_82376118"
+
+
+# Matches two strings, applying a default when either is absent. It takes two pointers (a, b). When both are
+# non-null it walks them byte by byte (a->0, b->0, ...) performing the string comparison. When either is
+# null it takes the default path: it runs sub_82CAB770 (an error/trace sink), writes a sentinel code (22)
+# into a->0, and drives the default handling through sub_82CAB630 (returning 0xFFFF07FF as the result). This
+# is the "compare these two strings, or emit the default failure code" matcher for the 0x82CAA string-match
+# cluster, called only by sub_82CAAF08. Part of the 0x82CAA string-match cluster (sibling of StringCompare_
+# 82CA3920). 81 lines, 2 callees (sub_82CAB630, sub_82CAB770). 1 caller: sub_82CAAF08.
+[functions."0x82CAAE80"]
+name = "MatchString_82CAAE80"
+
+
+# A thin wrapper around the string matcher. It takes two pointers (a, b), clears the third argument (r5 = 0),
+# and forwards directly to MatchString_82CAAE80. This is the "match these two strings" convenience entry
+# for the 0x82CAA string-match cluster, used by 5 callers (the 0x82A30/0x82C82/0x82C86/0x82C88 range). Part
+# of the 0x82CAA string-match cluster (sibling of MatchString_82CAAE80). 9 lines, 1 callee (MatchString_
+# 82CAAE80). 5 callers.
+[functions."0x82CAAF08"]
+name = "MatchStringWrapper_82CAAF08"
+
+
+# Checks a status flag on a node and, depending on it, dispatches or increments a counter. It takes a value
+# (a), a node (b), and a counter slot (c). It inspects the node's status word (b->12): when bit 0x40 is clear
+# the node is "ready" and it runs the dispatch (sub_82CB7DA0), then - unless (a & 0xFFFF) is 0xFFFF (an
+# error / not-found sentinel) - writes -1 as the result. When bit 0x40 is set (or b->8 is null) it instead
+# increments the counter (c->0 += 1) and writes that back. This is the "test the node's ready flag, dispatch
+# if ready, else bump the pending counter" handler for the 0x82CAC flag-cluster, used by 2 callers
+# (sub_82CACCC0 / sub_82CB1438). Part of the 0x82CAC flag cluster. 62 lines, 1 callee (sub_82CB7DA0). 2
+# callers.
+[functions."0x82CACC58"]
+name = "CheckFlagAndIncrement_82CACC58"
+
+
+# Searches a tree down to the node matching a key, then updates it. It takes a tree root handle (a) and a
+# key (b). It descends from the tree's first node (a->4 -> 4), at each node comparing the node's key field
+# (node->12) against the requested key (b->0): a smaller key moves to the left child (node->0), a larger key
+# climbs to the parent / right side (node->8), and a node's flag byte (node->45) marks the terminal / matching
+# node. Once the matching node is located it updates it: clamping / adjusting the value (ClampAndUpdate_
+# 822F6380), validating the size and raising on overflow (ValidateSizeOrRaise_82371CD8), and releasing the old
+# buffer (Free_SizeBucketed_Thunk_8221BE68). This is the "find the tree node for this key and update its
+# value" operation for the 0x82371 tree cluster, called only by sub_8236DD48. Part of the 0x82371 tree cluster
+# (sibling of FindTreeLeaf_825CB448). 185 lines, 3 callees. 1 caller: sub_8236DD48.
+[functions."0x823714A0"]
+name = "FindTreeNode_823714A0"
+
+
+# Searches a chain for a node matching a key and returns that node's value. It takes a chain handle (a). It
+# reads the chain's first node (a->0) and the target key (a->4). It walks the chain (each node's ->0 is the
+# next node), comparing the node's key field against the target: when a node's key equals the target it
+# returns that node's value (node->16), otherwise it continues the walk. When the walk reaches the key's
+# sentinel (or the chain ends without a match) it returns 0. This is the "look up this key in the chain and
+# hand back its value" finder for the 0x82C46 chain cluster, used by 10 callers (the 0x82C02/0x82C0A/0x82C0C/
+# 0x82C13/0x82C29/0x82C2E/0x82C50/0x82C55 range). Part of the 0x82C46 chain cluster (sibling of FindChainRoot_
+# 82A596F0 / ChainSearch_82B3D880). 39 lines, 0 direct callees (pure chain walk). 10 callers.
+[functions."0x82C469F0"]
+name = "FindChainValue_82C469F0"
+
+
+# Looks up a key in a hash table and, when it is absent, sets a flag bit on the entry. It takes an entry (a),
+# a bit index (b), and a lookup key (c). It runs the lookup (HashTable_Find3_821CF1D0(a, b, c)); when the
+# entry's found-marker (a->4) is zero (the key was not present) it raises the indexed flag bit:
+# a->6 = a->6 | (1 << b). This is the "look this key up and mark it seen (set bit b)" routine for the 0x82BCD
+# flag-cluster, used by 5 callers (sub_82BCC108 / sub_82BCB6E0 / ProcessDispatchLoop_8229A518 /
+# StateDispatch2_82BCAA58 / DispatchValueProcess_821CF320). Part of the 0x82BCD cluster (sibling of
+# GrowCounterIfNeeded_82BCD9B8). 53 lines, 1 callee. 5 callers.
+[functions."0x82BCD5E0"]
+name = "FindAndSetFlagBit_82BCD5E0"
+
+
+# Searches a tree / list structure for a value's range, walking the nodes to locate the matching branch. It
+# takes an object (a: a pointer at a->4) and a value (b: a bound at b->0). It walks the structure (through
+# a->4 -> 4), reading each node's flag byte (node->33); when a node's bound (node->12) is at least the search
+# value (b->0) it descends (node->0), otherwise it follows the next pointer (node->8), continuing until it
+# finds the branch whose flag is set (or exhausts the chain). Once the branch is located it drives the
+# follow-up element work - reconstructing the element array (DestructElementArray_82376298) and processing the
+# found range (sub_82376358 / sub_823769E8). This is the "find this value's branch in the tree, then rebuild
+# its element range" search routine for the 0x82375 tree-search cluster, called only by
+# ProcessAndPushIfChanged_82375270. Part of the 0x82375 tree-search cluster (sibling of FindTreeLeaf_825CB448 /
+# FindTreeNode_823714A0). 155 lines, 3 callees. 1 caller: ProcessAndPushIfChanged_82375270.
+[functions."0x82375AB8"]
+name = "SearchTreeRange_82375AB8"
+
+
+# A processor that resolves a value, then searches a 28-byte element array for a matching entry. It takes an
+# index (a), an array object (b: a base at b->12, a length at b->28), and a context (c). It first drives the
+# per-value processing (sub_82BC9C50(a)). When the index (a + 1) is within the array length (b->28) it walks
+# the element array from a + 1 forward: each element is a 28-byte record (base + (index << 3) + 4), and it
+# scans for the first non-zero entry (element->0 != 0), advancing 8 bytes per probe up to the length bound.
+# This is the "process this index, then linearly scan its trailing 28-byte element array for a hit" routine
+# for the 0x822CD element-array cluster, used by 4 callers (sub_82188508 / sub_82BB9B60 / sub_82BDBDD8 /
+# sub_82BDBF78). Part of the 0x822CD element-array cluster (sibling of SearchTreeRange_82375AB8 /
+# ProcessAndPushIfChanged_82375270). 186 lines, 1 callee. 4 callers.
+[functions."0x822CDF48"]
+name = "SearchElementArray_822CDF48"
+
+
+# Searches a linked list of ranges for the range that contains a value, and frees the rest of the list. It
+# takes a container (a: a base at a->4, a range-chain head at a->12) and a value (b). It walks the chain of
+# range records (each record: a start at ->0, a length at ->8, a next at ->12): for each record it tests
+# whether b falls within the range (b >= start and b < start + length), advancing through the linked records
+# (->12) until one matches or the chain is exhausted. When a range matches it processes it (reading its
+# start/length); when no range contains b it walks the remaining records and frees them (VirtualFree_82CC0CF0).
+# This is the "find the range in this linked chain that contains b, and discard the rest" routine for the
+# 0x8322F range-list cluster, called only by FindNodeInList_83235FC0. Part of the 0x8322F range-list cluster
+# (sibling of FindNodeInList_83235FC0 / VirtualFree_82CC0CF0). 113 lines, 1 callee. 1 caller:
+# FindNodeInList_83235FC0.
+[functions."0x8322FDB0"]
+name = "FindRangeInList_8322FDB0"
+
+
+# Finds the index at which two null-terminated 16-bit arrays first diverge (or where the shorter one ends).
+# It takes two arrays (a, b), each a run of 16-bit halfwords ending in a zero. It walks both in lock-step,
+# reading the current 16-bit element of each: when the two elements match it advances to the next element of
+# the first array (a + 2) and keeps comparing; when they differ (or the first array is exhausted) it advances
+# the second array (b + 2). The inner loops bound each array's scan by its terminating zero. It finally returns
+# (position - a) / 2 - the number of matching 16-bit elements, i.e. the length of the common prefix. This is
+# the "compare these two 16-bit arrays and return how long their common prefix is" routine for the 0x82CAA
+# array cluster, used by 4 callers (the 0x82B3D/0x82B3E/0x82B40 range). Part of the 0x82CAA array cluster
+# (sibling of ProcessAndConstructObject_82CA6890 / sub_82CAAAxx family). 40 lines, 0 callees. 4 callers.
+[functions."0x82CAAA68"]
+name = "FindCommonPrefix16_82CAAA68"
+
+
+# A processor that validates its pointer arguments, then processes the node. It takes a context (a), an object
+# (b: a sub-object at b->4), and several pointers (c, d, f) that must match the object's fields. It validates
+# the arguments - trapping (ppc_trap 31) when c is null or does not match the object (b), and routing to an
+# error path when f does not match the sub-object's head (b->4->0). When the pointers are consistent it drives
+# the per-node processing - resetting the node (sub_82367A90 = DestructAndResetNode) and the supporting field
+# operations (sub_8246FFC8 / sub_8273F9D8). This is the "validate these pointers against this object, then run
+# the node processing" routine for the 0x823FB node cluster, used by 5 callers (the 0x8236F/0x823FB/0x82B5B/
+# 0x82C08/0x82C54 range). Part of the 0x823FB node cluster (sibling of DestructNodePayload_823FB150 /
+# DestructAndResetNode_82367A90). 137 lines, 3 callees. 5 callers.
+[functions."0x823FB338"]
+name = "ValidateAndProcessNode_823FB338"
+
+
+# A processor that finds the object's position in a circular linked list, removes it, and destructs the
+# payload. It takes a container (a: a list pointer at a->4). It walks the circular list (advancing through each
+# node's a->4 link) to locate the object's position, trapping (ppc_trap 31) when the search fails or the list
+# is malformed (a null node, or a node that does not match the expected object). When found, it unlinks the
+# node from the circular list (rewiring the predecessor's link to the successor) and destructs the node's
+# payload (sub_823FB150 = DestructNodePayload) with supporting handling (sub_8273F9D8). This is the "find this
+# object in the circular list, remove it, and free its payload" routine for the 0x8235E list cluster, used by 10
+# callers (the 0x82364/0x82365/0x82371/0x82A4A/0x82C67/0x82C83 range). Part of the 0x8235E list cluster (sibling
+# of DestructNodePayload_823FB150 / ConstructLinkedNode_823445B0). 107 lines, 2 callees. 10 callers.
+[functions."0x8235E680"]
+name = "FindAndRemoveFromList_8235E680"
+
+
+# A validator that checks whether a value is a valid, in-range integer-valued float, returning its byte count. It
+# takes a value descriptor (a: a payload at a->0, a type tag at a->4). It requires the type tag to be the float
+# marker (a->4 == 3). It then performs a float -> int -> float round-trip (fctiwz, sign-extend, fcfid, frsp) on the
+# payload (a->0) and requires the round-trip to be lossless (the converted value equals the original) - i.e. the
+# float holds an exact integer. It then checks the integer is in range (0 < value <= 1024) and counts the number of
+# bytes needed to represent it (shifting the value right in 24-bit chunks). This is the "validate this float is an
+# exact integer in the allowed range and compute its byte count" routine for the 0x82A2F validate cluster, called
+# only by sub_82A2FA28. Part of the 0x82A2F validate cluster (sibling of sub_82A2FA28). 90 lines, 0 callees. 1
+# caller: sub_82A2FA28.
+[functions."0x82A2F620"]
+name = "ValidateFloatValue_82A2F620"
+
+
+# A processor that resolves two indexed pointers and compares them. It takes a container (a), a value (b), and an
+# index (c). It resolves two pointers from the container (GetIndexedPointer_82BC5448(a, -1) and
+# GetIndexedPointer_82BC5448(a, c)). It then compares the two resolved pointers: when either matches the .data
+# sentinel (a .data base + 1876), or when their low fields (->4) differ, it takes the mismatch path. When the two
+# pointers agree it continues with the matching handling (driving DispatchTypeTag2_822D8298 for the per-type
+# processing). This is the "resolve these two indices and compare the resulting pointers" routine for the 0x82BC5
+# compare cluster, used by 2 callers (sub_82BB8F50 / sub_82BB9B60). Part of the 0x82BC5 compare cluster (sibling of
+# GetIndexedPointer_82BC5448 / DispatchTypeTag2_822D8298). 84 lines, 2 callees. 2 callers.
+[functions."0x82BC5940"]
+name = "CompareIndexedPointers_82BC5940"
+
+
+# A comparator that compares two strings in a signed, case-sensitive manner. It takes two string holders (a and b,
+# each with the string at ->0). It first compares the two string pointers: when they are identical it returns equal
+# (0). When the pointers differ it handles the null cases - when one string is null it is ordered before the other
+# (returning 1 or 0). When both are present it performs the signed comparison (StrCmp_Signed_8226D7A8(a->0, b->0))
+# and returns the sign (a negative, zero, or positive result from a leading-zero count). This is the "compare these
+# two strings, signed" routine for the 0x82C16 string-compare cluster, used by 6 callers (sub_82C17240 / sub_82C172D0
+# / sub_82C1A200 / sub_82C1A3D8 / sub_82C1AA30 / sub_82C1D380). Part of the 0x82C16 string-compare cluster (sibling
+# of StringCompare_82CA3358 / StrCmp_Signed_8226D7A8). 131 lines, 1 callee. 6 callers.
+[functions."0x82C16660"]
+name = "CompareStringsSigned_82C16660"
+
+
+# A comparator that compares two structures field-by-field, returning whether they match. It takes two structures (a
+# and b: each with a value at ->0, a float at ->4, and bytes at ->16 / ->17 / ->18 / ->19 / ->20 / ...). It compares the
+# float (a->4 vs b->4), the value (a->0 vs b->0), and the bytes (a->16 vs b->16, a->17 vs b->17, a->18 vs b->18, a->19
+# vs b->19, and the following bytes). When any field differs it takes the not-equal path (returning 0); when all
+# fields match it returns 1. This is the "compare these two structures field-by-field (float, value, and bytes),
+# returning whether they match" routine for the 0x82A12 compare cluster, used by 2 callers (OneTimeInitTree_83233B40
+# and sub_83233268). Part of the 0x82A12 compare cluster (sibling of Compare12ByteStructs_82C00EE0 / CompareStrings
+# Signed_82C16660). 98 lines, 0 callees. 2 callers.
+[functions."0x82A12C70"]
+name = "CompareStructFields_82A12C70"
+
+
+# A finder that searches for a UTF-16 substring within a UTF-16 string. It takes a haystack (a: a UTF-16 string, an
+# array of 16-bit code units) and a needle (b: a UTF-16 string, an array of 16-bit code units). When the needle (b) is
+# empty, it returns immediately. When the haystack (a) is empty, it returns with no match. Otherwise it performs a
+# naive substring search: the outer loop advances through the haystack (a) two bytes (one UTF-16 code unit) at a time,
+# and the inner loop compares the characters at a and at the corresponding position in the haystack (a + (a - b)),
+# advancing until either the characters mismatch or the end of the substring is reached. It returns the position of the
+# first match (or the end / no match). This is the "search for this UTF-16 substring within this UTF-16 string" routine
+# for the 0x82CA3 string cluster, used by 6 callers (sub_8238E1E8, sub_8238E4E8, sub_8238E7D8 and the 0x82B38B/0x82B391
+# range). Part of the 0x82CA3 string cluster (sibling of CountNonZeroBytes_82CA3BC0). 69 lines, 0 callees. 6 callers.
+[functions."0x82CA3BF0"]
+name = "FindUTF16Substring_82CA3BF0"
+
+
+# A finder that searches for a substring within a string (the byte / ASCII version). It takes a haystack (a: a string,
+# an array of bytes) and a needle (b: a string, an array of bytes). When the needle (b) is empty, it returns immediately.
+# When the haystack (a) is empty, it returns with no match. Otherwise it performs a naive substring search: the outer loop
+# advances through the haystack (a) one byte at a time, and the inner loop compares the characters at a and at the
+# corresponding position in the haystack (a + (a - b)), advancing until either the characters mismatch or the end of the
+# substring is reached. It returns the position of the first match (or the end / no match). This is the "search for this
+# substring within this string (the byte / ASCII version)" routine for the 0x821E6 string cluster, used by 10 callers (the
+# 0x8234F/0x82500/0x8250B/0x8270A/0x82A18/0x82B3A/0x82B47/0x82BC7/0x82D51/0x82F30 range). Part of the 0x821E6 string
+# cluster (the byte counterpart of FindUTF16Substring_82CA3BF0). 74 lines, 0 callees. 10 callers.
+[functions."0x821E6388"]
+name = "FindSubstring_821E6388"
+
+
+# A small search helper that finds the 16-bit value (b & 0xFFFF) in the sequence. It takes a pointer to a 16-bit sequence (a,
+# zero-terminated) and a value (b). It walks the 16-bit values (a->0, advancing by 2 bytes), comparing each against b & 0xFFFF.
+# When a value matches, or the sequence is exhausted (reaching the zero terminator), it returns 1 when the last value equals
+# b & 0xFFFF, and 0 otherwise. This is the "search for this 16-bit value (b & 0xFFFF) in the sequence" routine for the 0x82CA6
+# search cluster, used by 3 callers (sub_82B39150, sub_82BF1E58, and sub_82EE4770). Part of the 0x82CA6 search cluster
+# (sibling of CharProperty_Check8_82CA6BD0). 38 lines, 0 callees. 3 callers.
+[functions."0x82CA64D0"]
+name = "SearchFor16BitValue_82CA64D0"
+
+
+# A checker that, when the field is non-null, reads the value and returns a bit derived from the leading-zero count of the
+# value. It takes a structure (a: a field at a->8). When a->8 is zero, it returns 0. Otherwise it reads the value (LockedRead
+# Subobject_82B44360, on the stack pointer), counts the leading zeros of the value (cntlzw), extracts a bit from the leading
+# -zeros count, and returns the inverted bit. This is the "when this field is non-null, return a bit derived from the leading
+ # -zero count of the value" routine for the 0x82C63 check cluster, used by 9 callers (the 0x82415/0x824EA/0x824EB/0x825F3/
+# 0x825F4/0x829FC range). Part of the 0x82C63 check cluster (sibling of LockedReadSubobject_82B44360). 51 lines, 1 callee. 9
+# callers.
+[functions."0x82C63040"]
+name = "CheckAndExtractBit_82C63040"
+
+
+# A search that finds the position of a character in a byte sequence (a string). It takes a byte sequence (a: a string, with
+# bytes at a->0, a->1, ...) and a value (b, the character to search for). It reads the first byte (a->0) and checks the value
+# (b). When b is zero, it searches for the zero terminator (the end of the string). Otherwise it walks the bytes (advancing
+# the pointer until the byte equals b), returning the position of the character. This is the "find the position of this
+# character in this byte sequence (a string)" routine for the 0x82CA7 char-search cluster, used by 10 callers (the 0x82B40/
+# 0x82BDB/0x82BF3/0x82CAB/0x82CAF/0x82D51/0x82F00/0x82F14/0x8301D/0x831CA range). Part of the 0x82CA7 char-search cluster.
+# 59 lines, 0 callees. 10 callers.
+[functions."0x82CA70C0"]
+name = "SearchStringForChar_82CA70C0"
+
+
+# A search that finds the offset of a substring in a string. It takes a structure (a: a string pointer at a->0, with a value at
+# a->0->0). It reads the substring to search for (the .data pointer) and calls FindSubstring_821E6388, on the string (a->0) and
+# the substring. When the substring is found (the result is non-zero), it computes the offset (the position of the substring in
+# the string, as the difference between the found position and the string base). This is the "find this substring in this string
+# and return the offset" routine for the 0x821E6 substring-search cluster, used by 10 callers (the 0x821BD/0x8223C/0x82265/
+# 0x823F8/0x82414/0x82415/0x824E4/0x826E9/0x8285D/0x82C47 range). Part of the 0x821E6 substring-search cluster (sibling of
+# FindSubstring_821E6388). 76 lines, 1 callee. 10 callers.
+[functions."0x821E6308"]
+name = "SearchAndFindSubstringOffset_821E6308"
+
+
+# A checker that determines whether a byte sequence (a string) contains any non-whitespace characters. It takes a byte sequence
+# (a: a string, with bytes at a->0) and a value (b, the count). When b is zero or less, it returns 1. Otherwise it walks the
+# bytes (advancing the pointer) and checks each one against the whitespace values (space 32, newline 10, carriage return 13, and
+# tab 9). When a non-whitespace byte is found, it returns the result. This is the "check this byte sequence (a string) for any
+# non-whitespace characters" routine for the 0x82C87 non-whitespace check cluster, used by 1 caller (sub_82C87E98). Part of the
+# 0x82C87 non-whitespace check cluster. 61 lines, 0 callees. 1 caller.
+[functions."0x82C87D48"]
+name = "CheckForNonWhitespace_82C87D48"
+
+
+# A comparator that compares two UTF-16 strings (bounded). It takes two UTF-16 strings (a and b) and a maximum count (in 16-bit code
+# units). When the count is zero it returns 0. Otherwise it walks both strings in lockstep, up to the count, stopping at the first
+# mismatch or a null terminator in the first string. It then returns the difference of the two 16-bit code units at the stopping
+# position (0 when they match, negative/positive indicating which is smaller/larger). This is the "compare these two bounded UTF-16
+# strings" routine (a wcsncmp-style helper), a leaf function (no callees) used by the string formatter and other routines, part of the
+# 0x82CAA string cluster (sibling of CopyAndZeroPadUtf16_82CAAAC8 / AppendUtf16String_82CAAB28). 51 lines. 0 callees. 4 callers.
+[functions."0x82CAAB80"]
+name = "CompareUtf16String_82CAAB80"
+
+
+# A comparator that compares two byte strings, ignoring case. It takes two byte strings (a and b) and a maximum count. It walks both
+# strings in lockstep, up to the count, folding any uppercase A-Z byte to lowercase (by adding 32) before each comparison, and stops at
+# the first mismatch, a null byte, or when the count is exhausted. It returns the difference of the two bytes at the stopping position
+# (0 when they match, negative/positive indicating which is smaller/larger). This is the "compare these two strings ignoring case" routine
+# (a strncasecmp-style helper), a leaf function (no callees), part of the 0x82CAB string cluster. 63 lines. 0 callees. 1 caller
+# (sub_82CAB438).
+[functions."0x82CAB3D0"]
+name = "CompareIgnoreCase_82CAB3D0"
+
+
+# A validator that checks a run of elements is in sorted order. It takes a structure (a: a base at a->0 and a count at a->8). When the
+# count is 1 or less it returns 1 (trivially sorted). Otherwise it walks the elements (4 bytes each, starting at a->0+4) in order and
+# compares each element's key field (at +4, using the field at +8 as a tiebreaker) against the previous one. When an element compares
+# less than its predecessor it returns 0 (not sorted); when the run is fully non-decreasing it returns 1 (sorted). This is the "check
+# that these elements are in sorted order" routine, a leaf function (no callees), part of the 0x82C26 sort-check cluster. 58 lines. 0
+# callees. 1 caller (sub_82C27B20).
+[functions."0x82C26A88"]
+name = "ValidateSortedOrder_82C26A88"
+
+
+# A thunk that forwards to a threshold check. It takes a structure (a: a counter at a->0 and a threshold at a->4) and unconditionally
+# tail-calls IncrementAndCheckThreshold_8219EE00 with (a->0, a->4). This is the "check this threshold" thunk, called only via the vtable (0
+# direct callers), part of the 0x82BC6 threshold cluster. 11 lines. 1 callee (IncrementAndCheckThreshold). 0 direct callers (vtable
+# dispatch).
+[functions."0x82BC6120"]
+name = "CheckThreshold_Thunk_82BC6120"
+
+
+# A finder that searches a linked list for a value. It takes a structure (a: a head at a->8), a value to find (b), and a starting node (c).
+# When c is non-zero it starts at that node; otherwise it starts at a->8. It first checks the starting node's value field (at +0); when it
+# matches b it returns that node. Otherwise it walks the list (following the next pointer at +16, starting from the head's +20), checking
+# each node's value field against b. When a match is found it returns the matching node; when the list is exhausted it returns 0. This is the
+# "find this value in the linked list" routine, a leaf function (no callees), called only via the vtable (0 direct callers), part of the
+# 0x82BAC list cluster. 45 lines. 0 callees. 0 direct callers (vtable dispatch).
+[functions."0x82BACC90"]
+name = "FindInLinkedList_82BACC90"
+
+
+# A checker that verifies a value is within a range. It takes a structure (a: fields at a->0, a->4, a->20, and a->24) and a value. It reads the
+# flag at a->24; when the flag is less than 8 it uses the address a->4, otherwise it reads the value at a->4. It returns 0 when the value is less
+# than that address. Otherwise (when a->24 is at least 8) it reads a->0, computes (a->20 * 2) + a->0, and returns 1 when the result exceeds the
+# value, else 0. This is the "check whether this value is in range" routine, a leaf function (no callees), part of the 0x82BF0 range-check
+# cluster. 48 lines. 0 callees. 1 caller (sub_82BF1B00).
+[functions."0x82BF0C90"]
+name = "CheckValueInRange_82BF0C90"
+
+
+# A function that validates a value and stores a pointer. It takes a result pointer, a value (b), and a structure (c: fields at c->4, c->20, and
+# c->24). It first stores 0 into *result. When c or b is zero it asserts (trap 22). It reads the flag at c->24; when the flag is at least 16 it
+# reads c->4, otherwise it uses the address c->4. It asserts that this address is not greater than b. When the flag is at least 16 it reads the
+# value at c->4, adds c->20, and asserts that b does not exceed the sum. When all checks pass it stores c into *result. This is the "validate this
+# value and store the pointer" routine, a leaf function (no callees), part of the 0x8236F validate cluster. 61 lines. 0 callees. 3 callers.
+[functions."0x8236F008"]
+name = "ValidateAndStorePointer_8236F008"
+
+
+# A function that compares 8 bytes and returns a bit. It takes a pointer; when the pointer is zero it returns (with a zero result). It compares the
+# first 8 bytes at the pointer against a .data pattern, byte by byte. When it finds a mismatch it computes the number of leading zero bits in the
+# difference (cntlzw) and returns bit 5 of that count ((count >> 5) & 1). This is the "compare these 8 bytes and return a bit" routine, a leaf
+# function (no callees), part of the 0x82BF2 compare cluster. 41 lines. 0 callees. 3 callers.
+[functions."0x82BF2D60"]
+name = "CompareAndReturnBit_82BF2D60"
+
+
+# A thunk that checks success. It takes a structure (a: a handle at a->128). It reads a->128 (the handle) and checks success
+# (ProcessAndCheckSuccess_82CBBF60). This is the "check this handle's success" thunk, part of the 0x82B49 event cluster. 5 lines. 1 callee
+# (ProcessAndCheckSuccess). 9 callers.
+[functions."0x82B49B48"]
+name = "CheckSuccess_Thunk_82B49B48"
+
+
+# A processor that compares 12 bytes and returns a bit. It takes two pointers (a: a field at a->12, b: a field at b->12). It compares the first
+# 12 bytes of a and b, byte by byte. When it finds a mismatch it computes the number of leading zero bits in the difference (cntlzw) and
+# returns bit 5 of that count ((count >> 5) & 1). When all 12 bytes match it reads a->12 and b->12 and performs a further comparison. This is
+# the "compare these 12 bytes and return a bit" routine (second form), a leaf function (no callees), part of the 0x82C00 compare cluster. 62
+# lines. 0 callees. 1 caller (sub_82C033D8).
+[functions."0x82C00F38"]
+name = "CompareAndReturnBit2_82C00F38"
+
+
+# A checker that checks a value and returns a descriptor. It takes a value (a). When the value is 1 it returns a .data descriptor (a specific object pointer).
+# Otherwise it returns a different .data descriptor. This is the "check this value and return the appropriate descriptor" routine, a leaf function (no callees),
+# part of the 0x82C32 check cluster. 25 lines. 0 callees. 0 callers (unresolved — body is recovered but no callers found).
+[functions."0x82C320B0"]
+name = "CheckAndReturnDescriptor_82C320B0"
+
+
+# A checker that checks if an array is sorted. It takes a structure (a: an array at a->0 and a count at a->8). It reads a->8 (a count). When the count is greater than 1 it iterates
+# over adjacent pairs (from index 1 to count): for each pair it compares their +4 fields (primary key) and, when equal, their +12 fields (secondary key). It returns 1 when all
+# adjacent pairs are in non-decreasing order (the array is sorted), and 0 otherwise. This is the "check if this array is sorted" routine, part of the 0x82C2A check cluster. 58 lines.
+# 0 callees (leaf function). 1 caller (sub_82C2C958).
+[functions."0x82C2AD48"]
+name = "CheckIfSorted_82C2AD48"
+
+
+# A comparator that compares and returns a value. It takes a value (a), a structure (b: fields at b->0 and b->4), and a structure (c: fields at c->0 and c->4). It reads b->4 (a type tag) and c->4 (a type tag).
+# When the tags match it compares b->0 and c->0: when the tag is 3 it compares them as floats (b->0 < c->0 returns 1, else 0), and when the tag is 4 it compares them as integers. This is the "compare and
+# return this value" routine, part of the 0x822AB process cluster. 108 lines. 3 callees (sub_82A301A0, sub_82BC9708, and sub_82BCC1C0). 2 callers (ProcessAndDispatchElements_822DF280 and sub_82BDC730).
+[functions."0x822AB768"]
+name = "CompareAndReturnValue_822AB768"
+
+
+# A comparator that compares strings and returns a value. It takes a structure (a: fields at a->0 and a->4) and a structure (b: fields at b->0 and b->4). It reads a->4 (a length) and b->4 (a length).
+# When the lengths differ it returns 0. When the length is zero it returns 1. When the length is non-zero it compares the strings byte-by-byte (a->0 and b->0); when the second string is null it
+# compares against a .data pointer. This is the "compare these strings and return this value" routine, part of the 0x82BA8 process cluster. 65 lines. 0 callees (leaf function). 4 callers (sub_82BA8AC8,
+# sub_82BC48F8, sub_82BB3C70, and sub_82BC1018).
+[functions."0x82BA8B40"]
+name = "CompareStringsAndReturnValue_82BA8B40"
+
+
+# A comparator that compares and processes the data. It takes a structure (a: field at a->0). It reads a .data pointer's +23408 field (a pointer). When the pointer is zero it reads another .data
+# pointer (3224) and compares the strings byte-by-byte (a->0 and the pointer). It then computes the leading zeros of the comparison result. This is the "compare and process this data" routine, part
+# of the 0x82B3A process cluster. 127 lines. 5 callees (ConstructRefCounted, CopyAssign_RefCounted2, CopyAssign_RefCounted, DestructRefCounted, and StrCmp_Signed). 5 callers (sub_82B3C358,
+# sub_82B3AF28, sub_82B3C9D0, sub_82B3AEA0, and sub_82B4A230).
+[functions."0x82B3ACC0"]
+name = "CompareAndProcess_82B3ACC0"
+
+
+# A function that finds a value in a list. It takes a structure (a: fields at a->52 and a->56) and a value (b). It reads a->56 (a pointer) and a+52 (a pointer). It then iterates the list (from a+52), reading each element's +4 field (a pointer). When it
+# finds a matching element (where the element's +4 field equals a->56) it returns the element. When it reaches the end of the list (where the element is null) it traps (r0, 22). This is the "find a value in this list" routine, part of the 0x8236A
+# process cluster. 104 lines. 1 callee (FindListTail_82C705D8). 2 callers (sub_8233A8D8 and ProcessAndComputeAndProcess12_823754C8).
+[functions."0x8236A3B0"]
+name = "FindInList_8236A3B0"
+
+
+# A wrapper that checks and clears with an offset. It takes a value (a). It adds 4 to a and calls ProcessAndCheckAndClear (ProcessAndCheckAndClear_82BF2CB8, with a+4). This is the "check and clear with an offset" routine, part of the 0x82BEB process cluster. 9 lines. 1 callee (ProcessAndCheckAndClear). 0 callers
+# (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82BEB858"]
+name = "CheckAndClearWithOffset_82BEB858"
+
+
+# A checker that checks a bit and returns the result. It takes a structure (a: field at a->4). It reads a->4 (a value), counts the leading zeros, and extracts bit 27 (the result of the count shifted left by 27 and masked with 0x1). It returns the inverted result (0 if the bit is set, 1 if the bit is clear). This is the "check a bit and return the result" routine, part of the 0x825F1 process cluster. 14 lines. 0 callees (leaf function — performs raw memory operations and bit manipulation). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x825F13C8"]
+name = "CheckBitAndReturn_825F13C8"
+
+
+# A comparator that compares two strings (the first form). It takes a string (a), a string (b), a string (c), and a string (d). It compares the strings (a, b, c, and d) and returns a comparison result. This is the "compare these strings" routine (first form), part of the 0x82C1A compare cluster. 123 lines. 2 callees (CompareStringsSigned and Process2DRegion). 1 caller (sub_82C1B770).
+[functions."0x82C1A200"]
+name = "CompareAndCompareAndProcess_82C1A200"
+
+
+# A comparator that compares two strings. It takes a string (a: fields at a->0 and a->4) and a string (b: fields at b->0 and b->4). It compares the strings (a and b) and returns a comparison result. This is the "compare these strings" routine, part of the 0x8226D compare cluster. 51 lines. 1 callee (StrCmp_Signed). 12 callers (sub_829F94B8, sub_823B1350, sub_82291460, sub_8250E9F8, sub_8250D0D0, sub_8247A828, sub_822719D8, sub_825A2E78, sub_82420C80, sub_829F9000, sub_82606F78, and sub_829DF130).
+[functions."0x8226D750"]
+name = "CompareStringsSigned_8226D750"
+
+
+# A comparator that compares two strings. It takes a string (a: field at a->0) and a string (b: field at b->0). It compares the strings (a and b) and returns a comparison result. This is the "compare these strings" routine, part of the 0x82B3A compare cluster. 57 lines. 1 callee (CompareStringsSigned). 12 callers (sub_825A2AA0, sub_821A60C8, sub_8242D7B0, sub_82A576E8, sub_82B80D70, sub_82A51178, sub_82310D70, sub_825D0248, sub_82495A58, sub_8230DFF0, sub_822CD590, and sub_8283C618).
+[functions."0x82B3A158"]
+name = "CompareStringsSigned_82B3A158"
+
+
+# A comparator that compares the data. It takes a value (a), a value (b), and a value (c). It compares the data (a, b, and c) and returns a comparison result. This is the "compare this data" routine, part of the 0x82C8D compare cluster. 51 lines. 0 callees (no function calls). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82C8D5D8"]
+name = "CompareAndProcess_82C8D5D8"
+
+
+# Find a string in a linked list of string entries. Walks the list (each node: [0]=next, [8]=string pointer) from the start up to an end sentinel, comparing each node's string against a target string (pointer identity first, then content via CompareStringsSigned). On a match it writes the matched node to the output slot and stops; otherwise it advances to the next node. Returns whether a match was found. Used to look up a path in the VFS file index and in other string tables. 106 lines. 1 callee (CompareStringsSigned_8226D750). 5 callers (sub_823A5870, ProcessAndProcessAndProcess232, sub_825B26A8, sub_825B27D0, and sub_825B2E20).
+[functions."0x82358830"]
+name = "FindStringInList_82358830"
+
+
+# The functions Under here happen when the trailer is playing when idle on main menu
+# Check completion or progress by computing a percentage threshold and comparing values (a comparison routine). It takes a structure (a: fields at a->-228, a->-184, a->-188, and a->248) and a value (b); if the flag (a->-228) is zero it computes a progress percentage as 100*(a->-184+1)/(a->-188+1), and — if under 50% — returns the percentage minus one; otherwise it compares a->248 to b and returns the difference or zero. This is a progress/completion checker. 50 lines. 0 callees. 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x832B3C30"]
+name = "CheckCompletionOrProgress_832B3C30"
+
+
+# Check a mutex-protected flag by locking the mutex and extracting a bit value (a flag-check routine). It takes a structure (a: fields at a->260 and a->264); if the pointer (a->260) is valid and the flag (a->264) is nonzero, it locks the mutex (MutexLock_WaitInfinite) and returns a specific bit from the flag; otherwise it returns 1. This is a "check a mutex-protected flag" routine. 53 lines. 1 callee (MutexLock_WaitInfinite). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x832B3CF8"]
+name = "CheckMutexFlag_832B3CF8"
+
+
+# Check a specific bit in a flag byte, returning 0 or 1 (a flag-bit-check routine). It takes a structure (a: field at a->44); it checks a specific bit in the flag byte (a->44) and returns 0 or 1. This is a "check flag bit" routine. 12 lines. 0 callees. 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+[functions."0x82185418"]
+name = "CheckFlagBit_82185418"
+
+
+# Check a float against a threshold, returning a bit (a float-threshold check routine). It takes a structure (a: fields at a->368 and a->444), a value (b), and a float (f1); it checks the structure's fields, and — when valid — compares a float against a threshold and returns a bit value based on the comparison. This is a "check float threshold" routine. 79 lines. 0 callees. 7 callers (many from the 0x82A0* and 0x821C* clusters).
+[functions."0x83226218"]
+name = "CheckFloatThreshold_83226218"
+
+
+# Check a float-to-integer conversion, returning a status code (a float conversion check routine). It takes a float (f1); it attempts to convert the float to an integer, checking for precision loss and overflow, and returns a status code (0, 1, or 2) based on the result. This is a "check float to int conversion" routine. 65 lines. 0 callees. 2 callers (ProcessAndProcessAndProcess504 and sub_82CA40C0).
+[functions."0x821FE308"]
+name = "CheckFloatToIntConversion_821FE308"
+
+
+# Check a timeout condition by comparing the current time against stored timestamps (a timeout check routine). It takes a structure (a: fields at a->24, a->28, and a->32); it checks the structure's state, and — when valid — compares the current time (via GetCurrentTimeMillis) against stored timestamps to determine if a timeout has occurred. This is a "check timeout condition" routine. 100 lines. 1 callee (GetCurrentTimeMillis). 1 caller (sub_82C08310).
+[functions."0x82C08010"]
+name = "CheckTimeoutCondition_82C08010"
+
+
+# Check a float's properties (NaN, infinity, precision, sign) and return status codes (a float properties check routine). It takes a float (f1); it checks the float's properties (NaN, infinity, precision, and sign), and returns status codes based on the results. This is a "check float properties" routine. 149 lines. 0 callees. 4 callers (sub_82CA8E88, sub_82CADC18, ProcessAndProcessAndProcess504, and sub_8227A818).
+[functions."0x821FE890"]
+name = "CheckFloatProperties_821FE890"
+
+
+# Check if a structure has a valid pointer and return it (a valid pointer check routine). It takes a structure (a: field at a->4); it checks the structure's pointer, and returns it if valid. This is a "check valid pointer" routine. 50 lines. 1 callee. 12 callers (many from the 0x824*, 0x826*, 0x827*, 0x828*, and 0x829* clusters).
+[functions."0x825575C8"]
+name = "CheckValidPointer_825575C8"
+
+
+# Find an entry in a tree by traversing its nodes (a tree lookup routine). It takes a value (a), a value (b), and a pointer (c); it traverses the tree, comparing values at each node to find a match. This is a "find in tree" routine. 91 lines. 0 callees. 6 callers (many from the 0x82A5* cluster, and sub_821ABC00).
+[functions."0x82A51FE8"]
+name = "FindInTree_82A51FE8"
+
+
+# Check a float's sign by examining its bit pattern (a float sign checker). It takes a value (a) and a float (b); it examines the float's bit pattern, and returns a result based on the sign. This is a "check float sign" routine. 21 lines. 0 callees. 12 callers (many from the 0x822*, 0x830*, and 0x831* clusters).
+[functions."0x82200D48"]
+name = "CheckFloatSign_82200D48"

@@ -19,7 +19,13 @@
 #include "fable2_text_append.h"
 #include "fable2_boot_save.h"  // needs the fable2::textappend helpers above
 #include "fable2_state_probe.h"
+#include "fable2_attack_probe.h"  // input-press function-diff probe (finds the
+                                  // guest functions of an action start, e.g.
+                                  // the melee attack)
+#include "fable2_menu_probe.h"  // main-menu input path (mod-menu hook points)
+#include "fable2_modmenu.h"  // 6th "MOD OPTION" selectable main-menu item
 #include "fable2_av_probe.h"  // self-installs a guest-PC AV logger (VEH)
+#include "fable2_stall_dump.h"  // self-installs a render-stall thread dumper
 // #include "fable2_ui_render_probe.h"
 #include "keyboard_gamepad.h"
 
@@ -37,9 +43,11 @@ REXCVAR_DEFINE_STRING(
     keyboard_gamepad_map,
     "",
     "Input",
-    "Map host keyboard keys to guest gamepad input "
-    "(Key:Button,...; targets: A/B/X/Y, LB/RB, LT/RT, Up/Down/Left/Right, "
-    "Pause, Select, L3/R3, StickUp/StickDown/StickLeft/StickRight). "
+    "Map host keyboard keys / mouse buttons to guest gamepad input "
+    "(Key:Button,...; key names: keyboard keys plus LMB/RMB/MMB and "
+    "XMB1/XMB2 mouse buttons; targets: A/B/X/Y, LB/RB, LT/RT, "
+    "Up/Down/Left/Right, Pause, Select, L3/R3, StickUp/StickDown/"
+    "StickLeft/StickRight). "
     "Default comes from fable2_config.toml [input] keyboard_gamepad_map.");
 
 // Mouse -> right stick (camera look). See src/input/keyboard_gamepad.h.
@@ -68,5 +76,28 @@ REXCVAR_DEFINE_STRING(
     "Key that toggles the debug menu; while the menu is open the mouse lock is "
     "released (free cursor) and re-engaged when it closes. Empty = always lock "
     "while focused. This key is excluded from the gamepad map.");
+
+// Skip the default.xex SHA-256 integrity check at startup (see
+// Fable2App::OnLoadXexImage). When set, the XEX hash is still computed and
+// written to the log, but a mismatch (or an unreadable file) no longer blocks
+// the launch. Useful for running a modified or non-catalogue default.xex.
+REXCVAR_DEFINE_BOOL(skipHash, false, "Launch",
+                    "Skip the default.xex SHA-256 integrity check. The hash is "
+                    "still logged, but a mismatch no longer blocks the launch "
+                    "(useful for a modified or non-catalogue XEX). Pass "
+                    "--skipHash on the command line.");
+
+#ifdef _WIN32
+// Hybrid-graphics laptops (Intel/AMD iGPU + NVIDIA/AMD dGPU): ask the drivers
+// to run us on the discrete GPU. Without this Windows may hand the game the
+// integrated GPU, which hits D3D12 DEVICE_HUNG (TDR) shortly after boot
+// (issue #42). These must be exported from the .exe itself; a user's own
+// per-app setting in Windows Graphics settings / NVIDIA Control Panel still
+// takes priority.
+extern "C" {
+__declspec(dllexport) unsigned long NvOptimusEnablement = 0x00000001;
+__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
+}
+#endif
 
 REX_DEFINE_APP(fable_2, Fable2App::Create)

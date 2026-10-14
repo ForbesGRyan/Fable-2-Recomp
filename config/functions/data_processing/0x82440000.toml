@@ -1,0 +1,245 @@
+# data-processing region 0x82440000 functions.
+#
+# Split from fable_2_manifest.toml. Included file: root-level [functions."0xADDR"] tables
+# (the codegen loader applies this file's root table). See config/functions/SORT_TODO.md.
+
+
+# A process (a process, with a check and a string operation, the sibling of ProcessString_826C3EF0 / ProcessConstruct
+# String_82BFD780, the caller of SetString_822F2020 / Allocate_OrDbgBreak_8221F388 / CopyAssign_RefCounted_821F0108):
+# do a process (a process, a particular process, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a check) check a value (a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a->8, a
+# particular value, a
+# particular state / a
+# particular result), and (if a value (a->8, a value, a
+# particular value, a
+# particular size / a
+# particular allocation) is >= a constant (r9, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular value) do a string operation (a
+# string operation, a particular string operation, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, calling SetString_822F2020, on a
+# value (stack[80], a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a constant, a
+# particular value), a particular string operation, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (otherwise) take one path (a no-op / a return, a
+# particular state, a
+# particular result, a particular size / a
+# particular allocation).
+
+# Args: obj (r3, r24, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular object), a (r4, r29, ->8 = a field, a value, a particular value, a particular size / a
+# particular allocation, a
+# particular object), b (r5, r26, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), c (r6, r31, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), d (r7, r28, a value, a
+# particular value, a
+# particular size / a
+# particular allocation), (more). It does a process (a
+# process, a
+# particular process, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result). In the check, it checks a value (a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, a->8, a
+# particular value, a
+# particular state / a
+# particular result). If it is >= a constant (a->8, a
+# value, a
+# particular value, a
+# particular size / a
+# particular allocation, r9, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular state), it does a string operation (a
+# string operation, a
+# particular string operation, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, calling SetString_822F2020, sub_822F2020, a string operation, on a
+# value (stack[80], a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a constant, a
+# particular value), a particular string operation, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result); if it is < a constant (a particular value, a
+# particular state, a
+# particular size / a
+# particular allocation), it takes one path (a no-op / a return, a
+# particular state, a
+# particular result, a particular size / a
+# particular allocation). So it's a "process (a
+# process, with a
+# check and a
+# string operation: do a process (a process, a
+# particular process, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a check) check a value (a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a->8, a
+# particular value, a
+# particular state / a
+# particular result), and (if a value (a->8, a value, a
+# particular value, a
+# particular size / a
+# particular allocation) is >= a constant (r9, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular value) do a string operation (a
+# string operation, a particular string operation, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, calling SetString_822F2020, on a
+# value (stack[80], a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a constant, a
+# particular value), a particular string operation, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (otherwise) take one path (a no-op / a return, a
+# particular state, a
+# particular result, a particular size / a
+# particular allocation))" routine (a process routine, part of the 0x8246C cluster, a sibling of
+# ProcessString_826C3EF0 and ProcessConstructString_82BFD780, a caller of SetString_822F2020, Allocate_OrDbgBreak_8221F388,
+# and CopyAssign_RefCounted_821F0108). 343 lines, 9
+# callees (Allocate_OrDbgBreak_8221F388, CopyAssign_RefCounted_821F0108, SetString_822F2020, sub_82171810, sub_822F1F00,
+# sub_82301AE0, sub_8234D268, sub_826C3EF0, sub_826C3FA8). 1 caller: LookupString2_8246C010 (a
+# process, which calls this to do the process, a
+# particular size / a
+# particular allocation, a
+# particular operation). The object's class (obj, r24, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular object, a
+# particular value /
+# a particular state) and the value's meaning (a, r29, ->8 = a field, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a
+# particular object, b, r26, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, c, r31, a value, a
+# particular value, a
+# particular size / a
+# particular allocation, d, r28, a value, a
+# particular value, a
+# particular size / a
+# particular allocation) aren't resolvable, so the name states the mechanism: a process (with a
+# check and a
+# string operation) (do a process (a process, a
+# particular process, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (in a check) check a value (a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a->8, a
+# particular value, a
+# particular state / a
+# particular result), and (if a value (a->8, a value, a
+# particular value, a
+# particular size / a
+# particular allocation) is >= a constant (r9, a
+# particular value, a
+# particular size / a
+# particular allocation), a particular value) do a string operation (a
+# string operation, a
+# particular string operation, a particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result, calling SetString_822F2020, on a
+# value (stack[80], a value, a
+# particular value, a
+# particular size / a
+# particular allocation, a constant, a
+# particular value), a particular string operation, a
+# particular size / a
+# particular allocation, a
+# particular operation, a
+# particular state / a
+# particular result), and (otherwise) take one path (a no-op / a return, a
+# particular state, a
+# particular result, a particular size / a
+# particular allocation)). The "8246CF80" refers to the address (a
+# particular address, a
+# particular size / a
+# particular allocation).
+[functions."0x8246CF80"]
+name = "ProcessString_8246CF80"
+
+
+# Appends a 16-byte element to the end of a bounded element buffer, growing the buffer if there is no room.
+# It reads the buffer geometry (obj->4 = base, obj->8 = end, obj->12 = capacity) and computes the used and
+# free element counts in 16-byte units. When the end is past the capacity it falls through to the growth
+# path (InsertElement16_82A8BFE8), otherwise it does an in-place 128-bit vector copy (lvx/stvx) of the
+# incoming element (src) to obj->8 and advances the end by 16. This is the "push one 16-byte element onto
+# the buffer" primitive for the 0x82442 element-buffer cluster, used by 10 callers (the 0x82442/0x82683/
+# 0x827D3/0x82884/0x82966/0x8299E/0x83228/0x83236/0x8323F range). Part of the 0x82442 element-buffer
+# cluster (sibling of InsertElement16_82A8BFE8).
+# 90 lines, 1 callee (InsertElement16_82A8BFE8). 10 callers (the 0x82442/0x82683/0x827D3/0x82884/0x82966/
+# 0x8299E/0x83228/0x83236/0x8323F cluster).
+[functions."0x82442B68"]
+name = "AppendElement16_82442B68"
+
+
+# A processor that frees and processes the data (fifth form). It takes a structure (a: field at a->4), a value (b), a value (c), and a value (d). It reads a->4 (a pointer) and the pointer's +0 field. When b is zero or b equals a it traps (ppc_trap 22). It then frees and processes the data (sub_8246FFC8, with other values). This is the "free and process this data" routine (fifth form), part of the 0x8246E process cluster. 155 lines. 3 callees (DestructorTree2, sub_8246FFC8, and sub_8273F9D8). 11 callers (sub_824ED700, sub_83229940, sub_8257C780, sub_8236DFC0, sub_828A1890, sub_829CCCD8, sub_8281A568, sub_8246C798, sub_8322C450, sub_829FBC40, and sub_825F1D78).
+[functions."0x8246E8B0"]
+name = "ProcessAndFreeAndProcess5_8246E8B0"
+
+
+# A processor that splices and processes the data (fourth form). It takes a value (a), a value (b), a value (c), and a structure (d: field at d->21). It sets a string (SetString_822F2020, with a). It then splices and processes the data (List_SpliceNode4_82C239D0, with other values). This is the "splice and process this data" routine (fourth form), part of the 0x8246F process cluster. 583 lines. 9 callees (Free_SizeBucketed_Thunk, List_SpliceNode4, ProcessAndUpdateLinkedList, SetString, sub_82171810, sub_822F1F00, sub_826C3EF0, sub_826C3FA8, and sub_8273F9D8). 7 callers (ValidateAndProcessNode, sub_83229DC0, sub_82C540B8, sub_8246E8B0, sub_828C9360, sub_82C089C8, and sub_82B4E240).
+[functions."0x8246FFC8"]
+name = "ProcessAndSpliceAndProcess4_8246FFC8"
+
+
+# A processor that processes the data (two hundred and seventy-third form). It takes a structure (a: fields at a->4 and a->8). It processes the data (a). This is the "process this data" routine (two hundred and seventy-third form), part of the 0x8246C process cluster. 61 lines. 2 callees (Free_SizeBucketed_Thunk and sub_8246E8B0). 12 callers (sub_82B3D578, sub_8227CC80, sub_822A2840, sub_82509DB0, sub_82466738, ProcessAndProcessAndProcess246, sub_823FA870, sub_8322C840, sub_82350BA0, sub_8233DB90, sub_823F9C10, and sub_824A1F08).
+[functions."0x8246C798"]
+name = "ProcessAndProcessAndProcess273_8246C798"
+
+
+# Process a large structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and five hundred and sixty-fourth form). It takes a structure and drives a sub-operation (sub_824618B0). This is a frequently-called helper in the 0x82461 process cluster. 103 lines. 1 callee. 14 callers.
+[functions."0x82461638"]
+name = "ProcessAndProcessAndProcess2264_82461638"

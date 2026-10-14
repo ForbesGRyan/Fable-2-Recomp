@@ -54,14 +54,21 @@
         <TextBlock Text="RECOMP LAUNCHER" FontSize="13" FontWeight="SemiBold"
                    Foreground="#FFC69A46" Margin="2,3,0,0" />
       </StackPanel>
-      <Border Grid.Column="1" Background="#332A3D36" BorderBrush="#556B887B"
-              BorderThickness="1" CornerRadius="18" Padding="13,7" VerticalAlignment="Center">
-        <TextBlock x:Name="ConfigStateText" Text="Configuration ready" FontSize="12"
-                   Foreground="#FFB9D6C7" />
-      </Border>
+      <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+        <Border Background="#332A3D36" BorderBrush="#556B887B"
+                BorderThickness="1" CornerRadius="18" Padding="13,7">
+          <TextBlock x:Name="ConfigStateText" Text="Configuration ready" FontSize="12"
+                     Foreground="#FFB9D6C7" />
+        </Border>
+        <Button x:Name="AdvancedOptionsButton" Content="Advanced Options"
+                Click="AdvancedOptionsClicked" Style="{StaticResource SecondaryButton}"
+                Margin="14,0,0,0" />
+      </StackPanel>
     </Grid>
 
-    <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+    <Grid Grid.Row="1">
+      <!-- Main page content -->
+      <ScrollViewer x:Name="MainContent" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
       <Grid Margin="34,0,34,22">
         <Grid.ColumnDefinitions>
           <ColumnDefinition Width="3*" />
@@ -191,8 +198,17 @@
                 <TextBlock x:Name="GamePathText" Text="Not selected" FontSize="12"
                            Foreground="#FFD0D8D2" TextWrapping="Wrap" />
               </Border>
+              <!-- Hidden (the launcher defaults to its own folder and the user
+                   can still edit the saved path in launcher-game-path.txt).
+                   The BrowseClicked code is kept in case it is re-enabled. -->
               <Button Content="Choose game folder…" Click="BrowseClicked"
+                      Style="{StaticResource SecondaryButton}" Margin="0,12,0,0"
+                      Visibility="Collapsed" />
+              <Button x:Name="ExtractButton" Content="Extract from ISO" Click="ExtractClicked"
                       Style="{StaticResource SecondaryButton}" Margin="0,12,0,0" />
+              <TextBlock x:Name="ExtractionStatusText" FontSize="12"
+                         Foreground="{StaticResource MutedTextBrush}" Margin="0,10,0,0"
+                         TextWrapping="Wrap" Visibility="Collapsed" />
             </StackPanel>
           </Border>
 
@@ -210,22 +226,210 @@
           </Border>
         </StackPanel>
       </Grid>
-    </ScrollViewer>
+      </ScrollViewer>
+
+      <!-- Advanced page content (hidden by default) -->
+      <ScrollViewer x:Name="AdvancedContent" Visibility="Collapsed"
+                    VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+        <Grid Margin="34,0,34,22">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="3*" />
+            <ColumnDefinition Width="18" />
+            <ColumnDefinition Width="2*" />
+          </Grid.ColumnDefinitions>
+
+          <!-- Keybinds -->
+          <StackPanel Grid.Column="0">
+            <Border Style="{StaticResource Panel}">
+              <StackPanel>
+                <TextBlock Text="Keybinds" Style="{StaticResource SectionTitle}" />
+                <TextBlock Text="HOST KEY  →  GUEST INPUT" Style="{StaticResource FieldLabel}" />
+                <StackPanel x:Name="KeybindList" />
+                <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                  <Button Content="+ Add binding" Click="AddKeybindClicked"
+                          Style="{StaticResource SecondaryButton}" MinWidth="120" />
+                  <Button Content="Reset to defaults" Click="ResetKeybindsClicked"
+                          Style="{StaticResource SecondaryButton}" MinWidth="150" Margin="8,0,0,0" />
+                </StackPanel>
+                <TextBlock Text="Click a host-key box, then press the key or mouse button you want to bind (Esc cancels). Changes are saved to fable2_config.toml and take effect the next time the game is launched."
+                           FontSize="12" Foreground="{StaticResource MutedTextBrush}" Margin="0,12,0,0"
+                           TextWrapping="Wrap" />
+              </StackPanel>
+            </Border>
+
+            <Border Style="{StaticResource Panel}" Margin="0,18,0,0">
+              <StackPanel>
+                <TextBlock Text="Mouse" Style="{StaticResource SectionTitle}" />
+                <TextBlock Text="Mouse look (camera)" FontWeight="SemiBold" />
+                <TextBlock Text="Map mouse movement to the guest right stick. Disable to keep the cursor free."
+                           FontSize="12" Foreground="{StaticResource MutedTextBrush}" Margin="0,3,0,0"
+                           TextWrapping="Wrap" />
+                <CheckBox x:Name="MouseLookCheck" IsChecked="True" Margin="0,10,0,0"
+                          Foreground="{StaticResource TextBrush}" />
+                <Grid Margin="0,16,0,0">
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="16" />
+                    <ColumnDefinition Width="Auto" />
+                  </Grid.ColumnDefinitions>
+                  <StackPanel>
+                    <TextBlock Text="MOUSE SENSITIVITY" Style="{StaticResource FieldLabel}" />
+                    <Slider x:Name="MouseSensitivitySlider" Minimum="1" Maximum="4096" Value="256"
+                            SmallChange="1" LargeChange="64"
+                            ValueChanged="MouseSensitivitySliderChanged" />
+                  </StackPanel>
+                  <TextBox x:Name="MouseSensitivityBox" Grid.Column="2" Width="64" Text="256"
+                           TextAlignment="Center" VerticalContentAlignment="Center"
+                           LostFocus="MouseSensitivityBoxLostFocus" />
+                </Grid>
+              </StackPanel>
+            </Border>
+          </StackPanel>
+
+          <!-- Patches -->
+          <StackPanel Grid.Column="2">
+            <Border Style="{StaticResource Panel}">
+              <StackPanel>
+                <TextBlock Text="Patches" Style="{StaticResource SectionTitle}" />
+                <TextBlock Text="Recomp-level (mid-asm hook) patches. They take effect the next time the game is launched."
+                           FontSize="12" Foreground="{StaticResource MutedTextBrush}" Margin="0,0,0,14"
+                           TextWrapping="Wrap" />
+                <StackPanel x:Name="PatchList" />
+              </StackPanel>
+            </Border>
+
+            <Border Style="{StaticResource Panel}" Margin="0,18,0,0">
+              <StackPanel>
+                <TextBlock Text="Performance" Style="{StaticResource SectionTitle}" />
+                <TextBlock Text="Hot-function yield batching. 1 = original (yield every call); larger = fewer context switches; 0 = never yield."
+                           FontSize="12" Foreground="{StaticResource MutedTextBrush}" Margin="0,0,0,10"
+                           TextWrapping="Wrap" />
+                <Grid>
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="16" />
+                    <ColumnDefinition Width="Auto" />
+                  </Grid.ColumnDefinitions>
+                  <StackPanel>
+                    <TextBlock Text="HOTFUNC YIELD EVERY" Style="{StaticResource FieldLabel}" />
+                    <Slider x:Name="HotFuncYieldSlider" Minimum="0" Maximum="16" Value="1"
+                            SmallChange="1" LargeChange="1" IsSnapToTickEnabled="True" TickFrequency="1"
+                            ValueChanged="HotFuncYieldSliderChanged" />
+                  </StackPanel>
+                  <TextBox x:Name="HotFuncYieldBox" Grid.Column="2" Width="56" Text="1"
+                           TextAlignment="Center" VerticalContentAlignment="Center"
+                           LostFocus="HotFuncYieldBoxLostFocus" />
+                </Grid>
+              </StackPanel>
+            </Border>
+          </StackPanel>
+        </Grid>
+      </ScrollViewer>
+    </Grid>
 
     <Border Grid.Row="2" Background="#E60A1012" BorderBrush="#33FFFFFF" BorderThickness="0,1,0,0">
       <Grid Margin="34,18">
-        <Grid.ColumnDefinitions>
-          <ColumnDefinition Width="*" />
-          <ColumnDefinition Width="Auto" />
-          <ColumnDefinition Width="12" />
-          <ColumnDefinition Width="Auto" />
-        </Grid.ColumnDefinitions>
-        <TextBlock x:Name="StatusText" Text="Select the original game folder containing default.xex and data."
-                   Foreground="{StaticResource MutedTextBrush}" VerticalAlignment="Center" TextWrapping="Wrap" />
-        <Button Grid.Column="1" Content="Save settings" Click="SaveClicked"
-                Style="{StaticResource SecondaryButton}" MinWidth="125" />
-        <Button Grid.Column="3" x:Name="LaunchButton" Content="Play Fable II" Click="LaunchClicked"
-                Style="{StaticResource PrimaryButton}" MinWidth="175" />
+        <Grid x:Name="MainFooter">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*" />
+            <ColumnDefinition Width="Auto" />
+            <ColumnDefinition Width="12" />
+            <ColumnDefinition Width="Auto" />
+          </Grid.ColumnDefinitions>
+          <TextBlock x:Name="StatusText" Text="Select the original game folder containing default.xex and data."
+                     Foreground="{StaticResource MutedTextBrush}" VerticalAlignment="Center" TextWrapping="Wrap" />
+          <Button Grid.Column="1" Content="Save settings" Click="SaveClicked"
+                  Style="{StaticResource SecondaryButton}" MinWidth="125" />
+          <Button Grid.Column="3" x:Name="LaunchButton" Content="Play Fable II" Click="LaunchClicked"
+                  Style="{StaticResource PrimaryButton}" MinWidth="175" />
+        </Grid>
+        <Grid x:Name="AdvancedFooter" Visibility="Collapsed">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*" />
+            <ColumnDefinition Width="Auto" />
+            <ColumnDefinition Width="12" />
+            <ColumnDefinition Width="Auto" />
+          </Grid.ColumnDefinitions>
+          <TextBlock x:Name="AdvancedStatusText" Text=""
+                     Foreground="{StaticResource MutedTextBrush}" VerticalAlignment="Center" TextWrapping="Wrap" />
+          <Button Grid.Column="1" Content="Save advanced settings" Click="SaveAdvancedClicked"
+                  Style="{StaticResource SecondaryButton}" MinWidth="175" />
+          <Button Grid.Column="3" Content="Back to launcher" Click="BackClicked"
+                  Style="{StaticResource PrimaryButton}" MinWidth="155" />
+        </Grid>
+      </Grid>
+    </Border>
+
+    <!-- Fullscreen extraction progress overlay: a centered progress bar, the file
+         being written, and a checklist where every top-level folder/file becomes a
+         progress checkbox. Shown during extraction, dismissed when it finishes. -->
+    <Border x:Name="ExtractionOverlay" Grid.Row="0" Grid.RowSpan="3" Background="#F5070C0E"
+            Visibility="Collapsed">
+      <Grid Margin="44,36">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="*" />
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0" HorizontalAlignment="Center">
+          <TextBlock Text="Extracting from ISO" FontFamily="Georgia" FontSize="30" FontWeight="Bold"
+                     Foreground="#FFFFD888" HorizontalAlignment="Center" />
+          <TextBlock x:Name="ExtractionPhaseText" Text="Starting…" FontSize="14"
+                     Foreground="#FFC69A46" Margin="0,8,0,0" HorizontalAlignment="Center" />
+        </StackPanel>
+
+        <Button Grid.Row="0" x:Name="StopButton" Content="Stop" Click="StopClicked"
+                Style="{StaticResource SecondaryButton}" HorizontalAlignment="Right"
+                VerticalAlignment="Top" MinWidth="110" Foreground="#FFD98B8B" />
+
+        <StackPanel Grid.Row="1" VerticalAlignment="Center" HorizontalAlignment="Center"
+                    Width="520" MaxWidth="680">
+          <ProgressBar x:Name="ExtractionProgressBar" Height="16" Minimum="0" Maximum="100"
+                       Foreground="#FF3FBF7F" Background="#1FFFFFFF" BorderBrush="#44FFFFFF"
+                       BorderThickness="1" />
+          <Grid Margin="0,10,0,0">
+            <TextBlock x:Name="ExtractionPercentText" Text="0%" FontSize="22" FontWeight="SemiBold"
+                       Foreground="#FFB9D6C7" HorizontalAlignment="Left" />
+            <TextBlock x:Name="ExtractionBytesText" Text="0 / 0 MB" FontSize="13"
+                       Foreground="{StaticResource MutedTextBrush}" HorizontalAlignment="Right"
+                       VerticalAlignment="Bottom" />
+          </Grid>
+
+          <!-- Shown when the extracted default.xex is not a supported version:
+               offers to continue the extraction (keeping the XEX) or cancel. -->
+          <Border x:Name="HashPrompt" Margin="0,24,0,0" Background="#40241212"
+                  BorderBrush="#FF9E4A4A" BorderThickness="1" CornerRadius="10"
+                  Padding="18,14" Visibility="Collapsed">
+            <StackPanel>
+              <TextBlock x:Name="HashPromptText" FontSize="14" Foreground="#FFE8C9A8"
+                         TextWrapping="Wrap" HorizontalAlignment="Center" />
+              <!-- Large, easy-to-reach way to back out (besides the small Stop
+                   button in the top corner). -->
+              <Button x:Name="CancelButton" Content="Cancel" Click="CancelClicked"
+                      Style="{StaticResource SecondaryButton}" Margin="0,16,0,0"
+                      MinWidth="260" HorizontalAlignment="Center" Padding="24,15"
+                      FontSize="17" />
+              <Button x:Name="ExtractAnywaysButton" Content="Extract Anyways"
+                      Click="ExtractAnywaysClicked" Style="{StaticResource SecondaryButton}"
+                      Margin="0,10,0,0" MinWidth="150" HorizontalAlignment="Center"
+                      Foreground="#FFE06666" Background="#553A1414" BorderBrush="#FF9E4A4A"
+                      Padding="16,8" />
+            </StackPanel>
+          </Border>
+        </StackPanel>
+
+        <TextBlock x:Name="ExtractionFileText" Grid.Row="2" Margin="0,18,0,0" FontSize="14"
+                   Foreground="#FFD0D8D2" HorizontalAlignment="Center"
+                   TextTrimming="CharacterEllipsis" Text="Waiting…" />
+
+        <Border Grid.Row="3" Margin="0,18,0,0" Background="#220E1A17" BorderBrush="#335E706A"
+                BorderThickness="1" CornerRadius="10" Padding="16,12">
+          <ScrollViewer VerticalScrollBarVisibility="Auto" MaxHeight="232">
+            <StackPanel x:Name="ExtractionFolderList" />
+          </ScrollViewer>
+        </Border>
       </Grid>
     </Border>
   </Grid>

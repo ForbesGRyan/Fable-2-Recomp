@@ -22,6 +22,10 @@
 //   clear     -> release everything remote
 //   script    -> atomic timed sequence: steps[{delay_ms, op, input, value, hold_ms}]
 //   get_state -> current resolved pad state + pending releases
+//   screenshot -> save the current game frame as a PNG at "path"
+//                 (reads the renderer's guest output from the GPU, so it
+//                 captures the game's own frame even while other windows
+//                 cover it)
 //   cvar      -> get/set any cvar by name (existing SDK knob surface)
 //   enable/disable -> toggle the remote pad (zero state when disabled)
 //
@@ -77,6 +81,7 @@ inline void CloseSock(sock_t s) {
 #include <cstdint>
 #include <cstdio>
 #include <format>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -89,6 +94,7 @@ inline void CloseSock(sock_t s) {
 #include <rex/logging/macros.h>
 
 #include "remote_input_state.h"
+#include "fable2_frame_capture.h"
 
 // Game-state accessors (defined in fable2_state_probe.h); forward-declared here
 // so the "game_state" command can read the classifier without pulling the whole
@@ -659,6 +665,14 @@ class ControlServer {
   bool Running() const { return running_.load(); }
   int32_t BoundPort() const { return port_; }
 
+  // The renderer presenter (rex::ui::Presenter), queried at command time (so
+  // this can be set before the window/presenter exists). nullptr = unavailable.
+  // Backs the "screenshot" command, which reads the guest output frame back
+  // from the GPU via Presenter::CaptureGuestOutput().
+  void SetPresenterProvider(std::function<rex::ui::Presenter*()> provider) {
+    presenter_provider_ = std::move(provider);
+  }
+
  private:
   using Clock = std::chrono::steady_clock;
   static constexpr size_t kMaxIntervals = 10000;
@@ -872,12 +886,13 @@ class ControlServer {
     if (cmd == "script") return HandleScript(v);
     if (cmd == "get_state") return HandleGetState(v);
     if (cmd == "game_state") return HandleGameState(v);
+    if (cmd == "screenshot") return HandleScreenshot(v);
     if (cmd == "cvar") return HandleCvar(v);
 
     return Err(std::format(
         "unknown command '{}'; expected one of: ping, info, auth, press, "
-        "release, stick, state, clear, script, get_state, game_state, cvar, "
-        "enable, disable", cmd));
+        "release, stick, state, clear, script, get_state, game_state, "
+        "screenshot, cvar, enable, disable", cmd));
   }
 
   // "input" name -> slot; value defaults per slot (buttons 1, triggers 255,
@@ -1135,6 +1150,35 @@ class ControlServer {
         fable2::stateprobe::CurrentFrontEndValue());
   }
 
+  // "screenshot" -> save the current on-screen game frame as a PNG at
+  // "path" (UTF-8; parent directories are created). Captures the window's
+  // client area via PrintWindow(PW_RENDERFULLCONTENT) (see
+  // src/diagnostics/fable2_frame_capture.h), so the frame is complete even
+  // while other windows cover the game. Takes well under a second; the
+  // connection is blocked for the capture's duration.
+  std::string HandleScreenshot(const json_min::Value& v) {
+    const std::string* path = v.FindStr("path");
+    if (!path || path->empty())
+      return Err("'path' required (where to save the PNG)");
+
+    // Read the game's rendered frame straight from the renderer's GPU output
+    // (isolated from other windows, backend-agnostic, reliable on headless
+    // displays - see fable2_frame_capture.h).
+    rex::ui::Presenter* presenter =
+        presenter_provider_ ? presenter_provider_() : nullptr;
+    const fable2::framecapture::Result r =
+        fable2::framecapture::CaptureGuestOutputToPng(presenter, *path);
+    if (!r.ok) {
+      REXSYS_WARN("[remote] screenshot failed: {}", r.error);
+      return Err(r.error);
+    }
+    REXSYS_INFO("[remote] screenshot saved {}x{} PNG to {} ({} bytes, avg_luma={})",
+                r.width, r.height, *path, r.bytes, r.avg_luma);
+    return std::format(
+        R"({{"ok":true,"path":"{}","width":{},"height":{},"bytes":{},"avg_luma":{}{}}})",
+        json_min::JEsc(*path), r.width, r.height, r.bytes, r.avg_luma, IdEcho(v));
+  }
+
   std::string HandleCvar(const json_min::Value& v) {
     const std::string* name = v.FindStr("name");
     if (!name || name->empty()) return Err("'name' required");
@@ -1158,6 +1202,7 @@ class ControlServer {
   InputStateStore* state_;
   std::atomic<bool>* pad_enabled_;
   Config cfg_{};
+  std::function<rex::ui::Presenter*()> presenter_provider_;  // renderer presenter
 
   std::atomic<bool> running_{false};
   std::atomic<int32_t> port_{0};

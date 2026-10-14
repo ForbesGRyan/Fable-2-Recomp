@@ -1,19 +1,17 @@
 # Guest-image patch system (Xenia patch format)
 
-Runtime patching of the loaded `default.xex` guest image, modeled on Xenia's
-game-patches (`patch.toml`) format.
+Runtime patching of the loaded `default.xex` guest image, using the op shape
+of Xenia's game-patches (`patch.toml`) format.
 
 ## How it works
 
 - `src/core/fable2_patches.h` / `src/core/fable2_patches.cpp` — the patch table +
   applier. Each op is `{be8|be16|be32|be64, address, value}`, exactly the
   `[[patch.be32]] address/value` shape from Xenia's patch files.
-- The table is **data-driven**: `fable2_patches.toml` next to the exe (Xenia
-  game-patches format, see below). `Fable2App::OnPostLoadXexImage()` calls
-  `fable2::patches::Load()` first: file missing → recreated from the
-  built-in template; parse failure → error logged + dialog + built-in
-  defaults; either way the game runs. Each `[[patch]]` has an `enabled`
-  toggle (default true); disabled patches are logged and skipped.
+- **No patch file.** The table is built in code; each patch's `enabled` comes
+  from a `[patches]` key in `fable2_config.toml` (loaded in
+  `OnPostInitLogging`, before the patches are applied). The old
+  `fable2_patches.toml` is no longer read and can be deleted.
 - `Fable2App::OnPostLoadXexImage()` (src/core/fable_2_app.h) calls
   `fable2::patches::ApplyAll(runtime()->memory(), PPCImageConfig)` — the SDK
   hook that runs after `default.xex` is decrypted/expanded into the guest
@@ -24,44 +22,26 @@ game-patches (`patch.toml`) format.
   flips the touched guest pages to R/W via `heap->Protect()` and restores the
   original protection after the write. Safe at this point: no guest thread
   exists yet.
-- Every op is logged: `[patches] <patch> be32 0xADDR: 0xOLD -> 0xNEW
-  (code region | data)`, plus a summary line.
+- Every op is logged: `[patches] <patch> be8 0xADDR: 0xOLD -> 0xNEW
+  (data: takes effect at runtime)`, plus a summary line.
 
-## Patch table file (fable2_patches.toml)
+## Current patches (both default to **disabled**)
 
-Lives next to the exe (staged from `config/fable2_patches.toml` by the
-build, copy-if-not-exists so edits survive rebuilds; the code also recreates
-it if deleted). Xenia game-patches format, one tweak: ops are an inline
-array instead of `[[patch.be32]]` sub-tables:
-
-```toml
-[[patch]]
-name = "High Tick Rate"          # required
-# description = "..."            # optional
-# author = "Guy"                 # optional
-# enabled = true                 # optional, default true
-ops = [
-    { width = "be32", address = 0x8233AEB4, value = 0x60000000 },
-    { width = "be8",  address = 0x83319511, value = 0x3E },
-]
-```
-
-Behavior: missing file → recreated with the built-in defaults (the embedded
-template in `src/core/fable2_patches.cpp` — keep it in sync with
-`config/fable2_patches.toml`); parse/structure error → logged + dialog +
-built-in defaults (the game always runs); an explicitly empty patch list is
-valid (all patches off). Log: `[patches] loaded N patch(es) from ...`.
-
-## Current patches (from fable2_patches.toml; High Tick Rate defaults to **disabled**)
-
-| Patch | Op | Region | Effective in recomp? |
+| Config key | Xenia patch | Data op (this table) | Code op (mid-asm hook) |
 |---|---|---|---|
-| High Tick Rate (Guy) | be32 0x8233AEB4 = 0x60000000 (NOP) | .text | **No** — guest .text is never executed; the recompiled native code runs instead. The byte write happens (verified in log), but it changes nothing at runtime. |
-| High Tick Rate (Guy) | be8 0x83319511 = 0x3E (was 0x2E) | .data | **Yes** — recompiled code reads .data from the guest arena live. (No direct `lbz`/`lwz` of exactly 0x83319511 found in the recompiled output; the one `-27375` reference reads 0x83399511. If the game's behavior doesn't visibly change, that's why.) |
+| `high_tick_rate` | High Tick Rate (Guy) | be8 0x83319511 = 0x3E (LF tick double 0x83319510: 15.0 → 30.0) | NOP of the store at 0x8233AEB4 → `fable2_hook_high_tick_rate_skip_store` |
+| `higher_hf_tick_rate` | Higher HF Tick Rate (Ultra) | be8 0x83319519 = 0x4E (HF tick double 0x83319518: 30.0 → 60.0) | NOP of the store at 0x8233AE98 → `fable2_hook_high_hf_tick_rate_skip_store` |
+
+Both stores are in `sub_8233AE50` (game init) and are the only writers of
+those doubles; without the hooks the game overwrote the patched values and
+the data ops had no effect. The game runs HF at twice LF (30:15). With only
+`high_tick_rate` the ratio becomes 1:1 (30:30) and cloth physics misbehaves,
+so turn on `higher_hf_tick_rate` with it (60:30).
 
 This is the fundamental recomp vs. emulator split: **data patches work, code
 patches don't** (a code patch here would mean editing the recompiled C++ at
-build time, which codegen would clobber on the next run).
+build time, which codegen would clobber on the next run), so every code op is
+a mid-asm hook.
 
 ## Validation (2026-09-15)
 
@@ -126,10 +106,11 @@ Currently **empty**.
 | Unlock Website Items (Guy) | mid-asm hook `fable2_hook_unlock_website` @ 0x8256E384 (after `rlwinm r9,r10,0,25,25`); toggle: `[patches] unlock_website` | Forces `r9 = 0x40` (bit 6) in `sub_8256E368`, so the website/Guild-chest item lookup reads as unlocked and runs the real lookup. Re-derives the Xenia "Unlock Website Items" intent for THIS build (the stock ops target a different revision's bytes). | Hook confirmed in generated code + clean startup; in-game chest unlock pending manual test |
 | Unlock CE Content (Guy) | mid-asm hook `fable2_hook_unlock_ce` @ 0x824B3540 (after `rlwinm r10,r11,0,25,25`); toggle: `[patches] unlock_ce` | Forces `r10 = 0x40` (bit 6) in `sub_824B3528`, so the Collectors-Edition chest item lookup reads as unlocked and runs the real lookup. Same re-derivation approach. | Hook confirmed in generated code + clean startup; in-game chest unlock pending manual test |
 
-To add a new code patch: add the op to `fable2_patches.toml` (keeps the
-guest image faithful + documents intent) **and** a
-`[[entrypoint.midasm_hook]]` entry + hook function (preferred) or an
-`apply_recomp_patches.py` PATCHES entry (fallback).
+To add a new code patch: a `[[entrypoint.midasm_hook]]` entry + hook
+function gated on a `[patches]` config key (preferred), or an
+`apply_recomp_patches.py` PATCHES entry (fallback). If it also needs a data
+write, add it to the table in `src/core/fable2_patches.cpp`, gated on the
+same key.
 
 ### FPS meter
 
@@ -141,12 +122,9 @@ original `__imp__` entry). Enabled with `FABLE2_FPS_METER=1`.
 
 ## Follow-ups
 
-1. ~~Tie to config~~ **done (2026-09-15)**: the patch list now lives in
-   `fable2_patches.toml` next to the exe (Xenia game-patches format), with a
-   per-patch `enabled` toggle; built-in defaults are the fallback. Data
-   patches are runtime-toggleable with no rebuild. (Mid-asm hooks could be
-   made toggleable the same way later — the hook bodies are C++ in the game
-   process.)
+1. ~~Tie to config~~ **done**: every patch, data or code, is toggled by a
+   `[patches]` key in `fable2_config.toml` (the separate
+   `fable2_patches.toml` was removed).
 2. **Other Xenia patches** for this title (from
    `4D5307F1 - Fable II (GOTY).patch.toml`). Done as mid-asm hooks:
    **Unlock Website Items**, **Unlock CE Content** (all re-derived for THIS

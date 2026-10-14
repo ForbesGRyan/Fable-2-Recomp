@@ -45,6 +45,30 @@ def run_lib(script_body, timeout=180):
     return r.stdout
 
 
+def run_idle_cli(parameters, env_extra=None, fake=None):
+    """Exercise the real CLI with a healthy or failed fake native probe.
+
+    Hosted runners may have no interactive desktop, controller or audio device.
+    The CLI assertions must depend on the chosen probe state, not the host.
+    """
+    bound = "@{" + "; ".join(f"{key} = {value}" for key, value in parameters.items()) + "}"
+    idle_path = str(IDLE).replace("'", "''")
+    fake_json = json.dumps(fake or {}).replace("'", "''")
+    script = (
+        f"$cliParameters = {bound}\n"
+        f". '{idle_path}' @cliParameters\n"
+        + SnapshotTest.FAKE
+        + f"\n$script:Fable2Native = New-FakeNative ('{fake_json}' | ConvertFrom-Json)\n"
+        + "$script:Fable2Native | Add-Member ScriptMethod StartSampler { }\n"
+        + "$script:Fable2Native | Add-Member ScriptMethod StopSampler { }\n"
+        + "exit (Invoke-Fable2IdleCli)\n"
+    )
+    with tempfile.TemporaryDirectory(prefix="fable2-idle-cli-") as folder:
+        wrapper = Path(folder) / "cli.ps1"
+        wrapper.write_text(script, encoding="utf-8")
+        return run_ps([wrapper], env_extra)
+
+
 def fable_pids():
     out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq fable_2.exe", "/FO", "CSV", "/NH"],
                          capture_output=True, text=True).stdout
@@ -93,19 +117,33 @@ class IdleCliTest(unittest.TestCase):
             self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
 
     def test_idle_longer_than_possible_no_wait_is_exit_1(self):
-        r = run_ps([IDLE, "-MinIdleSeconds", "99999999", "-MaxWaitSeconds", "0"])
+        r = run_idle_cli({"MinIdleSeconds": 99999999, "MaxWaitSeconds": 0})
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
 
     def test_forced_present_hook_blocks_the_gate(self):
-        r = run_ps([IDLE, "-MinIdleSeconds", "60", "-MaxWaitSeconds", "0"],
-                   {"FABLE2_IDLE_GATE_FORCE_PRESENT": "1"})
+        r = run_idle_cli({"MinIdleSeconds": 60, "MaxWaitSeconds": 0},
+                         {"FABLE2_IDLE_GATE_FORCE_PRESENT": "1"})
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("forced-present", r.stdout)
 
     def test_watch_stops_at_forced_signal(self):
-        r = run_ps([IDLE, "-WatchSeconds", "5"], {"FABLE2_IDLE_GATE_FORCE_PRESENT": "1"})
+        r = run_idle_cli({"WatchSeconds": 5}, {"FABLE2_IDLE_GATE_FORCE_PRESENT": "1"})
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("presence signal: forced-present", r.stdout)
+
+    def test_failed_probe_is_unknown_even_with_forced_present(self):
+        r = run_idle_cli({"MinIdleSeconds": 60, "MaxWaitSeconds": 0},
+                         {"FABLE2_IDLE_GATE_FORCE_PRESENT": "1"},
+                         {"throwOn": "LastInputInfo"})
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("unknown", r.stdout)
+        self.assertIn("forced-present", r.stdout)
+
+    def test_watch_stops_at_unknown_probe_before_forced_present(self):
+        r = run_idle_cli({"WatchSeconds": 5}, {"FABLE2_IDLE_GATE_FORCE_PRESENT": "1"},
+                         {"s0": True})
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("presence signal: unknown", r.stdout)
 
 
 PS_GATE_HELPERS = r"""
@@ -1561,7 +1599,9 @@ class InSessionTest(unittest.TestCase):
         self.assertNotIn("REFUSED", r.stdout, r.stdout + r.stderr)
         started = [l for l in r.stdout.splitlines() if l.startswith("started pid")]
         self.assertEqual(len(started), 1, r.stdout + r.stderr)
-        self.assertIn(str(self.tmp / "standin.exe").lower(), started[0].lower())      # the absolute path in the started line
+        # PowerShell may expand RUNNER~1 into runneradmin; compare file identity.
+        reported = started[0].split(": ", 1)[1].strip()
+        self.assertTrue((self.tmp / "standin.exe").samefile(reported), started[0])
         self.assertTrue((self.tmp / "exe" / "logs" / "drive_game_runs.log").exists())  # the log is under the resolved -ExeDir
 
 

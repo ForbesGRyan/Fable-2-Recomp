@@ -3,11 +3,16 @@
 From the repository root:
 
 ```cmd
+python -m pip install -r tests/requirements.txt
 python tools/generate_game_versions.py --check
 python -m unittest discover -s tests -p test_*.py
 dotnet run --project tests/Fable2.Launcher.ConfigTests -c Release
 tests\run_native_tests.cmd
 ```
+
+Tests that evaluate captured shader microcode require local files under
+`out/shader_dump` and skip explicitly when those files are absent. CI runs
+without these game-derived inputs; keep them out of commits and uploads.
 
 Python tests also cover Debug/Release SDK staging with synthetic
 files, including failure when Debug DLLs or import libraries are missing.

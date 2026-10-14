@@ -908,6 +908,7 @@ class Records(unittest.TestCase):
             water["records"][1]["vs"][3] = "0x00000000"
         self.one_problem(garbage, "vertex c115.w")
 
+    @unittest.skipUnless(HAVE, NO_DUMPS)
     def test_the_command_exits_1_on_a_difference_and_0_without(self):
         lines = []
         with tempfile.TemporaryDirectory() as folder:

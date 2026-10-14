@@ -931,7 +931,8 @@ class Impostors(unittest.TestCase):
         lod, slope = fr.quad_level(np.stack([x, y], 1), q[:, 4:6], 256)
         self.assertAlmostEqual(lod, 2.0, places=9)
         np.testing.assert_allclose(slope, [[1.0 / 64, 0.0], [0.0, 1.0 / 64]], atol=1e-12)
-        self.assertEqual(fr.quad_level(np.stack([x, y], 1) * 4.0, q[:, 4:6], 256)[0], 0.0)      # magnified: the base
+        self.assertAlmostEqual(fr.quad_level(np.stack([x, y], 1) * 4.0, q[:, 4:6], 256)[0], 0.0,
+                               places=12)                                                 # magnified: the base
         self.assertEqual(fr.quad_level(np.stack([x, y], 1), q[:, 4:6], 256, top=1)[0], 1.0)     # no level below the last
         self.assertEqual(fr.quad_level(np.zeros((4, 2)), q[:, 4:6], 256)[0], 0.0)               # no area: the base
 

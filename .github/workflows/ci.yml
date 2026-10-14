@@ -23,11 +23,12 @@ jobs:
     name: Tests + launcher (Windows)
     runs-on: windows-latest
     steps:
-      # Top-level submodule only: the native tests need the patched SDK headers
-      # and frame_limiter.cpp, not the SDK's own (large) nested submodules.
+      # SDK history is needed to verify that its revision descends from the
+      # runtime-fix pin. Fetch only the nested headers used by the tests below.
       - uses: actions/checkout@v4
         with:
           submodules: true
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -53,11 +54,17 @@ jobs:
       - name: Game-version constants up to date
         run: python tools/generate_game_versions.py --check
 
+      - name: Install Python test dependencies
+        run: python -m pip install -r tests/requirements.txt
+
       - name: Python tests
         run: python -m unittest discover -s tests -p "test_*.py" -v
 
       - name: Apply SDK runtime patches
         run: python tools/prepare_runtime_sdk.py thirdparty/rexglue-sdk --skip-dependencies
+
+      - name: Fetch native test headers
+        run: git -C thirdparty/rexglue-sdk submodule update --init thirdparty/fmt thirdparty/simde thirdparty/spdlog
 
       - name: Native synthetic tests
         shell: cmd

@@ -20,6 +20,10 @@ import light_formulas as lf  # noqa: E402
 import water_made  # noqa: E402
 import water_replay as wr  # noqa: E402
 
+requires_water_shader = unittest.skipUnless(
+    (wr.wc.DUMPS / f"shader_{wr.wc.PS}.ucode.frag").is_file(),
+    "water shader microcode is unavailable under out/shader_dump")
+
 # A quad of 40 x 20 pixels about the picture's centre under water_made.M (x and y are the world's / 100).
 QUAD = ((-20.0 / 5.6, -10.0 / 3.6), (20.0 / 5.6, 10.0 / 3.6))
 MASK = (0, 0, 255, 255)                                  # the left half water, the right half land
@@ -56,6 +60,7 @@ class FramePictures(unittest.TestCase):
         path.write_text("".join(water_made._json(r) + "\n" for r in rows), encoding="utf-8", newline="\n")
         return path, tuple(int(v, 16) for v in picture["fc"])
 
+    @requires_water_shader
     def test_each_scene_replay_samples_its_own_frame_picture(self):
         with tempfile.TemporaryDirectory() as folder:
             path, fc = self.capture(folder)
@@ -65,6 +70,7 @@ class FramePictures(unittest.TestCase):
         self.assertTrue(np.array_equal(first.kept, second.kept))
         self.assertGreater(float(np.max(np.abs(first.colour[first.kept] - second.colour[second.kept]))), 0.1)
 
+    @requires_water_shader
     def test_rows_check_samples_each_rows_frame_picture(self):
         seen = {}
         original = wr.wc.RowSetup
@@ -100,6 +106,7 @@ class FramePictures(unittest.TestCase):
 
 
 class Cover(unittest.TestCase):
+    @requires_water_shader
     def test_the_left_half_is_kept_and_none_of_the_right(self):
         with tempfile.TemporaryDirectory() as folder:
             r = wr.replay(made(folder), 1, place=(0.0, 0.0))
@@ -115,6 +122,7 @@ class Cover(unittest.TestCase):
         self.assertEqual(r.rows, 1)
         self.assertEqual(r.problems, [])
 
+    @requires_water_shader
     def test_the_depth_copy_hides_what_lies_behind_it(self):
         with tempfile.TemporaryDirectory() as folder:
             path = made(folder)
@@ -141,6 +149,7 @@ class Criterion4(unittest.TestCase):
             swap = wr.replay(path, 1, place=(0.0, 0.0), swap_rb=True)
         return own, flip, swap
 
+    @requires_water_shader
     def test_the_replay_against_itself_passes_and_each_control_misses_its_bound(self):
         own, flip, swap = self.run_variants()
         game = own.colour.copy()
@@ -160,6 +169,7 @@ class Criterion4(unittest.TestCase):
         self.assertIn("red", s.missed)
         self.assertIn("blue", s.missed)
 
+    @requires_water_shader
     def test_the_glint_can_carry_the_correlation_and_the_paired_measure_still_tells(self):
         """Review focus 1 (a measure that cannot tell): with the made sun the upside-down picture keeps a correlation
         above the bound, so the bounds alone would pass it. The paired measure asks only the pixels at which two
@@ -187,6 +197,7 @@ class Criterion4(unittest.TestCase):
         self.assertEqual(wr.prefer_verdict(wr.Prefer(1000, 800, 200, half.gap)), "the first")
         self.assertEqual(wr.prefer_verdict(wr.Prefer(100, 100, 0, half.gap)), "cannot tell")   # too few pixels differ
 
+    @requires_water_shader
     def test_a_judged_set_below_5000_pixels_is_not_decidable_never_met(self):
         own, _, _ = self.run_variants()
         self.assertEqual(wr.JUDGED_MIN, 5000)
@@ -212,6 +223,7 @@ class Criterion4(unittest.TestCase):
         self.assertEqual(open_[0], None)
         self.assertIn("not decidable", open_[1])
 
+    @requires_water_shader
     def test_the_command_exits_1_without_the_game_s_scene(self):
         with tempfile.TemporaryDirectory() as folder:
             self.assertEqual(wr.main(["scene", str(made(folder)), "1", "--place", "0", "0"], say=lambda *a: None), 1)
@@ -295,6 +307,7 @@ class Sky(unittest.TestCase):
 
 
 class Sets(unittest.TestCase):
+    @requires_water_shader
     def test_the_edge_and_the_glint_of_a_made_frame(self):
         with tempfile.TemporaryDirectory() as folder:
             r = wr.replay(made(folder), 1, place=(0.0, 0.0))
@@ -310,6 +323,7 @@ class Sets(unittest.TestCase):
         self.assertEqual(wr.glint_set(dark)["above"], 0)
         self.assertEqual(float(dark.glint.max()), 0.0)
 
+    @requires_water_shader
     def test_the_lookup_lands_about_the_picture_s_centre(self):
         with tempfile.TemporaryDirectory() as folder:
             r = wr.replay(made(folder), 1, place=(0.0, 0.0))
@@ -402,6 +416,7 @@ class ViewPictures(unittest.TestCase):
         self.assertEqual(wr.near_share(a, np.zeros_like(a)), 0.0)
         self.assertTrue(math.isnan(wr.near_share(np.zeros_like(a), a)))
 
+    @requires_water_shader
     def test_a_given_picture_takes_the_dumps_place_in_the_replay(self):
         with tempfile.TemporaryDirectory() as folder:
             path = made(folder)
@@ -677,6 +692,7 @@ class MainOnMadeDumps(unittest.TestCase):
             code = wr.main(["main", str(path), str(dump)], say=said.append)
         return code, said, r
 
+    @requires_water_shader
     def test_it_needs_nothing_of_the_game_and_names_the_rounding(self):
         for rounding in wr.ROUNDINGS:
             code, said, r = self.run_main(rounding)
@@ -695,6 +711,7 @@ class MainOnMadeDumps(unittest.TestCase):
             self.assertTrue(any("judged pixels 150, of which 36 lie more than 3 pixels" in line for line in said), text)
             self.assertTrue(any("hidden by the stored depth 400" in line for line in said), text)
 
+    @requires_water_shader
     def test_a_wrong_surface_is_not_met(self):
         def blue(plane):
             plane[..., 2] *= 1.04
@@ -703,11 +720,13 @@ class MainOnMadeDumps(unittest.TestCase):
         self.assertIn("not met as written", said[-1])
         self.assertIn("the ratio of the means", said[-1])
 
+    @requires_water_shader
     def test_without_the_depth_before_the_step_nothing_is_compared(self):
         code, said, _ = self.run_main("toward zero", flags=16 | 32, hide=False)
         self.assertEqual(code, 1)
         self.assertTrue(any("NOT COMPARED" in line and "pre_water" in line for line in said), "\n".join(said))
 
+    @requires_water_shader
     def test_the_replay_at_the_pass_s_scale_and_without_slot_14(self):
         with tempfile.TemporaryDirectory() as folder:
             path = made(folder)

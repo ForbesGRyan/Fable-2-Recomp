@@ -2,3 +2,5 @@
 # Patches must keep LF: git apply against the LF SDK checkout rejects CRLF hunks
 # (Git for Windows defaults to core.autocrlf=true, including on CI runners).
 *.patch text eol=lf whitespace=-blank-at-eol
+# Generated bit-pattern fixtures are compared byte for byte with LF output.
+tests/native/impostor_pins.inc text eol=lf

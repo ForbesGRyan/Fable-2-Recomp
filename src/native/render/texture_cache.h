@@ -98,6 +98,7 @@ class TextureCache {
     nrhi::TextureView* view = nullptr;
     uint64_t bytes = 0;  // host texture bytes
     float uv_fix[2] = {1.0f, 1.0f};
+    uint8_t levels = 1;  // host levels (SamplerBits: one level means "level 0 only")
   };
 
   nrhi::TextureView* ResolveImpl(nrhi::Cmd* cmd, nrhi::Device* dev, const capture::Material& m,

@@ -76,6 +76,8 @@ struct TextureFetch {
   uint8_t swizzle[4] = {0, 1, 2, 3};     // 0-3 channel, 4 = 0.0, 5 = 1.0
   uint8_t clamp_x = 0, clamp_y = 0;      // xenos::ClampMode
   bool linear_filter = false;            // mag filter linear
+  bool min_linear = false;               // min filter linear (fc[3] bits 21..22 == 1)
+  uint8_t mip_filter = 0;                // fc[3] bits 23..24: 0 point, 1 linear, 2 base map (level 0 only), 3 fetch
 };
 
 inline FetchError DecodeTextureFetch(const uint32_t fc[6], TextureFetch* out) {
@@ -102,6 +104,8 @@ inline FetchError DecodeTextureFetch(const uint32_t fc[6], TextureFetch* out) {
   t.clamp_x = uint8_t((fc[0] >> 10) & 7);
   t.clamp_y = uint8_t((fc[0] >> 13) & 7);
   t.linear_filter = ((fc[3] >> 19) & 3) == 1;
+  t.min_linear = ((fc[3] >> 21) & 3) == 1;
+  t.mip_filter = uint8_t((fc[3] >> 23) & 3);
   if (t.base_phys == 0 || t.pitch_texels < t.width) return FetchError::kSize;
   *out = t;
   return FetchError::kNone;
@@ -790,6 +794,23 @@ inline bool IsMirror(uint8_t clamp) { return clamp == 1 || clamp == 3 || clamp =
 inline uint32_t SamplerIndex(const TextureFetch& t) {
   const bool wrap = t.clamp_x <= 1;
   return (t.linear_filter ? 1u : 0u) | (wrap ? 0u : 2u);
+}
+
+// Bit 2 of the sampler word the shaders read (sub-project 15): "level 0 only". Set for a texture the SDK would
+// not filter anisotropically under anisotropic_override (thirdparty/rexglue-sdk/src/graphics/d3d12/
+// texture_cache.cpp, the has_mips && !mip_base_map test): a host texture of one level (`levels`, the levels
+// the cache bound: no mip address, DXT3A, or base only), or a base-map mip filter. The shaders then sample
+// with SampleLevel(…, 0): bilinear at level 0, the SDK's picture, whatever samplers s1 and s3 are. A mipped
+// texture with a point min filter keeps the filtered path (an approximation, as before the sub-project).
+inline constexpr uint32_t kSamplerLevel0 = 4u;
+inline uint32_t SamplerBits(const TextureFetch& t, uint32_t levels) {
+  return SamplerIndex(t) | (levels > 1 && t.mip_filter != 2 ? 0u : kSamplerLevel0);
+}
+
+// The word TextureCache::Resolve hands out: an albedo's SamplerBits of the levels the cache bound; a water
+// texture's SamplerIndex (the water step's own rule, clay_samplers.h, judges its filtering).
+inline uint32_t ResolveSamplerWord(const TextureFetch& t, uint32_t bound_levels, bool water) {
+  return water ? SamplerIndex(t) : SamplerBits(t, bound_levels);
 }
 
 // Hash of the fields that define the texture's contents and layout; clamp,

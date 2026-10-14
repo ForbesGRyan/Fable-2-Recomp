@@ -42,8 +42,8 @@ rem Captured copy spans: the Maps view (16 cases, two crossing a ring kick) and 
 clang++ -std=c++23 "%~dp0native\test_ui_mask_gpu.cpp" -ld3dcompiler -ld3d11 -o "%OUT%\ui_mask_gpu.exe" || exit /b 1
 "%OUT%\ui_mask_gpu.exe" || exit /b 1
 "%OUT%\ui_mask_gpu.exe" gradient || exit /b 1
-clang++ -std=c++23 -I"%SDK%\include" "%~dp0native\test_water_sampler.cpp" -o "%OUT%\water_sampler.exe" || exit /b 1
-"%OUT%\water_sampler.exe" || exit /b 1
+clang++ -std=c++23 -I"%SDK%\include" "%~dp0native\test_clay_samplers.cpp" -o "%OUT%\clay_samplers.exe" || exit /b 1
+"%OUT%\clay_samplers.exe" || exit /b 1
 clang++ -std=c++23 -I"%SDK%\include" "%~dp0native\test_emulated_frame_stats.cpp" -o "%OUT%\frame_stats.exe" || exit /b 1
 "%OUT%\frame_stats.exe" || exit /b 1
 clang++ -std=c++23 -I"%SDK%\include" "%~dp0native\test_pacing_stats.cpp" -o "%OUT%\pacing.exe" || exit /b 1

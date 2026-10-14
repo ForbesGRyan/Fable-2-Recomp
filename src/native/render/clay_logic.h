@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <charconv>
 #include <cctype>
 #include <cmath>
 #include <cstddef>
@@ -627,6 +628,7 @@ struct ClayStats {
   // reason (index: ClayImpostorSkip as a number); impostor_capture: the calls that gave no record, by the
   // capture's reason (index: capture::ImpostorReason; FrameScene::impostor_refused).
   capture::ImpostorMode impostor_mode = capture::ImpostorMode::kOff;
+  uint32_t filter_mode = 0;  // the pass's texture filtering this frame: 0 linear, 1..5 = 1x..16x anisotropic (FilterMode)
   uint32_t impostors_seen = 0, impostors_drawn = 0, impostor_quads = 0;
   uint32_t impostor_skip[16] = {};
   // (`on` alone) impostor_pictures: the game's pictures the frame's records could use (read whole, a tree's by
@@ -2111,7 +2113,7 @@ struct ClayConstants {
   uint32_t color;
   float uv[4];          // u * uv[0] + uv[2], v * uv[1] + uv[3]
   uint32_t textured;    // 1: sample the albedo at t3
-  uint32_t sampler;     // static sampler s0-s3 (SamplerIndex)
+  uint32_t sampler;     // SamplerBits (0..7): bits 0..1 the static sampler s0-s3, bit 2 level 0 only
   uint32_t alpha_mode;  // ClayAlpha::mode
   float alpha_ref;
   float cut[4];         // eye xyz, squared distance (DrawRecord::cut; +inf: no cut)
@@ -5894,18 +5896,18 @@ struct ClayTerrainConstants {
   float hole_ref;
   float fade[2];
   float weight_scale, weight_bias;
-  uint32_t colour_sampler;  // static sampler of the colour texture (SamplerIndex)
+  uint32_t colour_sampler;  // SamplerBits of the colour texture (0..7: bits 0..1 the register, bit 2 level 0 only)
   uint32_t weight_sampler;  // of the weights; the shader reads its clamp bit and filters linearly
   uint32_t flags;           // kTerrainFadeIn, kTerrainSteep
   // The steep-ground block (kTerrainSteep; zero without it).
-  uint32_t side_sampler;    // static sampler of the side texture
+  uint32_t side_sampler;    // SamplerBits of the side texture (0..7: bits 0..1 the register, bit 2 level 0 only)
   float side_uv[2];         // TerrainMaterialInputs::side_uv, scaled into the host texture
   float slope[2];           // TerrainMaterialInputs::slope
   float steep_threshold, steep_eps;
   uint32_t pad[2];
   // The light (SetClayTerrainLight; zero for a record drawn without it).
   float base_uv[4];         // tf3 coordinate of the world position, scaled into the host texture
-  uint32_t base_sampler;    // static sampler of the base map
+  uint32_t base_sampler;    // SamplerBits of the base map (0..7: bits 0..1 the register, bit 2 level 0 only)
   float c11x;               // pixel c11.x: layers on the ambient part, far terrain on the sun
   float facing_scale;       // layers: the literal of sat(scale * (N . c109)); far terrain: 0
   uint32_t base_gamma;      // bits 0 to 2: the base map's r, g, b are fetched with the gamma sign (TerrainBaseGamma)
@@ -7631,15 +7633,30 @@ constexpr uint64_t ImpostorStepForm(const ClayStats& st) {
 // are pinned to their single-precision form by tests/native/water_pins.inc (tools/xdk_sigmatch/water_pins.py).
 // ClayWater, the frame's verdict, is declared before ClayStats (which carries it).
 
-// Match the SDK's anisotropic_override for the supported linear normal fetch. Its constant has
-// anisotropy disabled; -1 (no override), 0 and out-of-range values therefore keep linear filtering.
+// The SDK's anisotropic_override as one filter mode for the clay's and the water's samplers (sub-projects 13 and 15).
+// The water's constant has anisotropy disabled; -1 (no override), 0 and out-of-range values therefore keep linear filtering.
 // Positive modes 1..5 mean 1x, 2x, 4x, 8x and 16x. Six cached layouts bound hot-reload allocation.
-inline constexpr uint32_t kWaterFilterModes = 6;
-constexpr uint32_t WaterFilterMode(int32_t override_value) {
-  return override_value > 0 && override_value < int32_t(kWaterFilterModes) ? uint32_t(override_value) : 0u;
+inline constexpr uint32_t kFilterModes = 6;
+constexpr uint32_t FilterMode(int32_t override_value) {
+  return override_value > 0 && override_value < int32_t(kFilterModes) ? uint32_t(override_value) : 0u;
 }
-constexpr uint32_t WaterFilterAnisotropy(uint32_t mode) {
-  return mode > 0 && mode < kWaterFilterModes ? 1u << (mode - 1) : 1u;
+constexpr uint32_t FilterAnisotropy(uint32_t mode) {
+  return mode > 0 && mode < kFilterModes ? 1u << (mode - 1) : 1u;
+}
+inline std::string FilterText(uint32_t mode) {
+  return mode ? std::to_string(FilterAnisotropy(mode)) + "x anisotropic" : std::string("linear");
+}
+// The cvar's text as the SDK's setting: the whole string an integer (std::from_chars), else 0 (no override).
+// The installed SDK exports the registry accessor, not typed Query specializations (the water step's note).
+inline int32_t ParseFilterSetting(std::string_view text) {
+  int32_t setting = 0;
+  const auto parsed = std::from_chars(text.data(), text.data() + text.size(), setting);
+  return parsed.ec == std::errc{} && parsed.ptr == text.data() + text.size() ? setting : 0;
+}
+// A ready pass whose objects were built under another mode rebuilds them (Ensure): the layouts are cached per
+// mode (the RHI destroys none), the pipelines of one mode only are kept.
+constexpr bool FilterRebuildNeeded(bool ready, uint32_t built_mode, uint32_t wanted_mode) {
+  return ready && built_mode != wanted_mode;
 }
 
 // The dead draw (spec ruling 12): F6D9 kills every pixel, whatever the mask holds, when the saturate's argument is

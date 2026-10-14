@@ -1,6 +1,6 @@
 #include <cstdio>
 
-#include "../../src/native/render/water_sampler.h"
+#include "../../src/native/render/clay_samplers.h"
 
 int main() {
   namespace rhi = rex::graphics::nrhi;
@@ -22,7 +22,7 @@ int main() {
   if (WaterSurfaceFilterMode(3, normal) != 0) return 6;
   for (int32_t setting : {-1, 0, 1, 2, 3, 4, 5, 6}) {
     rhi::BindingLayoutDesc desc;
-    ConfigureWaterSamplers(desc, WaterFilterMode(setting));
+    ConfigureClaySamplers(desc, FilterMode(setting));
     if (desc.static_sampler_count != 4) return 1;
     for (uint32_t i = 0; i < 4; ++i) {
       const auto& sampler = desc.static_samplers[i];
@@ -31,10 +31,11 @@ int main() {
       if (sampler.shader_register != i || sampler.filter != filter ||
           sampler.max_anisotropy != (overridden ? expected[setting] : 1u) ||
           sampler.address != ((i & 2) ? rhi::AddressMode::kClamp : rhi::AddressMode::kWrap)) {
-        std::printf("FAIL water sampler setting=%d register=%u\n", setting, i);
+        std::printf("FAIL clay sampler setting=%d register=%u\n", setting, i);
         return 2;
       }
     }
   }
-  std::puts("water_sampler PASS (point/wrap/clamp and all shared override modes)");
+  if (kFilterModes != 6 || FilterAnisotropy(3) != 4 || FilterMode(7) != 0) return 7;
+  std::puts("clay_samplers PASS (point/wrap/clamp, all override modes, water eligibility)");
 }

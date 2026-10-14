@@ -2673,15 +2673,40 @@ static void ReflectionTargetTests() {
 
 static void WaterTests() {
   // SDK modes: no override/disabled and invalid values retain linear; 1..5 force 1x..16x.
-  CHECK(867, kWaterFilterModes == 6 && WaterFilterMode(-1) == 0 && WaterFilterMode(0) == 0 &&
-                 WaterFilterMode(-2) == 0 && WaterFilterMode(6) == 0 &&
-                 WaterFilterMode(std::numeric_limits<int32_t>::min()) == 0 &&
-                 WaterFilterMode(std::numeric_limits<int32_t>::max()) == 0);
+  CHECK(867, kFilterModes == 6 && FilterMode(-1) == 0 && FilterMode(0) == 0 &&
+                 FilterMode(-2) == 0 && FilterMode(6) == 0 &&
+                 FilterMode(std::numeric_limits<int32_t>::min()) == 0 &&
+                 FilterMode(std::numeric_limits<int32_t>::max()) == 0);
   constexpr uint32_t anisotropy[] = {1, 1, 2, 4, 8, 16};
-  for (uint32_t mode = 0; mode < kWaterFilterModes; ++mode) {
-    CHECK(867, WaterFilterMode(int32_t(mode)) == mode && WaterFilterAnisotropy(mode) == anisotropy[mode]);
+  for (uint32_t mode = 0; mode < kFilterModes; ++mode) {
+    CHECK(867, FilterMode(int32_t(mode)) == mode && FilterAnisotropy(mode) == anisotropy[mode]);
   }
-  CHECK(867, WaterFilterAnisotropy(6) == 1 && WaterFilterAnisotropy(~0u) == 1);
+  CHECK(867, FilterAnisotropy(6) == 1 && FilterAnisotropy(~0u) == 1);
+  // 868: sub-project 15. The cvar's text as a mode: a whole-string integer, else 0; the rebuild rule: only a
+  // ready pass whose objects were built with another mode rebuilds (3 -> 3 -> 0 -> 0 -> 5: two rebuilds).
+  CHECK(868, ParseFilterSetting("3") == 3 && ParseFilterSetting("-1") == -1 && ParseFilterSetting("5") == 5 &&
+                 ParseFilterSetting("6") == 6 && ParseFilterSetting("") == 0 && ParseFilterSetting("x") == 0 &&
+                 ParseFilterSetting("3 ") == 0 && ParseFilterSetting(" 3") == 0);
+  CHECK(868, FilterMode(ParseFilterSetting("6")) == 0 && FilterMode(ParseFilterSetting("3")) == 3);
+  CHECK(868, FilterText(0) == "linear" && FilterText(3) == "4x anisotropic");
+  {
+    const int32_t sequence[] = {3, 3, 0, 0, 5};
+    uint32_t built = FilterMode(sequence[0]);
+    int rebuilds = 0;
+    bool ready = true;
+    for (int32_t s : sequence) {
+      const uint32_t wanted = FilterMode(s);
+      if (FilterRebuildNeeded(ready, built, wanted)) {
+        ++rebuilds;
+        built = wanted;
+      }
+    }
+    CHECK(868, rebuilds == 2 && built == 5 && !FilterRebuildNeeded(false, 0, 3) && !FilterRebuildNeeded(true, 3, 3));
+  }
+  {
+    ClayStats fs;
+    CHECK(868, fs.filter_mode == 0);
+  }
   using namespace water_pins;
   const float kNan = std::numeric_limits<float>::quiet_NaN();
   CHECK(838, std::string(ClayWaterName(ClayWater::kDrawn)) == "drawn" && std::string(ClayWaterName(ClayWater::kOpaqueLive)) == "opaque-live" &&
@@ -4703,6 +4728,10 @@ int main() {
     const ClayConstants flat = MakeClayConstants(r, 1, 0, uv, false, 2);
     CHECK(43, flat.layout == 0);
     CHECK(82, flat.textured == 0 && flat.sampler == 2);
+    // 869: a sampler word with bit 2 (level 0 only) survives packing.
+    const ClayConstants level0 = MakeClayConstants(r, 1, 0, uv, true, 5);
+    std::memcpy(dw, &level0, sizeof(dw));
+    CHECK(869, level0.sampler == 5 && dw[25] == 5);
   }
   // 83-86: UV stream keys.
   {
@@ -6162,6 +6191,14 @@ int main() {
                    floats("t_fade", {54.0f, 55.0f}) && floats("t_eye", {50.0f, 51.0f, 52.0f}));
     c = MakeClayTerrainConstants(fm, MaterialKind::kTerrainFar, fix, 2, 0);
     CHECK(258, word("t_flags", 0));
+    // 870: the colour and side sampler words keep bit 2 (level 0 only).
+    {
+      capture::TerrainMaterialInputs lm = m;
+      lm.steep = true;
+      const float side_fix0[2] = {0.5f, 0.75f};
+      c = MakeClayTerrainConstants(lm, MaterialKind::kTerrainLayer, fix, 5, 3, side_fix0, 5);
+      CHECK(870, word("t_colour_sampler", 5) && word("t_side_sampler", 5) && word("t_flags", kTerrainSteep));
+    }
 
     // 301-304: the steep-ground block's constants (a layer of a shader paired with C30A). The side
     // coordinate's scale goes into the host texture's extent like the detail coordinate's; without the
@@ -7505,6 +7542,9 @@ int main() {
     tc = MakeClayTerrainConstants(tm, capture::MaterialKind::kTerrainFar, colour_fix, 1, 3);
     CHECK(462, SetClayTerrainLight(tc, tm, tf, base_fix, 1) && f32("t_c11x", 0) == 0.48f && f32("t_facing_scale", 0) == 0.0f &&
                    u32("t_base_sampler") == 1);
+    // 871: the base sampler word keeps bit 2 (level 0 only).
+    tc = MakeClayTerrainConstants(tm, capture::MaterialKind::kTerrainLayer, colour_fix, 1, 3);
+    CHECK(871, SetClayTerrainLight(tc, tm, tl, base_fix, 5) && u32("t_base_sampler") == 5);
     // Without the base map's inputs, a layer's facing literal, a usable c11.x or a terrain family: no
     // light, and the block is left as it was.
     const ClayTerrainConstants before = MakeClayTerrainConstants(tm, capture::MaterialKind::kTerrainLayer, colour_fix, 1, 3);

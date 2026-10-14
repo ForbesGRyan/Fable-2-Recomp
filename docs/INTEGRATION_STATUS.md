@@ -49,8 +49,8 @@ remain skipped without `FABLE2_NORMALS_BIN` and `FABLE2_1555_BIN`. Python skips
 are reported by the suite; a passing synthetic
 or dump-backed check does not establish moving-picture acceptance.
 
-Build binary SHA-256:
-`E814591EF6531CC24497A3459CDD68CA023B099B99614C8743A44B31ECDF0977`.
+Final confirmation-build binary SHA-256 (after resource relinking):
+`B26924D12070086CB12804BF9BDADE51C4C55427763132A275D2744665EFE553`.
 
 Local raw evidence is in the controlling checkout's `out/integration/`:
 `build-release.log`, `native-tests.log`, `python-tests.log`,

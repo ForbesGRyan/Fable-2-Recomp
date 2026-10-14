@@ -16,8 +16,12 @@
 #include "../capture/xenos_tiling.h"
 
 namespace fable2::native::render {
+struct TextureSnapshot {
+  std::vector<uint8_t> base, mips;
+  uint64_t hash = 0;
+};
 
-enum class TexFormat : uint8_t { kUnsupported, kDxt1, kDxt23, kDxt45, k8888, kDxt3a };
+enum class TexFormat : uint8_t { kUnsupported, kDxt1, kDxt23, kDxt45, k8888, kDxt3a, kDxt5a, k565 };
 
 struct TexFormatInfo {
   uint32_t block = 1;            // texels per block edge
@@ -32,6 +36,8 @@ inline TexFormat TexFormatFromXenos(uint32_t xenos_format) {
     case 20: return TexFormat::kDxt45;  // k_DXT4_5
     case 6: return TexFormat::k8888;    // k_8_8_8_8
     case 58: return TexFormat::kDxt3a;  // k_DXT3A: no BC equivalent, decoded to R8 (DecodeDxt3aLevel)
+    case 59: return TexFormat::kDxt5a;  // k_DXT5A: BC4, including the menu/font atlas
+    case 4: return TexFormat::k565;
     default: return TexFormat::kUnsupported;
   }
 }
@@ -39,10 +45,12 @@ inline TexFormat TexFormatFromXenos(uint32_t xenos_format) {
 inline TexFormatInfo FormatInfo(TexFormat f) {
   switch (f) {
     case TexFormat::kDxt1:
+    case TexFormat::kDxt5a:
     case TexFormat::kDxt3a: return {4, 8, 3};
     case TexFormat::kDxt23:
     case TexFormat::kDxt45: return {4, 16, 4};
     case TexFormat::k8888: return {1, 4, 2};
+    case TexFormat::k565: return {1, 2, 1};
     default: return {};
   }
 }
@@ -427,6 +435,23 @@ inline bool UntileLevel(const uint8_t* src, size_t src_size, const LevelLayout& 
     }
   }
   return true;
+}
+
+// k_5_6_5 (Xenos format 4, uploaded as host B5G6R5 words): after the endian swap the texel's low five bits are
+// its red (channel x) and the high five its blue, as the SDK's load shader for this format
+// (texture_load_r5g6b5_b5g6r5_cs) moves bits 0 to 4 of the swapped word to bits 11 to 15 of the host word (that
+// format's red) and bits 11 to 15 to bits 0 to 4 (its blue); the six green bits stay. The same rule as
+// k1555LowFieldChannel for the 1555 format. Measured without this exchange: the "Scene paused" backdrop (a
+// 1024 x 512 k_5_6_5 copy of the scene, fetch swizzle z,y,x,1) showed red and blue exchanged against the guest
+// picture (sub-project 14 ledger 148). Exchanges the fields of `texels` little-endian words in place.
+inline void Exchange565Fields(uint8_t* row, uint32_t texels) {
+  for (uint32_t i = 0; i < texels; ++i) {
+    uint8_t* p = row + size_t(i) * 2;
+    const uint32_t w = uint32_t(p[0]) | (uint32_t(p[1]) << 8);
+    const uint32_t x = ((w & 31u) << 11) | (w & 0x7E0u) | (w >> 11);
+    p[0] = uint8_t(x);
+    p[1] = uint8_t(x >> 8);
+  }
 }
 
 // k_DXT3A (Xenos format 58) -> an 8-bit single-channel image, width * height bytes row-major. The format is the

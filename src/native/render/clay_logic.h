@@ -25,6 +25,7 @@
 
 #include "../capture/draw_record.h"
 #include "../capture/render_state.h"
+#include "../capture/presentation_frame.h"
 #include "../capture/shader_tally.h"
 #include "frame_scene.h"
 #include "geometry_cache_index.h"
@@ -349,6 +350,8 @@ constexpr ClayPostDecision DecideClayPost(const ClayPostInputs& in) {
 // entries of red, green, blue in 0..1 (native_render_state.h, PostRamp::rgb), null when there is none
 // or it failed its rule.
 struct ClayPostRequest {
+  const capture::UiFrame* particles = nullptr;
+  bool presentation = false;  // presentation owns the final history blend after UI
   bool post = false, bloom = false, sun = false;
   const float (*ramp)[3] = nullptr;
   // The pass was not rendered for a while before this Render (the native view was off, or there was no
@@ -4140,7 +4143,7 @@ struct ClayPostConstants {
   float bright[5];      // EE92: c31.x, c46.x, c47.x, c77.x, c77.y
   uint32_t bloom_on;    // 1: the bloom's steps are drawn and the composite reads their result (plan Task 8)
   uint32_t sun_on;      // 1: the sun layer feeds the bright pass (plan Task 14)
-  uint32_t pad;
+  uint32_t pad;         // float bits: owned same-frame half-resolution effect gain, zero without one
   float blur[4][4];     // EA83's seven weights in rows 0 and 1 (the centre first), 28DB's in rows 2 and 3
   float radial[4];      // 4BE4: c31.x, c31.y, c46.x, c47.x
   float table[capture::kPostTableTexels / 4][4];  // texel i at [i >> 2][i & 3]

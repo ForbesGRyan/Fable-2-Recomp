@@ -40,7 +40,9 @@ extern "C" void __imp__ProcessAndProcessAndProcess1087_82242628(PPCContext& ctx,
 extern "C" void __imp__ProcessAndProcessAndProcess523_82B9BF90(PPCContext& ctx, uint8_t* base);
 extern "C" void __imp__sub_82B9BEC8(PPCContext& ctx, uint8_t* base);
 extern "C" void __imp__ProcessAndProcessAndProcess1263_82BA8350(PPCContext& ctx, uint8_t* base);
-extern "C" void __imp__ProcessAndProcessAndProcess1046_822A6318(PPCContext& ctx, uint8_t* base);
+// 822A6318 (bin select/reset) is hooked by the capture layer (xdk_hooks.inc,
+// kHook_SetBinSelect_822A6318): the native UI masks observe its untiled bin
+// reset there. Not probed here, so the generated hook is never skipped.
 extern "C" void __imp__MemSet_SdkRuntime_82CA3190(PPCContext& ctx, uint8_t* base);
 extern "C" void __imp__sub_82B9CB88(PPCContext& ctx, uint8_t* base);
 extern "C" void __imp__ProcessAndProcessAndProcess1258_82B9C7F8(PPCContext& ctx, uint8_t* base);
@@ -135,7 +137,6 @@ inline Probe probe_h4{"h 82242628"};
 inline Probe probe_h5{"h 82B9BF90"};
 inline Probe probe_h6{"h 82B9BEC8"};
 inline Probe probe_h7{"h 82BA8350"};
-inline Probe probe_h8{"h 822A6318"};
 inline Probe probe_h9{"h 82CA3190"};
 inline Probe probe_h10{"h 82B9CB88"};
 inline Probe probe_h11{"h 82B9C7F8"};
@@ -299,7 +300,6 @@ FPS_PROBE_HOOK(ProcessAndProcessAndProcess1257_821D17B8, probe_h3, __imp__Proces
 FPS_PROBE_HOOK(ProcessAndProcessAndProcess523_82B9BF90, probe_h5, __imp__ProcessAndProcessAndProcess523_82B9BF90)
 FPS_PROBE_HOOK(sub_82B9BEC8, probe_h6, __imp__sub_82B9BEC8)
 FPS_PROBE_HOOK(ProcessAndProcessAndProcess1263_82BA8350, probe_h7, __imp__ProcessAndProcessAndProcess1263_82BA8350)
-FPS_PROBE_HOOK(ProcessAndProcessAndProcess1046_822A6318, probe_h8, __imp__ProcessAndProcessAndProcess1046_822A6318)
 FPS_PROBE_HOOK(MemSet_SdkRuntime_82CA3190, probe_h9, __imp__MemSet_SdkRuntime_82CA3190)
 FPS_PROBE_HOOK(sub_82B9CB88, probe_h10, __imp__sub_82B9CB88)
 FPS_PROBE_HOOK(ProcessAndProcessAndProcess1258_82B9C7F8, probe_h11, __imp__ProcessAndProcessAndProcess1258_82B9C7F8)

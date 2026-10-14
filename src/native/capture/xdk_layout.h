@@ -310,6 +310,11 @@ constexpr uint32_t DeviceRegShadowOffset(uint32_t reg) {
   if (reg >= 0x2000 && reg <= 0x200F) return kDeviceSurfaceInfoOffset + 4 * (reg - 0x2000);
   if (reg >= 0x2100 && reg <= 0x2114) return kDeviceRegShadowBase2100 + 4 * (reg - 0x2100);
   if (reg >= 0x2200 && reg <= 0x220B) return kDeviceRegShadowBase2200 + 4 * (reg - 0x2200);
+  // Draw builders flush the 0x2280 run from +0x2964 (documented above).
+  if (reg >= 0x2280 && reg <= 0x2287) return 0x2964 + 4 * (reg - 0x2280);
+  // DrawIndexedVertices 0x8221E2A4..0x8221E2B4 flushes 38 words
+  // from +0x29B8 starting at 0x2300 (frame-map, shadow-offset table).
+  if (reg >= 0x2300 && reg <= 0x2325) return 0x29B8 + 4 * (reg - 0x2300);
   if (reg >= 0x2380 && reg <= 0x2387) return kDeviceRegShadowBase2380 + 4 * (reg - 0x2380);
   return 0;
 }

@@ -94,6 +94,29 @@ struct PostRegisters {
   bool have_composite, have_bright, have_blur[2];
 };
 
+// EA83/28DB are reused by bloom and depth of field in the opening town.
+// Their quarter-size 10-bit UNORM and HDR sources must not share weights.
+enum class PostBlurSource : uint8_t { kUnknown, kBloom, kDepthOfField };
+inline PostBlurSource ClassifyPostBlurSource(const uint32_t fetch[6]) {
+  if (!fetch || (fetch[0]&3)!=2 || !(fetch[1]&0xFFFFF000u) ||
+      ((fetch[5]>>9)&3)!=1 || (fetch[2]&8191)+1!=280 ||
+      ((fetch[2]>>13)&8191)+1!=180) return PostBlurSource::kUnknown;
+  const uint32_t format=fetch[1]&63;
+  if (format==7 || format==54) return PostBlurSource::kBloom;
+  if (format==29) return PostBlurSource::kDepthOfField;
+  return PostBlurSource::kUnknown;
+}
+inline void RecordPresentationBloomBlur(PostRegisters& regs,uint32_t axis,
+                                        const uint32_t fetch[6],const float values[2][4]) {
+  if (axis>=2) return;
+  const auto source=ClassifyPostBlurSource(fetch);
+  // A recognized DOF draw leaves this frame's bloom inputs intact. Unknown
+  // source/state or a failed register read invalidates the affected row.
+  if (source==PostBlurSource::kDepthOfField) return;
+  regs.have_blur[axis]=source==PostBlurSource::kBloom && values;
+  if (regs.have_blur[axis]) std::memcpy(regs.blur[axis],values,sizeof(regs.blur[axis]));
+}
+
 // The pixel registers of each step, in the order of PostRegisters' rows. None of them is a
 // register a LoadAluConstants call can name (light_block.h, kBufferLoadRanges: pixel c0..c7 and
 // c80..c115): the device's bank holds their value at the step's rectangle.
@@ -303,7 +326,17 @@ inline bool PostRadialSame(const float a[3][4], const float b[3][4]) {
 // frame row; no shader input): the base address of the fetch constant and the XXH3 hash of the
 // 2,048 bytes that were decoded, which is the "content" a discovery capture names the table by
 // in the composite row's "tfc". Zero without a block.
-struct PostSource { uint32_t base = 0; uint64_t content = 0; };
+struct PostSource {
+  uint32_t base = 0;
+  uint32_t presentation_kind = 0; // 0 ordinary, 1 B863 effects, 2 F51 DOF; occupies old padding
+  uint64_t content = 0;
+  constexpr PostSource() = default;
+  // Preserve the original (base, content) construction despite using its
+  // old padding for the optional presentation dependency marker.
+  constexpr PostSource(uint32_t address,uint64_t identity,uint32_t kind=0)
+      : base(address),presentation_kind(kind),content(identity) {}
+};
+static_assert(sizeof(PostSource)==16);
 
 // Which block a frame gets (FrameBuilder::Finish; pure).
 enum class PostPick : uint8_t { kNone, kOwn, kKept };

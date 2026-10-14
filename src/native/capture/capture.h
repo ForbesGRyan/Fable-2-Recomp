@@ -16,6 +16,11 @@ void SetMemory(rex::memory::Memory* memory);
 // Called by every XDK dispatch override before / after the original.
 void OnXdkCall(uint32_t id, PPCContext& ctx, uint8_t* base);
 void OnXdkReturn(uint32_t id, PPCContext& ctx, uint8_t* base);
+// 822A6318(r4=0) is the untiled bin reset; the generated hook
+// (kHook_SetBinSelect_822A6318) calls these around the original. fps_probe.h
+// (not compiled) must not override the symbol, or the generator skips the hook.
+void OnUiBinResetCall(uint32_t device);
+void OnUiBinResetReturn(uint32_t device);
 // Once per guest frame (before the D3D census frame hook).
 void OnSwap();
 // The capture layer is active (native renderer on or discovery requested).

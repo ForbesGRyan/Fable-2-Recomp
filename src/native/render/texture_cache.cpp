@@ -1,4 +1,8 @@
 #include "texture_cache.h"
+#ifndef XXH_INLINE_ALL
+#define XXH_INLINE_ALL
+#endif
+#include <xxhash.h>
 
 #include <algorithm>
 #include <chrono>
@@ -40,6 +44,8 @@ nrhi::Format HostFormat(TexFormat f) {
     case TexFormat::kDxt45: return nrhi::Format::kBC3_UNORM;
     case TexFormat::k8888: return nrhi::Format::kR8G8B8A8_UNORM;
     case TexFormat::kDxt3a: return nrhi::Format::kR8_UNORM;  // CPU-decoded (DecodeDxt3aLevel)
+    case TexFormat::kDxt5a: return nrhi::Format::kBC4_UNORM;
+    case TexFormat::k565: return nrhi::Format::kB5G6R5_UNORM;
     default: return nrhi::Format::kUnknown;
   }
 }
@@ -275,9 +281,30 @@ nrhi::TextureView* TextureCache::ResolveWater(nrhi::Cmd* cmd, nrhi::Device* dev,
   return view;
 }
 
+bool TextureCache::CaptureSnapshot(const uint32_t fetch[6],uint64_t limit,TextureSnapshot* out) {
+  TextureFetch t; Plan p;
+  if(DecodeTextureFetch(fetch,&t)!=FetchError::kNone ||
+     !BuildPlan(t,FormatInfo(t.format),t.format==TexFormat::kDxt3a ? 1u : std::min(LevelCount(t),kMaxLevels),&p) ||
+     p.base_only || uint64_t(p.base_extent)+p.mip_extent>limit) return false;
+  const uint8_t* base=capture::ReadPhysical(t.base_phys,p.base_extent);
+  const uint8_t* mips=p.mip_extent ? capture::ReadPhysical(t.mip_phys,p.mip_extent) : nullptr;
+  if(!base || (p.mip_extent && !mips)) return false;
+  TextureSnapshot source;
+  source.base.assign(base,base+p.base_extent);
+  if(mips) source.mips.assign(mips,mips+p.mip_extent);
+  source.hash=XXH3_64bits(source.base.data(),source.base.size());
+  if(!source.mips.empty()) source.hash^=XXH3_64bits(source.mips.data(),source.mips.size())*0x9E3779B97F4A7C15ull;
+  *out=std::move(source);return true;
+}
+nrhi::TextureView* TextureCache::ResolveSnapshot(nrhi::Cmd* cmd,nrhi::Device* dev,const uint32_t fetch[6],
+    const TextureSnapshot& source,uint32_t* sampler,float* uv_fix,MaterialStatus* status,TextureStats& st) {
+  TextureFetch t;
+  if(latched_ || DecodeTextureFetch(fetch,&t)!=FetchError::kNone) {*status=MaterialStatus::kTextureBad;return nullptr;}
+  return ResolveFetch(cmd,dev,fetch,t,nullptr,sampler,uv_fix,status,st,&source);
+}
 nrhi::TextureView* TextureCache::ResolveFetch(nrhi::Cmd* cmd, nrhi::Device* dev, const uint32_t fetch[6], const TextureFetch& t,
                                               const WaterDecode* water, uint32_t* sampler, float* uv_fix, MaterialStatus* status,
-                                              TextureStats& st) {
+                                              TextureStats& st,const TextureSnapshot* snapshot) {
   auto fail = [status](MaterialStatus s) -> nrhi::TextureView* {
     *status = s;
     return nullptr;
@@ -300,6 +327,10 @@ nrhi::TextureView* TextureCache::ResolveFetch(nrhi::Cmd* cmd, nrhi::Device* dev,
   const uint8_t* base = nullptr;
   const uint8_t* mips = nullptr;
   auto read = [&]() {
+    if(snapshot) {
+      if(snapshot->base.size()!=plan.base_extent || snapshot->mips.size()!=plan.mip_extent || plan.base_only) return false;
+      base=snapshot->base.data();mips=plan.mip_extent ? snapshot->mips.data() : nullptr;return true;
+    }
     base = capture::ReadPhysical(t.base_phys, plan.base_extent);
     if (!base) return false;
     if (plan.mip_extent) {
@@ -316,13 +347,17 @@ nrhi::TextureView* TextureCache::ResolveFetch(nrhi::Cmd* cmd, nrhi::Device* dev,
 
   // The sample hash is taken once per frame per texture (many draws share one).
   TextureState& state = states_[key];
-  if (state.last_frame != frame_) {
+  if (snapshot) {
+    if(!read()) return fail(MaterialStatus::kTextureBad);
+    if(state.sample_hash!=snapshot->hash) state.bad=false;
+    state.sample_hash=snapshot->hash;state.last_frame=frame_;
+  } else if (state.last_frame != frame_) {
     if (!read()) return fail(MaterialStatus::kTextureBad);
     uint64_t hash = SampleHash(base, plan.base_extent);
     if (mips) hash ^= SampleHash(mips, plan.mip_extent) * 0x9E3779B97F4A7C15ull;
     NoteSample(state, hash, frame_);
   }
-  if (state.dynamic) return fail(MaterialStatus::kTextureDynamic);
+  if (!snapshot && state.dynamic) return fail(MaterialStatus::kTextureDynamic);
   if (KnownBad(state)) return fail(MaterialStatus::kTextureBad);  // these contents failed to decode
 
   nrhi::TextureView* view = nullptr;
@@ -427,6 +462,10 @@ nrhi::TextureView* TextureCache::Upload(nrhi::Cmd* cmd, nrhi::Device* dev, const
       *status = MaterialStatus::kTextureBad;
       return nullptr;
     }
+    // k_5_6_5: the texel's red is its low field; the host B5G6R5 word's red is its high field (Exchange565Fields).
+    if (t.format == TexFormat::k565)
+      for (uint32_t by = 0; by < l.height_blocks; ++by)
+        Exchange565Fields(scratch_.data() + host[lv].offset + size_t(by) * host[lv].row_pitch, l.width_blocks);
   }
 
   auto latch = [&](const char* what) -> nrhi::TextureView* {
@@ -471,7 +510,7 @@ nrhi::TextureView* TextureCache::Upload(nrhi::Cmd* cmd, nrhi::Device* dev, const
   vd.base_mip = 0;
   vd.mip_levels = ~0u;
   // (a water texture's view has no swizzle: the surface's program picks the channels, WaterHostChannel)
-  for (int i = 0; i < 4 && !water; ++i) vd.swizzle[i] = r8 ? HostSwizzleR8(t.swizzle[i]) : HostSwizzle(t.swizzle[i]);
+  for (int i = 0; i < 4 && !water; ++i) vd.swizzle[i] = (r8 || t.format == TexFormat::kDxt5a) ? HostSwizzleR8(t.swizzle[i]) : HostSwizzle(t.swizzle[i]);
   nrhi::TextureView* view = dev->CreateTextureView(tex, vd);
   if (!view) {
     dev->DestroyDeferred(staging);

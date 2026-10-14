@@ -116,8 +116,9 @@ class Case:
     bools) and what the formula gets (`args`, by parameter name); the microcode's oC0.xyz is divided by
     `scale` (the output scale c20.w and whatever else lies outside the formula) before the comparison."""
 
-    def __init__(self, consts, regs, sampler, args, scale, bools=()):
+    def __init__(self, consts, regs, sampler, args, scale, bools=(), tex_size=None):
         self.consts, self.regs, self.sampler, self.args, self.scale, self.bools = consts, regs, sampler, args, scale, bools
+        self.tex_size = tex_size or {}
 
 
 class Result:
@@ -144,7 +145,7 @@ def check(ps_text, make_case, formula, trials, seed=1, tol=TOLERANCE):
     for k in range(trials):
         case = make_case(rng)
         m = ue.Machine(ps_text, case.consts, case.sampler, regs={r: list(v) for r, v in case.regs.items()},
-                       bools=case.bools)
+                       bools=case.bools, tex_size=case.tex_size)
         out = m.run()["oC0"]
         got = [out[i] / case.scale[i] for i in range(3)]
         want = formula(**case.args)
@@ -230,6 +231,8 @@ MULTI_LIGHTS = {
     "45243B758F9272AB": 2, "AF1E16EE57E4BB06": 2, "04F23292B2F44077": 4, "578342593A37DD35": 4,     # terrain layers
     "E0996BF4D9539D38": 7, "0981301D645E2517": 7,                                               # campfire terrain
     "648B965C200A5113": 2, "789266C3E42D7E59": 4,                                                 # objects
+    "FC0922A3A8D8DA7A": 7, "F96A4494958BFA12": 2,                                               # childhood town
+    "F2F103F16764043B": 4, "A22982E86122DA41": 4,                                               # Murgo crowd
     "58D3FAAAA84A48AA": 2, "2FBE9B4EE822609A": 4, "7928BAA7A6691A5D": 7,                         # tree trunks
     "E99F4ACC7A3C78B4": 2, "F525E023E08AC9BB": 2,                                                 # plants
 }
@@ -517,6 +520,11 @@ PS_LITERALS.update({
     "58D3FAAAA84A48AA": {254: [1, 0, -1, NAN], 255: [2, NAN, NAN, NAN]},
     "2FBE9B4EE822609A": {254: [1, 0, -1, NAN], 255: [2, NAN, NAN, NAN]},
     "7928BAA7A6691A5D": {254: [1, 0, -1, 0.5], 255: [2, 0, 0, 0]},  # run 764 ps_lit
+    "FC0922A3A8D8DA7A": {254: [0, 1, -1, 1.5], 255: [2, 0, 0, 0]},  # run 802 ps_lit
+    "F96A4494958BFA12": {254: [0, 1, -1, 1.5], 255: [2, 0, 0, 0]},  # run 802 ps_lit
+    "A22982E86122DA41": {254: [0, 1, -1, 1.5], 255: [2, 0, 0, 0]},  # run 829 ps_lit
+    "F2F103F16764043B": {252: [0, 1, 1.5, -1], 253: [.125, .5, .375, .1],
+                         254: [1, 2, 3, .5], 255: [-2, 0, 0, 0]},  # run 829 ps_lit
 })
 
 
@@ -576,7 +584,7 @@ def _object_driver(ps, vs, dumps, multi, sun_slot=None, lanterns=False):
         for k in (8, 9, 10):
             c[k] = [rng.uniform(0.5, 2.0), rng.uniform(0.5, 2.0), rng.random(), rng.random()]
         c[23] = [rng.uniform(-1, 1) for _ in range(3)] + [rng.uniform(0.0, 4.0)]
-        if ps == "2FD24989AB04A475":
+        if ps in ("2FD24989AB04A475", "F96A4494958BFA12", "A22982E86122DA41", "F2F103F16764043B"):
             # Its specular exponent is lerp(c24.x, c24.y, tf1.a), computed outside any bool block (the
             # other three use a fixed fourth power); the specular term itself is off with tf1 black.
             c[24] = [rng.uniform(1.0, 5.0), rng.uniform(10.0, 100.0), 1.0, 0.0]
@@ -593,14 +601,28 @@ def _object_driver(ps, vs, dumps, multi, sun_slot=None, lanterns=False):
                 lantern_list = _lanterns_in_slots(rng, c, sun_slot, regs[2][:3]) if lanterns else []
                 sun = 80 + sun_slot
         mask = rng.random()
+        cascade_depth = None
+        if ps == "F2F103F16764043B":
+            # This variant fetches its near/far cascade maps directly. Isolate
+            # material/light arithmetic with uniform depth maps at both binary
+            # shadow endpoints. Intermediate PCF filtering is not proved here.
+            cascade_depth = rng.choice([0.0, 1.0])
+            mask = 1.0 - cascade_depth
+            c[12] = [1e9] * 4
+            c[13] = [1.0] * 4
+            for k in range(36, 44): c[k] = [0, 0, 0, 1 if k in (39, 43) else 0]
+            c[38] = c[42] = [0, 0, 0, .5]
         texel = [rng.uniform(0.05, 1.0) for _ in range(4)]         # tf0: colour and alpha
         gloss = rng.random()
         # b128 (objects): the colour is divided by its alpha squared. b132 (trees): the colour is
         # multiplied by interpolator o6 and o7 is added, the vertex shader's fog, which is 1 and 0 while
         # the vertex fog is off, so the bool makes no difference here. b129 (trees) stays clear.
         bools = rng.choice([(), (128,), (132,), (128, 132)])
+        if cascade_depth is not None: bools = tuple(b for b in bools if b != 128)
 
         def sampler(slot, coords, attrs):
+            if cascade_depth is not None and slot in (6, 7):
+                return [cascade_depth] * 4
             if slot == 0:
                 return texel
             if slot == 1:
@@ -620,7 +642,8 @@ def _object_driver(ps, vs, dumps, multi, sun_slot=None, lanterns=False):
         args = dict(A=albedo, vcolour=vcolour, tint=c[21][:3], tint_pow=c[21][3], add=c[20][:3], floor=c[22][:3],
                     t=lf.ambient_t(lf.ambient_axis(n_vs, vc[19][:3]), n_vs), n_dot_sun=n_dot_sun, sun_col=c[sun + 7][:3],
                     c27w=c[27][3], sun_gate=gate, c49=c[49][:3], lights=lights)
-        return Case(c, regs, sampler, args, [c[20][3] * c[26][i] for i in range(3)], bools)
+        return Case(c, regs, sampler, args, [c[20][3] * c[26][i] for i in range(3)], bools,
+                    {6: (2048, 2048), 7: (2048, 2048)} if cascade_depth is not None else None)
 
     return ue.load(dumps, ps, "frag"), make_case
 
@@ -632,7 +655,13 @@ FAMILIES.update({
     "object-multi": [("648B965C200A5113", "ECD66A10092E6562"), ("648B965C200A5113", "79EAC49585797037"),
                      ("648B965C200A5113", "D4D558DA6A82BDC8"), ("648B965C200A5113", "A1F7E9885EC466DF"),
                      ("789266C3E42D7E59", "ECD66A10092E6562"), ("789266C3E42D7E59", "D4D558DA6A82BDC8"),
-                     ("789266C3E42D7E59", "A1F7E9885EC466DF")],
+                     ("789266C3E42D7E59", "A1F7E9885EC466DF"),
+                     ("FC0922A3A8D8DA7A", "ECD66A10092E6562"),
+                     ("F96A4494958BFA12", "79EAC49585797037"),
+                     ("A22982E86122DA41", "79EAC49585797037"),
+                     ("F2F103F16764043B", "D4D558DA6A82BDC8"),
+                     ("F2F103F16764043B", "A1F7E9885EC466DF"),
+                     ("F2F103F16764043B", "ECD66A10092E6562")],
 })
 
 

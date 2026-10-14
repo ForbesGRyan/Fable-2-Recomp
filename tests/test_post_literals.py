@@ -116,12 +116,12 @@ class PreviousBlendLiterals(unittest.TestCase):
                          "the composite's text")
         self.assertIn("  if (p_previous > 0.0) return float4(PostBlended(pos), 1.0);\n", composite)
         self.assertIn("  return post_level(saturate(now + (before - now) * min(p_previous, 1.0)));\n", composite)
-        self.assertIn("  float3 now = post_level(PostComposite(scene_target.Load(int3(pos.xy, 0)).rgb, veil));\n", composite)
+        self.assertIn("  float3 now = post_level(PostComposite(PostSceneWithEffects(pos), veil));\n", composite)
         # The pass hands the share the pure rule gives, to the constants' field the shader reads, and reads the
         # other front target, never the one it writes.
         self.assertIn("post_constants.previous = front_step.share;", self.pass_cpp)
         self.assertIn("front_step.share > 0.0f && front_step.read != front_step.write ? front_view_[front_step.read] : nullptr", self.pass_cpp)
-        self.assertIn("StepClayFront(front_state_, post_frame, post.sun, front_wanted && EnsureFrontPrevious(dev), oracle_fed)", self.pass_cpp)
+        self.assertIn("StepClayFront(front_state_, post_frame, post.sun && !post.presentation, front_wanted && EnsureFrontPrevious(dev), oracle_fed)", self.pass_cpp)
 
 
 class CloudLiterals(unittest.TestCase):
@@ -377,7 +377,8 @@ class PostLiterals(unittest.TestCase):
         # The shader's statements are the reference's terms, in its order.
         body = _one(r"float3 PostComposite\(float3 scene, float3 bloom\) \{\n(.*?)\n\}", self.composite, "PostComposite")
         self.assertEqual([line.strip() for line in body.split("\n")], [
-            "float3 s = post_scene(scene);",
+            "float3 s = scene;",
+            "[branch] if (p_pad == 0) s = post_scene(scene);",
             "float L = post_lum(s);",
             "float e = p_c77y * post_table(p_c46x * L);",
             "float3 c = saturate(e * (L + saturate(p_c47x * L) * (s - L)));",

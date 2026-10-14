@@ -210,7 +210,7 @@ class Machine:
         if ins.dest_kind == "r":
             tgt = self.r[ins.dest]
         else:
-            key = {"o": f"o{ins.dest}", "oc": f"oC{ins.dest}", "pos": "oPos", "depth": "oDepth"}[ins.dest_kind]
+            key = {"o": f"o{ins.dest}", "oc": f"oC{ins.dest}", "pos": "oPos", "depth": "oDepth", "pts": "oPts"}[ins.dest_kind]
             tgt = self.out.setdefault(key, [0.0] * 4)
         for i, ch in enumerate(swz[:4]):
             if ch == "_":
@@ -259,9 +259,10 @@ class Machine:
             return [math.floor(x) for x in self._src(s[0], 4)]
         if op == "trunc":
             return [_trunc(x) for x in self._src(s[0], 4)]
-        if op in ("setp_ne_push", "setp_gt_push"):
+        if op in ("setp_eq_push", "setp_ne_push", "setp_gt_push", "setp_ge_push"):
             a, b = self._src(s[0], 4), self._src(s[1], 4)
-            holds = (lambda x: x != 0) if op == "setp_ne_push" else (lambda x: x > 0)
+            holds = {"setp_eq_push": lambda x: x == 0, "setp_ne_push": lambda x: x != 0,
+                     "setp_gt_push": lambda x: x > 0, "setp_ge_push": lambda x: x >= 0}[op]
             self.p0 = a[3] == 0 and holds(b[3])
             return [0.0 if a[0] == 0 and holds(b[0]) else a[0] + 1.0] * 4
         if op == "kill_gt":
@@ -321,12 +322,18 @@ class Machine:
         if op in ("setp_eq", "setp_ne", "setp_gt", "setp_ge"):
             self.p0 = {"setp_eq": a == 0, "setp_ne": a != 0, "setp_gt": a > 0, "setp_ge": a >= 0}[op]
             return 0.0 if self.p0 else 1.0
+        if op == "setp_inv":
+            self.p0 = a == 1.0
+            return 0.0 if self.p0 else 1.0 if a == 0.0 else a
+        if op == "setp_pop":
+            self.p0 = a - 1.0 <= 0.0
+            return 0.0 if self.p0 else a - 1.0
         raise NotImplementedError(f"scalar op {op}")
 
     _SCALAR = {"retain_prev", "mulsc", "addsc", "subsc", "adds", "muls", "maxs", "mins", "subs", "adds_prev",
                "muls_prev", "subs_prev", "seqs", "sgts", "sges", "snes", "floors", "frcs", "exp", "log", "rcp",
                "rsq", "sqrt", "setp_eq", "setp_ne", "setp_gt", "setp_ge", "maxas", "maxasf", "truncs", "sin",
-               "cos"}
+               "cos", "setp_inv", "setp_pop"}
 
     def _fetch(self, ins):
         coords = tuple(self._src(ins.srcs[0], 1 if ins.op == "tfetch1D" else 2))

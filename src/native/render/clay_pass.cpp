@@ -226,6 +226,9 @@ nrhi::CullMode ToCull(uint8_t c) {
 }  // namespace
 
 void ClayPass::DestroyObjects() {
+  particles_.Release(device_);
+  dof_.Release(device_);
+  dof_complete_=false;
   DestroyShadowObjects();  // (first: its view of depth_ and its pipelines of vs_ and layout_)
   DestroyWaterTargets();  // (before the sky step's objects: its pipeline is made of the sky's pixel program)
   DestroyWaterObjects();
@@ -254,6 +257,7 @@ void ClayPass::DestroyObjects() {
     for (nrhi::Buffer* b : terrain_destroy_) device_->DestroyDeferred(b);
     device_->DestroyDeferred(terrain_cb_);
     device_->DestroyDeferred(linear_view_);
+    device_->DestroyDeferred(color_view_);
     device_->DestroyDeferred(linear_);
     device_->DestroyDeferred(color_);
     device_->DestroyDeferred(depth_);
@@ -275,6 +279,7 @@ void ClayPass::DestroyObjects() {
   terrain_destroy_.clear();
   terrain_cb_ = nullptr;
   linear_view_ = nullptr;
+  color_view_ = presentation_front_ = nullptr;
   linear_ = color_ = depth_ = nullptr;
   white_ = nullptr;
   white_view_ = nullptr;
@@ -409,6 +414,9 @@ bool ClayPass::CreateWhite(nrhi::Device* dev) {
 bool ClayPass::Ensure(nrhi::Device* dev) {
   if (ready_ && dev == device_) return true;
   if (dev != device_) {
+    particles_.Release(nullptr);
+    dof_.Release(nullptr);
+    dof_complete_=false;
     // A different device: the old objects are not ours to destroy through it.
     geometry_.Release(nullptr);
     textures_.Release(nullptr);
@@ -430,6 +438,7 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
     terrain_destroy_.clear();
     terrain_cb_ = nullptr;
     linear_view_ = nullptr;
+    color_view_ = presentation_front_ = nullptr;
     linear_ = color_ = depth_ = nullptr;
     ForgetShadowObjects();
     shadow_objects_failed_ = false;  // (another device: its shadows are tried anew)
@@ -641,6 +650,7 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
   color.usage = nrhi::kTextureUsageRenderTarget | nrhi::kTextureUsageCopySource;
   color.initial_state = nrhi::ResourceState::kPixelShaderResource;
   color_ = dev->CreateTexture(color);  // never cleared: the mapping writes every pixel
+  color_view_ = color_ ? dev->CreateTextureView(color_,{}) : nullptr;
   nrhi::TextureDesc depth;
   depth.width = kWidth;
   depth.height = kHeight;
@@ -649,7 +659,7 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
   depth.initial_state = nrhi::ResourceState::kPixelShaderResource;
   depth.clear_depth = 1.0f;
   depth_ = dev->CreateTexture(depth);
-  if (!linear_ || !linear_view_ || !color_ || !depth_) {
+  if (!linear_ || !linear_view_ || !color_ || !color_view_ || !depth_) {
     REXLOG_ERROR("[native] clay: target creation failed");
     return false;
   }
@@ -1871,6 +1881,7 @@ bool ClayPass::EnsureSkyObjects(nrhi::Device* dev) {
 }
 
 void ClayPass::ForgetPostObjects() {
+  presentation_front_ = nullptr;
   post_composite_ps_ = post_ramp_ps_ = nullptr;
   post_composite_pipeline_ = post_ramp_pipeline_ = nullptr;
   for (size_t i = 0; i < 2; ++i) {
@@ -3773,6 +3784,7 @@ bool ClayPass::TakeSceneDump(nrhi::Device* dev, std::vector<uint8_t>* file) {
 void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene, ClayColor color,
                       bool textured, ClayLight light, bool shadows, bool fog, bool wind, bool local_lights, bool coverage,
                       capture::ImpostorMode impostors, bool water, const ClayPostRequest& post, ClayStats& st, TextureStats& tst) {
+  dof_complete_=false;
   if (!ready_ || dev != device_) return;
   // The frame's impostors: the switch as it is now, in a scene captured with it (ClayImpostorMode). Off: nothing
   // below makes an object, reserves a slot, binds or draws anything of the step, and the frame's slot plan is
@@ -4824,12 +4836,13 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   // this frame writes and with what share of the other (StepClayFront). The second target is asked only
   // in a post frame with the sun's switch on; with the switch off the share is 0, the one target of
   // before is written and nothing new is made.
-  const bool front_wanted = post.sun && post_frame;
+  const bool front_wanted = post.sun && post_frame && !post.presentation;
   // (a Render after a stretch without one, the view off: the kept picture is no previous frame's)
   front_state_ = ClayFrontAfterGap(front_state_, post.gap);
-  const ClayFrontStep front_step = StepClayFront(front_state_, post_frame, post.sun, front_wanted && EnsureFrontPrevious(dev), oracle_fed);
+  const ClayFrontStep front_step = StepClayFront(front_state_, post_frame, post.sun && !post.presentation, front_wanted && EnsureFrontPrevious(dev), oracle_fed);
   front_state_ = front_step.next;
   post_constants.previous = front_step.share;
+  presentation_front_ = post_frame ? front_view_[front_step.write] : nullptr;
   st.post_previous = front_step.share;
   // The bright pass's sun flag is the verdict's, and the steps' constants are final: into the buffer.
   post_constants.sun_on = sun == ClaySun::kDrawn ? 1u : 0u;
@@ -5753,6 +5766,15 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
                 furniture_lines == kFurnitureLogLines ? (furniture_changed ? " (last such line for the verdict)" : " (last such line for the counts)") : "");
   }
 
+  if(post.particles && post.particles->frame==scene.frame)
+    particles_.Render(cmd,dev,*post.particles,linear_,depth_,frame_.exposure);
+  nrhi::TextureView* effects_view=particles_.Effects(scene.frame);
+  if(post_frame && effects_view && post.particles && post.particles->frame==scene.frame &&
+     capture::UiFinite(post.particles->effect_gain,65536) && post.particles->effect_gain>0) {
+    std::memcpy(&post_constants.pad,&post.particles->effect_gain,4);
+    std::memcpy(terrain_cb_mapped_+ClaySmallSlotOffset(post_slot_),&post_constants,sizeof(post_constants));
+  }
+
   // The output mapping, or in a post frame the two post steps: every pixel of the mapped target
   // from the linear target of this Render (cleared and drawn above), so the composite never
   // samples a mapped target older than its linear one, or one that was never written.
@@ -5794,7 +5816,8 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     // at t0 and `second` at t1 (the composite's bloom), the white texture in every entry the step does
     // not read (the bright pass's two sun layers, which it reads only with the sun's flag, among them).
     auto post_step = [&](nrhi::Texture* target, uint32_t width, uint32_t height, nrhi::Pipeline* pipeline, const ClayPostStepConstants& words,
-                         nrhi::TextureView* source, nrhi::TextureView* second, nrhi::TextureView* third = nullptr) {
+                         nrhi::TextureView* source, nrhi::TextureView* second, nrhi::TextureView* third = nullptr,
+                         nrhi::TextureView* fourth = nullptr) {
       cmd->SetRenderTargets(target, nullptr);
       cmd->SetViewport({0.0f, 0.0f, float(width), float(height), 0.0f, 1.0f});
       cmd->SetScissor({0, 0, int32_t(width), int32_t(height)});
@@ -5802,7 +5825,7 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       cmd->SetPipeline(pipeline);
       cmd->SetConstantBuffer(kPostParamConstants, terrain_cb_, ClaySmallSlotOffset(post_slot_));
       cmd->SetRootConstants(kPostParamStep, kPostStepWords, &words, 0);
-      nrhi::TextureView* const inputs[kPostTableSize] = {source, second ? second : white_view_, third ? third : white_view_, white_view_};
+      nrhi::TextureView* const inputs[kPostTableSize] = {source, second ? second : white_view_, third ? third : white_view_, fourth ? fourth:white_view_};
       cmd->SetTextures(kPostParamTextures, inputs, kPostTableSize);
       cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
       cmd->Draw(3, 0);
@@ -5935,16 +5958,27 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     // (the front target this frame writes; the other, the previous frame's picture, is read at t2 only
     // with a share above 0, and is never the one written: StepClayFront)
     nrhi::Texture* const front = front_[front_step.write];
-    cmd->Barrier(front, nrhi::ResourceState::kPixelShaderResource, nrhi::ResourceState::kRenderTarget);
-    cmd->FlushBarriers();
-    post_step(front, kWidth / kFrontDivisor, kHeight / kFrontDivisor, post_composite_pipeline_,
+    const bool dof_requested=post.presentation && post.particles && post.particles->frame==scene.frame &&
+      post.particles->dof_requested;
+    if(dof_requested) {
+      // F51 is accepted only with its own current-frame block and native
+      // producer chain. Failure keeps guest output via OverlayCallback.
+      if(scene.post_age==0 && !oracle_fed && front_step.share==0 && post.particles->dof.valid)
+        dof_complete_=dof_.Render(cmd,dev,post.particles->dof,map_vs_,depth_,scene_view,
+          bloom_on ? bloom_p_view_:nullptr,front,terrain_cb_,ClaySmallSlotOffset(post_slot_));
+    } else {
+      cmd->Barrier(front, nrhi::ResourceState::kPixelShaderResource, nrhi::ResourceState::kRenderTarget);
+      cmd->FlushBarriers();
+      post_step(front, kWidth / kFrontDivisor, kHeight / kFrontDivisor, post_composite_pipeline_,
               MakeClayPostStep(ClayPostStep::kComposite, kWidth, kHeight, kFrontLevels), scene_view, bloom_on ? bloom_p_view_ : nullptr,
-              front_step.share > 0.0f && front_step.read != front_step.write ? front_view_[front_step.read] : nullptr);
-    cmd->Barrier(front, nrhi::ResourceState::kRenderTarget, nrhi::ResourceState::kPixelShaderResource);
+              front_step.share > 0.0f && front_step.read != front_step.write ? front_view_[front_step.read] : nullptr,effects_view);
+      cmd->Barrier(front, nrhi::ResourceState::kRenderTarget, nrhi::ResourceState::kPixelShaderResource);
+    }
     cmd->Barrier(color_, nrhi::ResourceState::kPixelShaderResource, nrhi::ResourceState::kRenderTarget);
     cmd->FlushBarriers();
-    post_step(color_, kWidth, kHeight, post_ramp_pipeline_, MakeClayPostStep(ClayPostStep::kRamp, kWidth, kHeight, kMappedLevels), front_view_[front_step.write],
-              nullptr);
+    if(!dof_requested || dof_complete_)
+      post_step(color_, kWidth, kHeight, post_ramp_pipeline_, MakeClayPostStep(ClayPostStep::kRamp, kWidth, kHeight, kMappedLevels), front_view_[front_step.write],
+                nullptr);
     cmd->Barrier(color_, nrhi::ResourceState::kRenderTarget, nrhi::ResourceState::kPixelShaderResource);
     cmd->FlushBarriers();
     // The oracle feed's one read-back: the mapped target of the frame kOracleDumpAfter fed frames after

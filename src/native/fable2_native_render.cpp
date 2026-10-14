@@ -29,10 +29,17 @@
 #include "native_render_state.h"
 #include "../core/readback_force_list.h"
 #include "post_oracle.h"
+#include "capture/presentation_frame.h"
+#include "render/presentation_pass.h"
+#include "render/presentation_probe.h"
 
 REXCVAR_DEFINE_BOOL(fable2_native_render, false, "Fable2",
                     "Register the native guest-output renderer at startup (restart "
                     "required). Seeded from fable2_config.toml [native] enabled.");
+REXCVAR_DEFINE_BOOL(fable2_native_ui, false, "Fable2",
+                   "Replay captured HUD, menu and video presentation in native views (experimental).");
+REXCVAR_DEFINE_BOOL(fable2_native_ui_dump, false, "Fable2",
+                   "Capture bounded native/emulated UI comparison images during discovery.");
 REXCVAR_DEFINE_STRING(fable2_native_view, "off", "Fable2",
                       "Native debug view: off, overlay, split, native, pattern (F6 cycles those), or shadow "
                       "(the clay pass's two shadow maps as grey depth and its screen mask; by name only; a frame "
@@ -243,6 +250,9 @@ std::atomic<bool> g_shadows_usable{true};
 // Clay pass state: command-processor thread only.
 render::Composite g_composite;
 std::unique_ptr<render::ClayPass> g_clay;  // created on first use (cvars parsed)
+render::PresentationPass g_presentation;
+render::PresentationProbe g_presentation_probe;
+std::atomic<bool> g_presentation_retry{false};  // consumed on the GPU thread
 std::shared_ptr<const render::FrameScene> g_clay_scene;  // last scene rendered
 uint64_t g_clay_targets = 0;  // targets generation g_clay_scene was drawn into
 uint64_t g_clay_frames = 0;
@@ -837,7 +847,7 @@ bool RenderCallback(const NativeGuestOutputRenderContext& ctx, void*) {
 // Clay pass into its own native target (the guest output is not touched;
 // the composite draws it). Renders each published scene once. False on
 // failure (latched).
-bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
+bool RenderClay(const NativeGuestOutputRenderContext& ctx, const capture::UiFrame* presentation) {
   std::shared_ptr<const render::FrameScene> scene = capture::Publisher().Latest();
   if (!scene) {
     // No records yet (just switched from a view without a consumer): show the
@@ -873,6 +883,8 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
   // is then drawn without post, "post-ramp"), the bloom's switch and the sun's (the scene's furniture and
   // the sun layer).
   render::ClayPostRequest post;
+  post.presentation = presentation != nullptr;
+  post.particles = presentation && presentation->frame==scene->frame ? presentation : nullptr;
   post.post = CurrentPost();
   post.bloom = CurrentBloom();
   post.sun = CurrentSun();
@@ -1037,7 +1049,7 @@ void PollD3dMessagesOnce(const char* when) {
 // none and is drawn without post ("post-ramp"), said once.
 void ReadRamp() {
   g_post_ramp.valid = false;  // (until this frame's table is read and passes its rule)
-  if (!RampReadWanted(CurrentPost())) return;
+  if (!RampReadWanted(CurrentPost()) && !REXCVAR_GET(fable2_native_ui)) return;
   const auto reader = g_ramp_reader.load(std::memory_order_acquire);
   if (!reader) {
     if (!g_ramp.said_none) REXLOG_INFO("[native] ramp: no reader registered; the scan-out ramp is not read");
@@ -1081,17 +1093,81 @@ void ReadRamp() {
 }
 
 void OverlayCallback(const NativeGuestOutputRenderContext& ctx, void*) {
+  if(ctx.device && g_presentation_retry.exchange(false,std::memory_order_acq_rel)) {
+    g_presentation.Retry(ctx.device);
+    g_presentation_probe.Retry(ctx.device);
+    if(g_clay) g_clay->RetryDof(ctx.device);
+    g_clay_scene=nullptr;g_clay_gap=true;
+  }
+  if (REXCVAR_GET(fable2_native_ui_dump)) {
+    std::vector<uint8_t> bytes;
+    if (g_presentation_probe.Take(ctx.device,&bytes)) {
+      char name[80]; const auto now=std::time(nullptr);
+      std::strftime(name,sizeof(name),"native_ui_%Y%m%d_%H%M%S.f2ui",std::localtime(&now));
+      const auto path=rex::filesystem::GetExecutableFolder()/"logs"/name;
+      std::FILE* fp=_wfopen(path.c_str(),L"wb");
+      const bool written=fp && std::fwrite(bytes.data(),1,bytes.size(),fp)==bytes.size();
+      if(fp) std::fclose(fp);
+      REXLOG_INFO("[native] presentation comparison: {} logs/{} ({} bytes)",written ? "written" : "write failed",name,bytes.size());
+      // The composed draws' screen rectangles, for UI-only comparison regions.
+      std::string rects="{\"frame\":"+std::to_string(g_presentation.last_rects_frame())+",\"rects\":[";
+      bool first=true;
+      for(const auto& r:g_presentation.last_rects()) {
+        char item[96];std::snprintf(item,sizeof(item),"%s[%u,%.2f,%.2f,%.2f,%.2f]",first ? "":",",r.kind,r.x0,r.y0,r.x1,r.y1);
+        rects+=item;first=false;
+      }
+      rects+="]}\n";
+      auto rect_path=path;rect_path+=L".rects.json";
+      if(std::FILE* rf=_wfopen(rect_path.c_str(),L"wb")) {std::fwrite(rects.data(),1,rects.size(),rf);std::fclose(rf);}
+    }
+  }
   const View view = CurrentView();
   if (!Usable(ctx) || !IsCompositeView(view)) {  // off/pattern: record nothing
     g_clay_gap = true;
+    g_presentation.Gap();
     return;
   }
   LogD3dMessages();  // (of the frames before this one: the layer reports a call when it is executed)
   ReadRamp();  // (before the clay pass: a post frame is drawn through this frame's ramp)
-  if (!RenderClay(ctx)) return;
+  const bool ui = REXCVAR_GET(fable2_native_ui) && view != View::kShadow;
+  const auto presentation = ui ? capture::PresentationPublisher().Latest() : nullptr;
+  const auto world_scene = capture::Publisher().Latest();
+  if(presentation && !presentation->world_post_supported()) {
+    g_presentation.Gap();g_clay_scene=nullptr;g_clay_gap=true;
+    SetStatus("Presentation: distortion producer unavailable; current guest output retained");
+    return;
+  }
+  const bool standalone = ui && presentation && presentation->complete &&
+    (presentation->standalone() || !world_scene || world_scene->draws.empty());
+  if(standalone) {
+    g_clay_scene=nullptr; g_clay_gap=true;
+    SetStatus("Presentation: UI-only frame "+std::to_string(presentation->frame));
+  } else if (!RenderClay(ctx, ui && presentation && presentation->complete ? presentation.get() : nullptr)) return;
   WriteOracleDump(ctx.device);  // (the oracle feed's one file; nothing without its switch)
   if (CurrentSceneDump()) WriteSceneDump(ctx.device);  // (the stored native scene's files; nothing without its switch)
-  if (!g_clay_scene) return;  // no scene captured yet: leave the emulated frame
+  nrhi::Texture* picture = g_clay_scene ? g_clay->color() : nullptr;
+  if (ui) {
+    if (!presentation || (g_clay_scene && presentation->frame != g_clay_scene->frame)) { g_presentation.Gap(); return; }
+    if(g_clay_scene && (presentation->dof_requested || g_clay_scene->post_source.presentation_kind==2) &&
+       (!presentation->dof_requested || !g_clay->dof_complete())) {
+      if(g_clay->dof_failed()) Fail("DOF resources");
+      else SetStatus("Presentation: current DOF inputs unavailable; guest output retained");
+      g_presentation.Gap();return;
+    }
+    nrhi::TextureView* world = g_clay_scene && !g_clay_scene->draws.empty() ? g_clay->presentation_front() : nullptr;
+    const bool world_is_display = g_clay_scene && !g_clay_scene->draws.empty() && !world;
+    if(world_is_display) world=g_clay->color_view();
+    g_presentation.SetCoverageWanted(REXCVAR_GET(fable2_native_ui_dump));
+    if (!g_presentation.Render(ctx.cmd, ctx.device, *presentation, world,
+                              g_post_ramp.valid ? g_post_ramp.rgb : nullptr,world_is_display)) {
+      if(g_presentation.failed()) Fail("presentation resources");
+      return;
+    }
+    picture = g_presentation.color();
+    if(REXCVAR_GET(fable2_native_ui_dump)) g_presentation_probe.Capture(ctx,picture,
+      presentation->frame,capture::DiscoveryFirstSceneFrame(),g_presentation.coverage());
+  } else g_presentation.Gap();
+  if (!picture) return;
   if (!g_composite.Ensure(ctx.device, ctx.guest_output->format())) {
     Fail("composite");
     return;
@@ -1107,7 +1183,7 @@ void OverlayCallback(const NativeGuestOutputRenderContext& ctx, void*) {
       g_composite.Draw(ctx.cmd, ctx, g_clay->color(), View::kNative);
     }
   } else {
-    g_composite.Draw(ctx.cmd, ctx, g_clay->color(), view);
+    g_composite.Draw(ctx.cmd, ctx, picture, view);
   }
   g_frame.fetch_add(1, std::memory_order_relaxed);
 }
@@ -1320,6 +1396,7 @@ void PollFrame() {
   if (g_toggle.Update(down)) {
     if (g_latch.IsFailed()) {
       g_latch.Clear();
+      g_presentation_retry.store(true,std::memory_order_release);
       SetStatus({});
       REXLOG_INFO("[native] F6: retrying native renderer");
     } else {
@@ -1350,6 +1427,7 @@ void PollFrame() {
   capture::SetImpostorsWanted(wanted ? CurrentImpostors() : capture::ImpostorMode::kOff);
   // (and the water's: off without a composite view)
   capture::SetWaterWanted(wanted && CurrentWater());
+  capture::SetPresentationWanted(wanted && REXCVAR_GET(fable2_native_ui));
   if (wanted) capture::SetRecordsWanted(true);
   rex::graphics::RequestNativeGuestOutputPostProcess(wanted);
 }

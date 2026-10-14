@@ -224,6 +224,68 @@ For "off", the same line with `--fable2_native_local_lights=off` added. Read the
 109. **The campfire (seven lights).** From the Bower Lake bridge turn right, go down the hill and turn right around the corner, to the campfire with the large tree (user checks of the campfire fixes, `campfire-ground-fix.md`). By day and, if you can, at dusk or night. Its ground and the large trunk use the seven-light shaders, whose sets hold up to four lanterns before the sun. Right: the fire's warm pool on the ground around it and on the side of the trunk that faces it, in both halves alike, and the ground's colour away from the fire as before (the campfire fixes). Wrong: a pool on the ground but none on the trunk, or the reverse; a pool off to one side of the fire; the ground or the trunk much brighter or orange in the native half; the colour of the ground away from the fire changed against the switch off.
 110. **A walk past the bridge lanterns at dusk.** At dusk (sleep until evening at a bed), walk slowly along the Bower Lake bridge past its two lanterns, and back, in split view. Right: each pool stays on the ground and the posts around its lamp while you walk (it moves across the screen with the lamp, as the planks do), the hero and the dog take the lamp's light when they pass it if the emulated ones do, and nothing else in the picture changes as a pool comes into view or leaves it. The flicker is the game's: the lanterns flicker in both halves alike (the game's sets change from frame to frame). Wrong: a pool that slides with the camera or the hero rather than staying by its lamp; a pool that switches on and off as you walk (with the `Light:` line's `refused` counts if it does); anything away from the lanterns that brightens or darkens as you pass; a flicker in the native half that the emulated half does not have. Known: a post's shadow fanning away from the lamp is missing natively (check 38), and the lanterns' pools are not in the lake's reflection.
 
+## Sub-project 14 (native-renderer-presentation)
+
+Enable `--fable2_native_render=true --fable2_native_ui=true`; native UI remains
+experimental and defaults off. Use the usual display/window size. Split view
+shows the emulated picture on the left and native picture on the right.
+
+111. **Hero003 town snow.** After the opening movie, watch the falling flakes
+around Rose and the nearby buildings. Expected: moving, textured flakes on the
+native half, comparable size/brightness to the emulated half, hidden by buildings
+and characters rather than drawing through them. Building and Rose eye textures
+were separately confirmed by the user; snow still needs this observation.
+
+112. **HUD and menu navigation.** At Hero000's bridge, open pause, Quests and
+Maps, change the selection, then return to gameplay. Check icons, changing labels,
+outlines and clipping on both halves. Expected: current selection/text and a clean
+return, with no previous menu left over. Measured on 2026-10-13 (builds 69-72,
+hardware, user-present runs): pause root and Quests/Maps at mean 0.24/255 with
+99.7%/99.2% coverage, HUD opaque UI at 0.23/255 with 99.96%, title at 0.27/255 with
+100%; the pause/return transition shows no stale menu. Your eyes still decide the
+moving case (selection changes while you navigate).
+
+113. **Movie continuity.** Start Hero003 and let its opening movie play normally.
+Check motion, colour, aspect and letterbox through the transition to town.
+Expected: continuous native movie motion and town/subtitles after it. Corresponding
+decoded frames were compared; endpoint screenshots do not establish continuity.
+
+114. **Dialogue/cutscene continuity.** Follow Rose to Murgo's crowd and watch the
+dialogue, subtitles, fades and return to control. Check both halves throughout,
+including camera cuts. Expected: readable current subtitles with the town visible,
+matching overlays and no stale movie or menu. The automated START-skip route reaches
+  opening Rose dialogue. The user confirms movement through Murgo and the following
+  Rose dialogue; full fade/letterbox and transition acceptance remain open.
+
+115. **Murgo crowd and guiding light.** The user confirms improved crowd hair
+  in build 38. After returning to control, watch the golden trail while standing
+  still and walking after Rose. Expected: the native half preserves the moving
+  spark trail through changes of target, with ground/building occlusion. The
+  Build 43 draws the half-resolution layer, but the user still sees native-only
+  flicker before the alley, where it steadies. The defect remains open. Build 44
+  corrects the layer's depth-sample alignment; moving verification is pending.
+  The user reports an unexpected close before reaching the requested view in
+  run 837 and is now away. The close trigger remains unresolved; new shutdown
+  diagnostics are in build 46. Do not infer guide acceptance from that run.
+
+116. **Quiet timing of the native UI (criterion 9; needs you away from the
+machine).** The gate refuses while you type or play audio, so this cannot be run
+while you are present. Leave the machine idle for about fifteen minutes and run:
+`.\out\native-evidence\presentation\timing_ab.ps1` (two gated 100 s runs at Hero000's
+bridge, native UI on then off, no other program running). Expected: the steady
+`[frame]` windows differ by at most 1.0 ms per frame and neither run's steady
+window drops below 30 fps. The script copies both logs next to itself; report
+their names. User-present runs cannot stand in for this gate. Measured with you
+present on 2026-10-13 at the Bowerstone Market save (RUN UNCHECKED): native UI on
+23.3 fps / 41.85 ms, off 23.7 fps / 41.70 ms (+0.15 ms; the scene is emulation
+bound at 23 fps either way), the native pause menu 75 fps.
+
+117. **Hero003 opening on hardware (build 72).** Start Hero003 normally and let the
+movie and the opening dialogue play on the native half. Expected: continuous movie
+motion, then town, subtitles and the black fade, with the guest picture retained
+only during the opening's distortion composite (a known, disclosed fallback). Report
+any stale movie frame, missing subtitle, or a flash at the fade.
+
 ## Done
 - **Check 27, the validation runs of the materials sub-project at its last commit (2026-10-07).** The check asked you to leave the machine alone or to start five runs yourself with `-UserPresent`. You said "run it anyways. i'm fine with it", and the controlling agent started them in your session between 12:29 and 12:44 with `tools\drive_game.ps1 -UserPresent` (six runs; verdict of each `RUN UNCHECKED: -UserPresent given, no idle gate and no watch`; `drive_game_runs.log` reads `gate=USER PRESENT OVERRIDE (gate and watch skipped)`). Result (frame-map section 13, "Validation"): the first run never left the main menu: the game's loading phase ended 1.7 s after the plan's first press, which was lost. The four runs with a native view were then started with the plan 6 s later, and the renderer-off run with the default plan as it is (its press came 0.02 s before the end of the loading phase and was taken; in the gated runs it comes 0.09 to 0.26 s after it, and where in between a press starts to be lost is not known). One of the shifted runs froze and is not used; F6 presses reached the game in two (the view was back where the plan expects it before anything was measured). The rock faces of commit `4d74e0e` are there on the steep ground in view, the flat ground is unchanged, every ground draw has its material, 98 to 99% of the drawn draws are textured and every window without a capture reads 30.0 fps. Not done: a split and an overlay shot of the third spot, and gated runs of that commit.
 - **Unlimited frame rate (2026-10-06, autoplay launches with `--vsync=false --guest_vblank_pacing=false --frame_limit=0`; `fable_2_198.log` renderer off, `fable_2_199.log` view off, `fable_2_200.log` native view).** Menus run at 112 to 115 fps (frame 8.4 ms). In the world the rate does not rise: `fable_2_198.log` holds 27 to 31 fps in the bridge scene (frame 33 to 37 ms = work about 8 ms + the game's render-loop call 25 to 28 ms, no limiter wait). The user was playing during `199` and `200`, so those two are not an A/B of the renderer; the F3 overlay in the 95 s screenshot of `200` (`logs/shots/unlimited_native/shot_95s.png`, a camp with a crowd, native view) gives the attribution: `Guest 21.5 FPS 46.6 ms = work 14.4 + swap 32.2 + limiter/fence 0.0`, `GPU emu busy 36.6 ms (draws 24.3, 5162 draws, 89 resolves)`, `guest pacing 0.0 ms | present 13.3 ms | idle 0.0 ms`. So with the cap lifted the emulated GPU is busy the whole frame (idle 0.0): in the world the frame rate is bound by GPU emulation, about 25 to 37 ms for 4,000 to 5,000 guest draws on this machine, and the default 30 fps cap (the game waits two vblanks of the simulated 60 Hz) sits just above what the emulation delivers. The same overlay is the first crowd reading for checks 11 and 14: `Native: captured 1439, drawn 1369 (deformed 280), skipped 70`, `Geometry: 72 uploads, 3247 hits, 113.1 MB resident, instanced 164, skinned 143`, `Capture: 2.25 ms guest time per frame`, `Textures: textured 579 of 1369 drawn (42%, 79% non-terrain)`; (1369 - T) / (1439 - T) needs the terrain count T, which the visible part of the overlay does not show. In the shot the hero runs with a crossbow on his back, on the body, and four townspeople stand posed.

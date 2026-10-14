@@ -97,7 +97,27 @@ class Fable2App : public rex::ReXApp {
   std::atomic<bool> autoplay_enabled_{true};
   std::vector<fable2::autoplay::Step> autoplay_plan_;
   double autoplay_hold_s_ = 0.1;
-  std::jthread autoplay_thread_;  // last member: joined before the above die
+  std::jthread autoplay_thread_;  // joins before the autoplay state above is destroyed
+
+  // The SDK's final "Window closing" line is also reached after guest exit.
+  // Record the earlier hooks so an unexpected local exit can be attributed
+  // without treating every shutdown as a voluntary close. These diagnostics
+  // neither veto a request nor change guest lifetime.
+  std::atomic<bool> window_close_requested_{false};
+  bool OnWindowCloseRequested() override {
+    window_close_requested_.store(true, std::memory_order_release);
+    const double elapsed = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - autoplay_t0_).count();
+    REXSYS_INFO("[shutdown] window close requested at {:.3f} s", elapsed);
+    return true;
+  }
+  void OnGuestThreadExit(rex::system::XThread* thread) override {
+    (void)thread;
+    const double elapsed = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - autoplay_t0_).count();
+    REXSYS_INFO("[shutdown] main guest thread ended at {:.3f} s, window-close-requested {}",
+        elapsed, window_close_requested_.load(std::memory_order_acquire));
+  }
 
   // Emulate the Xbox 360 Xenos GPU. Two plugins are staged next to the exe:
   //   rexgpu-xenos[d].dll        -> D3D12 (prebuilt SDK plugin; the default)

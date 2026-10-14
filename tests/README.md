@@ -18,3 +18,10 @@ catalogue/content guards in compatible and both single-edition configurations.
 Test executables go under `out/tests`; no game files or audio/GPU device are
 needed. Original XEX paths can optionally be passed to the native verifier,
 and a dump path to the launcher tests, for local checks. Never commit these inputs.
+
+## Running the Python tests on every core
+
+`python -m pytest -q tests/ -n auto` (needs `pip install pytest-xdist`; about 2.5 minutes on
+32 cores against roughly 15 minutes serially). Every test that writes uses a temporary
+directory and the shared `out/shader_dump` is read only, so the parallel result equals the
+serial one (checked 2026-10-13).

@@ -874,5 +874,159 @@
       ],
       "evidence": "Seven-light trunk variant: c80..c86 positions, c87..c93 colours, second bank c95/c97/c102..104/c106/c108/c113/c115. Captured sun at c84/c91, w=0, c95.x=0, c113.xyz=(1,0,0), c112=0, direction equals c109.xyz in all 8 rows. Captured pixel literals c254=(1,0,-1,0.5), c255=(2,0,0,0); existing vertex literal table retained. light_check.py: 400/400 first-light trials and 400/400 sun-slot-4 trials against lit_object with flat pixel normals, black specular and other light colours zero, largest relative error 1.13e-15. Existing native trunk sun/ambient/probe model, point lights and pixel normal mapping outside that model. Vertex fog already follows supported trunk VS; pixel shader has no distance-fog table block, only the existing unsupported b129 volume (clear in captures)."
     }
+  },
+  "0xFC0922A3A8D8DA7A": {
+    "slot": 0,
+    "u": {
+      "input": "r0.x",
+      "stages": [
+        {
+          "scale": "c8.x",
+          "offset": "c8.z"
+        }
+      ]
+    },
+    "v": {
+      "input": "r0.y",
+      "stages": [
+        {
+          "scale": "c8.y",
+          "offset": "c8.w"
+        }
+      ]
+    },
+    "alpha": {
+      "source": "albedo",
+      "component": "w",
+      "scale": "c26.w",
+      "divide_by_alpha": false
+    },
+    "manual": true,
+    "alpha_manual": true,
+    "evidence": "Run 802 native_discovery_20261012_225847.jsonl: main-scene pair ECD66A10092E6562/FC0922A3A8D8DA7A. shader_trace.py resolves tf0 to r0.xy through c8.xy/zw; existing vertex UV entry. The shader squares the sampled RGB at instruction 30. FC0922A3 is the flat city building material; F96A4494 tf0 141B0052 is the inspected blue iris.",
+    "alpha_evidence": "shader_trace.py --alpha: tf0.w*c26.w, no kills; output instruction 231. Colour division is conditional on b128, clear in all captured rows. ps_lit c254=(0,1,-1,1.5), c255=(2,0,0,0).",
+    "light": {
+      "family": "object-multi",
+      "vertex": [
+        "0xECD66A10092E6562"
+      ],
+      "evidence": "light_check.py: 400 first-light trials and 400 sun-slot-4 trials agree with lit_object, worst relative error below 2e-15. 7 lights; captured literals. Native sun/ambient limits remain unchanged."
+    }
+  },
+  "0xF96A4494958BFA12": {
+    "slot": 0,
+    "u": {
+      "input": "r0.x",
+      "stages": [
+        {
+          "scale": "c8.x",
+          "offset": "c8.z"
+        }
+      ]
+    },
+    "v": {
+      "input": "r0.y",
+      "stages": [
+        {
+          "scale": "c8.y",
+          "offset": "c8.w"
+        }
+      ]
+    },
+    "alpha": {
+      "source": "albedo",
+      "component": "w",
+      "scale": "c26.w",
+      "divide_by_alpha": false
+    },
+    "manual": true,
+    "alpha_manual": true,
+    "evidence": "Run 802 native_discovery_20261012_225847.jsonl: main-scene pair 79EAC49585797037/F96A4494958BFA12. shader_trace.py resolves tf0 to r0.xy through c8.xy/zw; existing vertex UV entry. The shader squares the sampled RGB at instruction 23. FC0922A3 is the flat city building material; F96A4494 tf0 141B0052 is the inspected blue iris.",
+    "alpha_evidence": "shader_trace.py --alpha: tf0.w*c26.w, no kills; output instruction 136. Colour division is conditional on b128, clear in all captured rows. ps_lit c254=(0,1,-1,1.5), c255=(2,0,0,0).",
+    "light": {
+      "family": "object-multi",
+      "vertex": [
+        "0x79EAC49585797037"
+      ],
+      "evidence": "light_check.py: 400 first-light trials and 400 sun-slot-1 trials agree with lit_object, worst relative error below 2e-15. 2 lights; captured literals. Native sun/ambient limits remain unchanged."
+    }
+  },
+  "0xF2F103F16764043B": {
+    "slot": 0,
+    "u": {
+      "input": "r0.x",
+      "stages": [
+        {
+          "scale": "c8.x",
+          "offset": "c8.z"
+        }
+      ]
+    },
+    "v": {
+      "input": "r0.y",
+      "stages": [
+        {
+          "scale": "c8.y",
+          "offset": "c8.w"
+        }
+      ]
+    },
+    "alpha": {
+      "source": "albedo",
+      "component": "w",
+      "scale": "c26.w",
+      "divide_by_alpha": false
+    },
+    "manual": true,
+    "alpha_manual": true,
+    "evidence": "Run 829 native_discovery_20261013_083626.jsonl: tf0 UV is r0.xy*c8.xy+c8.zw. F2F103 draws the inspected hair/beard atlases 14200054/14090054; A22982 draws iris 140B0052. Albedo is squared in the light formula. Existing native normal-map and cascade-shadow approximations retain their limits.",
+    "alpha_evidence": "Full independent microcode checks tf0.w*c26.w and UV coordinates. F2F103 does not divide diffuse by alpha; A22982 divides only with b128, clear in the captured route. No pixel kills.",
+    "light": {
+      "family": "object-multi",
+      "vertex": [
+        "0xD4D558DA6A82BDC8",
+        "0xA1F7E9885EC466DF",
+        "0xECD66A10092E6562"
+      ],
+      "evidence": "light_check.py: 400 independent trials per pair, plus 400 trials at each sun slot 1..3. F2F103 trials cover uniform near/far maps at binary shadow endpoints; intermediate direct PCF filtering is not proved or newly implemented."
+    }
+  },
+  "0xA22982E86122DA41": {
+    "slot": 0,
+    "u": {
+      "input": "r0.x",
+      "stages": [
+        {
+          "scale": "c8.x",
+          "offset": "c8.z"
+        }
+      ]
+    },
+    "v": {
+      "input": "r0.y",
+      "stages": [
+        {
+          "scale": "c8.y",
+          "offset": "c8.w"
+        }
+      ]
+    },
+    "alpha": {
+      "source": "albedo",
+      "component": "w",
+      "scale": "c26.w",
+      "divide_by_alpha": false
+    },
+    "manual": true,
+    "alpha_manual": true,
+    "evidence": "Run 829 native_discovery_20261013_083626.jsonl: tf0 UV is r0.xy*c8.xy+c8.zw. F2F103 draws the inspected hair/beard atlases 14200054/14090054; A22982 draws iris 140B0052. Albedo is squared in the light formula. Existing native normal-map and cascade-shadow approximations retain their limits.",
+    "alpha_evidence": "Full independent microcode checks tf0.w*c26.w and UV coordinates. F2F103 does not divide diffuse by alpha; A22982 divides only with b128, clear in the captured route. No pixel kills.",
+    "light": {
+      "family": "object-multi",
+      "vertex": [
+        "0x79EAC49585797037"
+      ],
+      "evidence": "light_check.py: 400 independent trials per pair, plus 400 trials at each sun slot 1..3. F2F103 trials cover uniform near/far maps at binary shadow endpoints; intermediate direct PCF filtering is not proved or newly implemented."
+    }
   }
 }

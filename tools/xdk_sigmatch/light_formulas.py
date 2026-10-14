@@ -851,7 +851,7 @@ FOG_SHADERS = (
     FogShader("95ED70BD54B49D5E", None, 2, "alpha"),
     FogShader("9C2144E42E95A76F", "terrain-layer", 4, "plain"),
     FogShader("A17D8AEC3A817D45", None, 0, "plain"),
-    FogShader("A22982E86122DA41", None, 2, "plain"),
+    FogShader("A22982E86122DA41", "object-multi", 2, "plain"),
     FogShader("A7A88924C272F438", None, 2, "alpha"),
     FogShader("A7E45D07F5CF6627", "plant", 2, "plain"),
     FogShader("AF1E16EE57E4BB06", "terrain-layer-multi", 2, "plain"),
@@ -859,12 +859,12 @@ FOG_SHADERS = (
     FogShader("C0715ED52CE7ECF2", None, 2, "plain"),
     FogShader("E0996BF4D9539D38", "terrain-layer-multi", 4, "plain"),
     FogShader("E99F4ACC7A3C78B4", "plant-multi", 2, "plain"),
-    FogShader("F2F103F16764043B", None, 2, "alpha"),
+    FogShader("F2F103F16764043B", "object-multi", 2, "alpha"),
     FogShader("F525E023E08AC9BB", "plant-lit-multi", 2, "plain"),
     FogShader("F6D98C7B4D98438B", None, 0, "plain"),
-    FogShader("F96A4494958BFA12", None, 2, "plain"),
+    FogShader("F96A4494958BFA12", "object-multi", 2, "plain"),
     FogShader("F98433EC8C4A4740", None, 2, "plain"),
-    FogShader("FC0922A3A8D8DA7A", None, 2, "plain"),
+    FogShader("FC0922A3A8D8DA7A", "object-multi", 2, "plain"),
 )
 # The 41st: the lake's surface, which fetches both tables but with the sky's arithmetic inside it, also
 # with the fog predicate off. Not of the form and not checked; a draw of it must not count as fogged by

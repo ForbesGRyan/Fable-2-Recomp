@@ -1532,6 +1532,17 @@ static std::string PreviousOff(std::string text) {
   text.replace(at, test.size(), "if (0.0 > 0.0) return float4(PostBlended(pos), 1.0);");
   return text;
 }
+// The legacy path retains its shader and resource checks with effects absent.
+// Runtime effects are independently required to sample t3 behind p_pad.
+static std::string EffectsOff(std::string text) {
+  const std::string call="PostSceneWithEffects(pos)";
+  for(size_t at=text.find(call);at!=std::string::npos;at=text.find(call,at+1))
+    text.replace(at,call.size(),"scene_target.Load(int3(pos.xy, 0)).rgb");
+  const std::string branch="  float3 s = scene;\n  [branch] if (p_pad == 0) s = post_scene(scene);";
+  const auto at=text.find(branch);if(at==std::string::npos) return {};
+  text.replace(at,branch.size(),"  float3 s = post_scene(scene);");
+  return text;
+}
 
 int main() {
   using namespace fable2::native::shaders;
@@ -4361,7 +4372,11 @@ int main() {
     // (the composite: with the previous frame's share a literal 0, the program of a frame without that
     // blend; the blended form is case 253's. Its text still holds the blended function: four uses of
     // post_level where the other steps have two.)
-    const std::string composite_plain = PreviousOff(kClayPostCompositePs);
+    const std::string composite_plain = PreviousOff(EffectsOff(kClayPostCompositePs));
+    const auto effects_listing=Disassembly("effect_composite",kClayPostCompositePs,"ps_5_0");
+    int effects_samples=0;
+    if(TextureReadDepth(effects_listing,"sample_l",3,&effects_samples)<1 || effects_samples<1 ||
+       !ReadsComponent(effects_listing,"cb0[3]",'w')) return 233;
     if (composite_plain.empty()) return 233;
     const struct {
       const char* name;
@@ -4436,10 +4451,10 @@ int main() {
       const char* statements[] = {
           "  uint i = min(uint(512.0 * saturate(u) + 0.5), 511u);\n  return p_table[i >> 2][i & 3];",
           "  return (b > 0.0 && b < 3.0e38) ? exp2(exponent * log2(b)) : float3(0.0, 0.0, 0.0);",
-          "  float3 s = post_scene(scene);\n  float L = post_lum(s);\n  float e = p_c77y * post_table(p_c46x * L);\n"
+          "  float3 s = scene;\n  [branch] if (p_pad == 0) s = post_scene(scene);\n  float L = post_lum(s);\n  float e = p_c77y * post_table(p_c46x * L);\n"
           "  float3 c = saturate(e * (L + saturate(p_c47x * L) * (s - L)));\n  float3 b = saturate(bloom * p_c31x);\n"
           "  float3 scr = c + b * (1.0 - c);\n  float3 t = scr + p_c77x * (scr - post_lum(scr));\n  return saturate(post_pow(t, p_c78x));",
-          "  float3 scene = scene_target.Load(int3(pos.xy, 0)).rgb;\n  float3 bloom = float3(0.0, 0.0, 0.0);\n"
+          "  float3 scene = PostSceneWithEffects(pos);\n  float3 bloom = float3(0.0, 0.0, 0.0);\n"
           "  if (p_bloom_on != 0) bloom = bloom_target.SampleLevel(linear_clamp, (floor(pos.xy) + s_offset) * s_texel, 0.0).rgb;\n"
           "  return float4(post_level(PostComposite(scene, bloom)), 1.0);",
       };
@@ -4455,7 +4470,7 @@ int main() {
       // the clamp before the rounding. The block is declared to the table's end and no further: the ramp is
       // not read. The bloom: its flag's test (cb0[3].y), and inside it one sample of t1 with s1 at the
       // pixel's floor plus the step's offset (cb1[0].w) times the step's texel size (cb1[0].xy).
-      const std::string plain = PreviousOff(c);  // (the frame without the previous-frame blend: case 253 has the other)
+      const std::string plain = PreviousOff(EffectsOff(c));  // legacy path without effects/history
       if (plain.empty()) return 234;
       const std::string listing = Disassembly("clay_post_composite_ps", plain.c_str(), "ps_5_0");
       bool dynamic = false;
@@ -4533,11 +4548,11 @@ int main() {
         text.insert(block_end, "static const uint p_bloom_on = 0;\n");
         return text;
       };
-      const std::string off = bloom_off(PreviousOff(kClayPostCompositePs));  // (and no previous-frame blend: case 253)
+      const std::string off = bloom_off(PreviousOff(EffectsOff(kClayPostCompositePs)));
       const std::string off_plain = Changed(off.c_str(), "return float4(post_level(PostComposite(scene, bloom)), 1.0);", "return float4(PostComposite(scene, bloom), 1.0);");
       const std::string ramp_plain = Changed(kClayPostRampPs, "return float4(post_level(saturate(mapped)), 1.0);", "return float4(mapped, 1.0);");
       if (off.empty() || off_plain.empty() || ramp_plain.empty()) return 237;
-      const std::string now_l = Disassembly("composite", PreviousOff(kClayPostCompositePs).c_str(), "ps_5_0"), off_l = Disassembly("bloom_off", off.c_str(), "ps_5_0");
+      const std::string now_l = Disassembly("composite", PreviousOff(EffectsOff(kClayPostCompositePs)).c_str(), "ps_5_0"), off_l = Disassembly("bloom_off", off.c_str(), "ps_5_0");
       const std::string off_plain_l = Disassembly("bloom_off_plain", off_plain.c_str(), "ps_5_0");
       const std::string before_l = Disassembly("composite_before", kPostCompositeBefore, "ps_5_0");
       const std::string ramp_l = Disassembly("ramp", kClayPostRampPs, "ps_5_0"), ramp_plain_l = Disassembly("ramp_plain", ramp_plain.c_str(), "ps_5_0");
@@ -5069,12 +5084,12 @@ int main() {
     if (!strstr(c, "Texture2D<float4> previous_front : register(t2);") ||
         !strstr(c, "float3 PostBlended(float4 pos) {\n  float3 veil = float3(0.0, 0.0, 0.0);\n"
                    "  if (p_bloom_on != 0) veil = bloom_target.SampleLevel(linear_clamp, (floor(pos.xy) + s_offset) * s_texel, 0.0).rgb;\n"
-                   "  float3 now = post_level(PostComposite(scene_target.Load(int3(pos.xy, 0)).rgb, veil));\n"
+                   "  float3 now = post_level(PostComposite(PostSceneWithEffects(pos), veil));\n"
                    "  float3 before = previous_front.Load(int3(pos.xy, 0)).rgb;\n"
                    "  before = (before > 0.0 && before < 3.0e38) ? min(before, 1.0) : float3(0.0, 0.0, 0.0);\n"
                    "  return post_level(saturate(now + (before - now) * min(p_previous, 1.0)));\n}") ||
         !strstr(c, "float4 main(float4 pos : SV_Position) : SV_Target {\n  if (p_previous > 0.0) return float4(PostBlended(pos), 1.0);\n"
-                   "  float3 scene = scene_target.Load(int3(pos.xy, 0)).rgb;")) return 253;
+                   "  float3 scene = PostSceneWithEffects(pos);")) return 253;
     const std::string off = PreviousOff(c);
     const std::string without = Changed(c, "  if (p_previous > 0.0) return float4(PostBlended(pos), 1.0);\n", "");
     if (off.empty() || without.empty()) return 253;
@@ -5265,7 +5280,8 @@ int main() {
     } else {
       for (size_t i = 0; i + 1 < std::size(before); ++i) {
         size_t size = 0;
-        const uint64_t hash = CodeHash(before[i].name, before[i].src, before[i].target, &size);
+        const std::string historical=before[i].src==kClayPostCompositePs ? EffectsOff(before[i].src):before[i].src;
+        const uint64_t hash = CodeHash(before[i].name, historical.c_str(), before[i].target, &size);
         if (hash != before[i].hash || size != before[i].size) {
           std::cerr << before[i].name << " without CLAY_WIND is not the program of before the wind: " << size << " bytes, hash " << std::hex
                     << hash << std::dec << "\n";
@@ -5644,7 +5660,8 @@ int main() {
     } else {
       for (size_t i = 0; i + 1 < std::size(before); ++i) {
         size_t size = 0;
-        const uint64_t hash = CodeHash(before[i].name, before[i].src, before[i].target, &size);
+        const std::string historical=before[i].src==kClayPostCompositePs ? EffectsOff(before[i].src):before[i].src;
+        const uint64_t hash = CodeHash(before[i].name, historical.c_str(), before[i].target, &size);
         if (hash != before[i].hash || size != before[i].size) {
           std::cerr << before[i].name << " is not the program of before the impostor step: " << size << " bytes, hash " << std::hex << hash << std::dec << "\n";
           return fails(__LINE__);
@@ -5969,7 +5986,8 @@ int main() {
     } else {
       for (size_t i = 0; i + 1 < std::size(before); ++i) {
         size_t size = 0;
-        const uint64_t hash = CodeHash(before[i].name, before[i].src, before[i].target, &size);
+        const std::string historical=before[i].src==kClayPostCompositePs ? EffectsOff(before[i].src):before[i].src;
+        const uint64_t hash = CodeHash(before[i].name, historical.c_str(), before[i].target, &size);
         if (hash != before[i].hash || size != before[i].size) {
           std::cerr << before[i].name << " is not the program of before the water: " << size << " bytes, hash " << std::hex << hash << std::dec << "\n";
           return fails(__LINE__);

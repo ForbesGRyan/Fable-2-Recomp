@@ -35,7 +35,7 @@ _CF = re.compile(r"^/\*\s*\d+\.\d+\s*\*/\s*(.*)$")
 _CONT = re.compile(r"^\s+\+\s+(.*)$")
 _PRED = re.compile(r"^\((!?)p0\)\s*")
 _SRC = re.compile(r"^(-?)(r|c)(_abs)?(?:\[([^\]]*)\]|(\d+))(?:\.([xyzw]+))?$")
-_DEST = re.compile(r"^(?:(r)(\d+)|(o)(\d+)|(oPos)|(oDepth)|oC(\d+))(?:\.([xyzw_01]+))?$")
+_DEST = re.compile(r"^(?:(r)(\d+)|(o)(\d+)|(oPos)|(oDepth|oPts)|oC(\d+))(?:\.([xyzw_01]+))?$")
 _COMPS = "xyzw"
 _SAFE_CF = ("exec", "exece", "alloc", "cnop")
 _COORD_OFFSETS = ("OffsetX", "OffsetY", "OffsetZ")
@@ -81,7 +81,7 @@ def _parse_dest(text):
         return int(m.group(4)), "o", mask, swz
     if m.group(7) is not None:  # colour export oC<n>
         return int(m.group(7)), "oc", mask, swz
-    return -1, "pos" if m.group(5) else "depth", mask, swz
+    return -1, "pos" if m.group(5) else "pts" if m.group(6) == "oPts" else "depth", mask, swz
 
 
 def _parse_op(index, text, scalar, region_pred, raw):

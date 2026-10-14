@@ -1,4 +1,6 @@
 #pragma once
+#include "particle_pass.h"
+#include "dof_pass.h"
 
 // "Clay" rendering of the captured main scene into native 1120x720 targets:
 // linear colour (R11G11B10_FLOAT) with D32 depth, then one full-screen
@@ -157,6 +159,11 @@ class ClayPass {
   // Render that drew the linear target (by the output mapping, or by the ramp
   // step of a post frame: every Render writes every pixel of it).
   nrhi::Texture* color() const { return color_; }
+  nrhi::TextureView* color_view() const { return color_view_; }
+  nrhi::TextureView* presentation_front() const { return presentation_front_; }
+  bool dof_complete() const {return dof_complete_;}
+  bool dof_failed() const {return dof_.failed();}
+  void RetryDof(nrhi::Device* dev) {dof_.Release(dev==device_ ? dev:nullptr);dof_complete_=false;}
   nrhi::Texture* depth() const { return depth_; }  // left in kPixelShaderResource after Render
   // The two shadow maps (0 near, 1 far): kShadowMapSize squared, D32_FLOAT, viewed as R32_FLOAT;
   // depth in the pass's direction (clay_logic.h, "Native shadow maps": 0 at the light, 1 where no
@@ -718,6 +725,7 @@ class ClayPass {
   nrhi::Texture* linear_ = nullptr;
   nrhi::TextureView* linear_view_ = nullptr;
   nrhi::Texture* color_ = nullptr;
+  nrhi::TextureView* color_view_ = nullptr;
   nrhi::Texture* depth_ = nullptr;
   // The two shadow maps with their views, the shadow pixel shader (kClayShadowPs, drawn with vs_
   // under layout_) and the three depth-only pipelines, one a cull mode (ShadowPipelineSlot): made
@@ -807,6 +815,7 @@ class ClayPass {
   // making the second failed; the blend is off until the pass is rebuilt, the post chain goes on.)
   nrhi::Texture* front_[2] = {};
   nrhi::TextureView* front_view_[2] = {};
+  nrhi::TextureView* presentation_front_ = nullptr;
   ClayFrontState front_state_;
   bool front_second_failed_ = false;
   uint32_t post_slot_ = 0;
@@ -1121,6 +1130,9 @@ class ClayPass {
   // The frame's lantern ranges by light set (MakeLanternBuffer; empty with the local lights off or
   // an unlit frame): DrawPrepared puts a main-scene lit draw's range in its light_mode.
   LanternPlan lantern_plan_{};
+  ParticlePass particles_;
+  DofPass dof_;
+  bool dof_complete_=false;
   std::vector<ClayObjectConstants> object_constants_;
   std::vector<ClayObjectConstants> plant_constants_;
   uint32_t object_slot0_ = 0, plant_slot0_ = 0;

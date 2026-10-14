@@ -1100,17 +1100,17 @@ static int PostTests(const capture::DrawRecord& r) {
   };
   const PostBlock eight = post(8.0f, 0.25f), ten = post(10.0f, 0.5f);
   if (!eight.valid || !ten.valid || eight.parts != 0) return 1;
-  const PostSource from8{0x1FAA0000, 0x9075910DFD72DC3Dull}, from10{0x1FAA0000, 7};
+  const PostSource from8{0x1FAA0000, 0x9075910DFD72DC3Dull}, from10{0x1FAA0000, 7, 2};
   // Nothing of a post block in a scene: every float zero, no part, no source, age 0.
   auto none = [](const render::FrameScene& s) {
     static const unsigned char zero[sizeof(PostBlock)] = {};
     return !s.post.valid && s.post.parts == 0 && std::memcmp(&s.post, zero, offsetof(PostBlock, parts)) == 0 &&
-           s.post_source.base == 0 && s.post_source.content == 0 && s.post_age == 0;
+           s.post_source.base == 0 && s.post_source.content == 0 && s.post_source.presentation_kind == 0 && s.post_age == 0;
   };
   auto has = [](const render::FrameScene& s, const PostBlock& b, const PostSource& from, uint32_t age) {
     return s.post.valid && s.post_reason == PostBlockReason::kNone && s.post_age == age &&
            std::memcmp(&s.post, &b, offsetof(PostBlock, valid)) == 0 && s.post_source.base == from.base &&
-           s.post_source.content == from.content;
+           s.post_source.content == from.content && s.post_source.presentation_kind == from.presentation_kind;
   };
   // One frame: a main scene with a record and, when `scale` is not 0, a light block of that scale;
   // then, outside the scene, where the game issues its post rectangles, what `after` does.

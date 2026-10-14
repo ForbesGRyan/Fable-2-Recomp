@@ -58,9 +58,17 @@ class TextureCache {
   // `out` untouched, when the memory cannot be read or its bytes are not the tile (a texel that is
   // no unit vector): the caller then draws unrotated taps. No cache and no GPU object: 8 KB a call.
   bool ReadRotationTile(uint8_t out[kRotationTileBytes]) const;
+  // Presentation assets are read on the capture thread, not from mutable guest
+  // memory later on the GPU thread. Unlike world change sampling, this uses all
+  // bytes so a moving clipping mask cannot keep an earlier upload.
+  static bool CaptureSnapshot(const uint32_t fetch[6],uint64_t limit,TextureSnapshot* out);
+  nrhi::TextureView* ResolveSnapshot(nrhi::Cmd* cmd,nrhi::Device* dev,const uint32_t fetch[6],
+    const TextureSnapshot& source,uint32_t* sampler,float* uv_fix,capture::MaterialStatus* status,TextureStats& st);
   // DestroyDeferred all (dev may be nullptr: forget the objects without
   // destroying them, e.g. after a device change). The latch stays set.
   void Release(nrhi::Device* dev);
+  // Explicit owner retry; ordinary Release preserves the world failure latch.
+  void Retry(nrhi::Device* dev) { Release(dev); latched_ = false; }
   bool latched() const { return latched_; }
 
   uint64_t resident_bytes() const { return index_.resident_bytes(); }
@@ -99,7 +107,8 @@ class TextureCache {
   // water) or a water texture (`water`: its kind, which gives the block layout, the level count, the key's kind,
   // the host format and the decode).
   nrhi::TextureView* ResolveFetch(nrhi::Cmd* cmd, nrhi::Device* dev, const uint32_t fetch[6], const TextureFetch& t, const WaterDecode* water,
-                                  uint32_t* sampler, float* uv_fix, capture::MaterialStatus* status, TextureStats& st);
+                                  uint32_t* sampler, float* uv_fix, capture::MaterialStatus* status, TextureStats& st,
+                                  const TextureSnapshot* snapshot=nullptr);
   static bool BuildPlan(const TextureFetch& t, const TexFormatInfo& fi, uint32_t levels, Plan* plan);
   nrhi::TextureView* Upload(nrhi::Cmd* cmd, nrhi::Device* dev, const TextureFetch& t,
                             const Plan& plan, const uint8_t* base, const uint8_t* mips,

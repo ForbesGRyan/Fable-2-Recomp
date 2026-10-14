@@ -459,7 +459,10 @@ class FogShaders(unittest.TestCase):
                 self.assertEqual({s.family} if s.family else set(), by_ps.get(s.hash, set()))
 
     def test_the_scaled_form_belongs_to_no_lit_family(self):
-        self.assertEqual({s.family for s in lf.FOG_SHADERS if s.form == "alpha"}, {None})
+        # One exception since sub-project 14: the Murgo crowd hair F2F103F1 is alpha-tested and lit
+        # (object-multi, light_check); every other alpha-form shader is in no lit family.
+        self.assertEqual({s.family for s in lf.FOG_SHADERS if s.form == "alpha"}, {None, "object-multi"})
+        self.assertEqual([s.hash for s in lf.FOG_SHADERS if s.form == "alpha" and s.family], ["F2F103F16764043B"])
 
     def test_the_lake_and_the_sky_are_not_in_the_list(self):
         hashes = {s.hash for s in lf.FOG_SHADERS}

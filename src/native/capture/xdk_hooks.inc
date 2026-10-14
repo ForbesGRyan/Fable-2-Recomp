@@ -44,7 +44,7 @@ FABLE2_XDK_HOOK(107, "DrawIndx2:82B988C8", sub_82B988C8)
 FABLE2_XDK_HOOK(108, "DrawIndx2:82BA29B8", sub_82BA29B8)
 FABLE2_XDK_HOOK(109, "DrawIndx2:82BA5448", sub_82BA5448)
 FABLE2_XDK_HOOK(110, "DrawIndx2:82BA5CE8", sub_82BA5CE8)
-// skipped SetBinSelect:822A6318 (ProcessAndProcessAndProcess1046_822A6318): already overridden in src/diagnostics/fps_probe.h
+FABLE2_XDK_HOOK(111, "SetBinSelect:822A6318", ProcessAndProcessAndProcess1046_822A6318)
 FABLE2_XDK_HOOK(112, "SetBinSelect:82B9E848", ProcessAndProcessAndProcess903_82B9E848)
 FABLE2_XDK_HOOK(113, "IndirectBuffer:82286248", ProcessAndProcessAndProcess816_82286248)
 FABLE2_XDK_HOOK(114, "TileReplay?:82B9ED28", ProcessAndProcessAndProcess1079_82B9ED28)

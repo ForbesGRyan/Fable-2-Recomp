@@ -420,9 +420,18 @@ int main() {
     if (!DumpFetch(p, &t, &dfi) || t.width != 256 || t.height != 256 || t.base_phys != 0x12704000u ||
         t.mip_phys != 0x12724000u || !t.tiled || t.endian != 1 || t.mip_max != 3 ||
         t.format != TexFormat::kUnsupported || dfi.bytes_per_block != 2) return 156;
-    a.format = 4;                                                       // k_5_6_5: no layout, as before
+    a.format = 4;                                                       // presentation's k_5_6_5 assets
     MakeFc(a, p);
-    if (DumpFetch(p, &t, &dfi) || BaseLevelDumpBytes(p) != 0 || DumpKeyedByContent(p)) return 157;
+    if (!DumpFetch(p, &t, &dfi) || t.format != TexFormat::k565 || dfi.bytes_per_block != 2 ||
+        BaseLevelDumpBytes(p) == 0 || DumpKeyedByContent(p)) return 157;
+    {
+      // The host B5G6R5 word's red is the texel's low field, its blue the high field; green stays; twice is identity.
+      uint8_t row[6] = {0x1F, 0x00, 0xE0, 0x07, 0x00, 0xF8};  // 0x001F, 0x07E0, 0xF800 little-endian
+      Exchange565Fields(row, 3);
+      if (row[0] != 0x00 || row[1] != 0xF8 || row[2] != 0xE0 || row[3] != 0x07 || row[4] != 0x1F || row[5] != 0x00) return 1570;
+      Exchange565Fields(row, 3);
+      if (row[0] != 0x1F || row[1] != 0x00 || row[4] != 0x00 || row[5] != 0xF8) return 1571;
+    }
     a.format = 3; a.dim = 0;                                            // a 1D constant: no 2D layout
     MakeFc(a, p);
     if (DumpFetch(p, &t, &dfi)) return 158;

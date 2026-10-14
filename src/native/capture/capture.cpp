@@ -45,7 +45,12 @@
 #include "main_scene.h"
 #include "material.h"
 #include "position_decode.h"
+#include "particle_vertex.h"
+#include "snow_inputs.h"
 #include "post_block.h"
+#include "presentation_frame.h"
+#include "window_commands.h"
+#include "ui_mask.h"
 #include "quad_record.h"
 #include "render_state.h"
 #include "bone_skin.h"
@@ -59,6 +64,7 @@
 #include "xdk_hook_ids.h"
 #include "xdk_layout.h"
 #include "../render/texture_decode.h"
+#include "../render/texture_cache.h"
 
 REXCVAR_DECLARE(bool, fable2_native_render);
 
@@ -117,6 +123,8 @@ std::atomic<bool> g_discovery_active{false};
 // clear, main-scene draws are only counted.
 std::atomic<bool> g_records_wanted{false};
 std::atomic<bool> g_records_frame{false};
+std::atomic<bool> g_presentation_wanted{false};
+std::atomic<bool> g_presentation_frame{false};
 // The consumer also wants the two shadow passes (SetShadowsWanted: the native
 // view, the light and the shadows on), and the value latched for the current
 // guest frame with g_records_frame: set only in a frame with records. With it
@@ -963,6 +971,7 @@ thread_local bool t_bool_flush_pending = false;
 // Whether this thread's pixel constant uploads are handed to t_ps_loads now.
 bool FollowPixelLoads() {
   return g_discovery_active.load(std::memory_order_relaxed) ||
+         g_presentation_frame.load(std::memory_order_relaxed) ||
          (g_records_frame.load(std::memory_order_relaxed) && g_render.load(std::memory_order_relaxed));
 }
 
@@ -1329,6 +1338,7 @@ void OnVsLoadImmediate(const LastArgs& a) {
   t_vs_load.have_dwords = false;
   if (!obj || variant >= 2) return;
   if (!g_records_frame.load(std::memory_order_relaxed) &&
+      !g_presentation_frame.load(std::memory_order_relaxed) &&
       !g_discovery_active.load(std::memory_order_relaxed)) {
     // Nobody reads the copy this frame: only remember that the GPU runs this
     // object's immediate copy, so its draws are never decoded from the
@@ -1440,7 +1450,8 @@ bool FollowAluLoad(uint32_t bank) {
   if (g_discovery_active.load(std::memory_order_relaxed)) return true;
   if (bank != 1) t_vs_loads.Skip();
   if (bank == 0) return false;
-  if (g_records_frame.load(std::memory_order_relaxed) && g_render.load(std::memory_order_relaxed)) return true;
+  if (g_presentation_frame.load(std::memory_order_relaxed) ||
+      (g_records_frame.load(std::memory_order_relaxed) && g_render.load(std::memory_order_relaxed))) return true;
   t_ps_loads.Skip();
   return false;
 }
@@ -2291,11 +2302,21 @@ void AppendRenderState(std::string& row, uint32_t device,
 // each through ReadVirtualBe32, which gives a word whole or nothing.
 inline constexpr uint32_t kViewportRegisters[] = {0x210F, 0x2110, 0x2111, 0x2112, 0x2113, 0x2114,
                                                   0x2080, 0x2081, 0x2082, 0x200E, 0x200F};
+// Bounded discovery only: presentation draws may occur before any world scene
+// (title/loading) or after post. Keep the established discovery format by default.
+bool PresentationDiscovery() {
+  static const bool enabled = [] {
+    const char* value = std::getenv("FABLE2_NATIVE_DISCOVERY_UI");
+    return value && std::strcmp(value, "1") == 0;
+  }();
+  return enabled;
+}
 void AppendPictureViewport(std::string& row, uint32_t device, bool draw_row = true) {
   uint32_t surface = 0;
-  if (!device || !ReadVirtualBe32(device + xdk::kDeviceSurfaceInfoOffset, &surface) || !PictureViewportPitch(surface)) return;
+  if (!device || !ReadVirtualBe32(device + xdk::kDeviceSurfaceInfoOffset, &surface) ||
+      (!PresentationDiscovery() && !PictureViewportPitch(surface))) return;
   const bool view = ReflectionViewPitch(surface);
-  if (!view && !draw_row) return;
+  if (!view && !draw_row && !PresentationDiscovery()) return;
   auto shadow = [device](uint32_t reg, uint32_t* word) {
     const uint32_t at = xdk::DeviceRegShadowOffset(reg);
     return at && ReadVirtualBe32(device + at, word);
@@ -2303,7 +2324,7 @@ void AppendPictureViewport(std::string& row, uint32_t device, bool draw_row = tr
   row += ",\"vp\":{";
   const std::string viewport = RegisterWords(kViewportRegisters, std::size(kViewportRegisters), shadow);
   row += viewport;
-  if (view) {
+  if (view || PresentationDiscovery()) {
     const std::string clip = RegisterWords(kClipRegisters, std::size(kClipRegisters), shadow);
     if (!viewport.empty() && !clip.empty()) row += ",";
     row += clip;
@@ -2523,7 +2544,7 @@ void WriteDrawRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
     row += buf;
   }
   AppendRenderState(row, device);
-  if (!in_scene) AppendPictureViewport(row, device);
+  if (!in_scene || PresentationDiscovery()) AppendPictureViewport(row, device);
   auto finish = [&](const char* error) {
     if (error) {
       row += ",\"error\":\"";
@@ -2652,7 +2673,16 @@ void WriteDrawRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
   // swaying shadow casters, with them the sun layer's tree occluder): their own fetch lists and
   // streams are evidence for the wind (frame-map section 18, "Discovery").
   const TransformInfo* deformed_entry = in_scene ? nullptr : FindTransform(hash);
-  if (in_scene || (deformed_entry && deformed_entry->deformed)) AppendGeometry(row, indexed, args, device, dev, fetches);
+  if (in_scene || PresentationDiscovery() || (deformed_entry && deformed_entry->deformed))
+    AppendGeometry(row, indexed, args, device, dev, fetches);
+  // Procedural weather has no position fetch. Preserve its owned device bank
+  // for offline formula evidence before the mesh decoder's no_position exit.
+  // Discovery only, bounded to 256 float4 rows; runtime capture reads separately.
+  if(hash==0x19A01C01290E20A7ull && PresentationDiscovery()) {
+    if(const uint8_t* bank=ReadVirtual(VertexBank(device),256*16)) {
+      row+=",\"bank\":";row+=BeFloats(bank,1024);
+    }
+  }
   const VertexFetch* pf = nullptr;
   for (const auto& f : fetches) {
     if (!f.mini) { pf = &f; break; }
@@ -2778,6 +2808,7 @@ uint32_t g_capture_serial = 0;  // captures opened by this process (OpenLog), un
 
 void WriteVertsRow(uint32_t id, const LastArgs& args, uint32_t device, const DeviceSnapshot& dev,
                    bool in_scene) {
+  const bool full_inputs = in_scene || PresentationDiscovery();
   char buf[256];
   const int frame = g_frames_written.load(std::memory_order_relaxed) + 1;
   std::string row = VertsRowHead(frame, HookName(id), &args.r[1], device, in_scene);
@@ -2790,6 +2821,7 @@ void WriteVertsRow(uint32_t id, const LastArgs& args, uint32_t device, const Dev
     row += buf;
   }
   AppendRenderState(row, device, xdk::kDeviceBeginVerticesWriteOffset);
+  if (PresentationDiscovery()) AppendPictureViewport(row, device, false);
   uint32_t storage = 0, dwords = 0;
   const bool storage_read = ReadVirtualBe32(device + xdk::kDeviceBeginVerticesStorageOffset, &storage) &&
                             ReadVirtualBe32(device + xdk::kDeviceBeginVerticesDwordsOffset, &dwords);
@@ -2800,7 +2832,7 @@ void WriteVertsRow(uint32_t id, const LastArgs& args, uint32_t device, const Dev
   // A storage of an earlier row that was never written out (no hooked draw of this thread came
   // between) is dropped: its bytes are another draw's by now.
   t_pending_verts = PendingVerts{};
-  if (in_scene) {
+  if (full_inputs) {
     const uint32_t n = ++g_indx_rows;
     std::snprintf(buf, sizeof(buf), ",\"n\":%u", n);
     row += buf;
@@ -2846,14 +2878,14 @@ void WriteVertsRow(uint32_t id, const LastArgs& args, uint32_t device, const Dev
   if (ChooseVs(dev, &vc)) {
     // (inside the scene the object's microcode is read also for an immediate load, as WriteIndxRow reads it:
     // its vertex fetches name the layout of the storage)
-    const UcodeRef u = vc.immediate && !in_scene ? UcodeRef{} : ReadVsUcode(vc.obj, vc.variant);
+    const UcodeRef u = vc.immediate && !full_inputs ? UcodeRef{} : ReadVsUcode(vc.obj, vc.variant);
     const uint64_t hash = vc.immediate ? (t_vs_load.usable ? t_vs_load.hash : 0) : u.hash;
     std::snprintf(buf, sizeof(buf),
                   ",\"vs\":{\"obj\":\"0x%08X\",\"source\":\"%s\",\"variant\":%u,\"hash\":\"0x%016llX\"}", vc.obj,
                   vc.immediate ? "immediate" : (vc.gpu_owned ? "gpu_load" : "object"), vc.variant,
                   static_cast<unsigned long long>(hash));
     row += buf;
-    if (in_scene) {
+    if (full_inputs) {
       AppendVertexRegisters(row, device, vc.obj, vc.variant);
       row += ",\"vs_lit\":";
       row += LiteralsJson(kVsLayout, vc.obj, vc.variant);
@@ -2867,7 +2899,7 @@ void WriteVertsRow(uint32_t id, const LastArgs& args, uint32_t device, const Dev
     row += BeFloats(p, 4);
     row += "}";
   }
-  if (in_scene) {
+  if (full_inputs) {
     if (const uint8_t* bank = ReadVirtual(bank_ptr, 256 * 16)) {
       row += ",\"bank\":";
       row += BeFloats(bank, 1024);
@@ -2950,7 +2982,7 @@ void WriteIndxRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
     row += buf;
   }
   AppendRenderState(row, device, xdk::kDeviceBeginVerticesWriteOffset);
-  if (!in_scene) AppendPictureViewport(row, device, false);  // (a reflection view's row: frame-map section 20)
+  if (!in_scene || PresentationDiscovery()) AppendPictureViewport(row, device, false);  // reflection or presentation discovery
   const uint32_t n = ++g_indx_rows;
   uint32_t vstorage = 0, vdwords = 0, istorage = 0, idwords = 0, returned = 0;
   const bool fields = ReadVirtualBe32(device + xdk::kDeviceBeginVerticesStorageOffset, &vstorage) &&
@@ -2980,10 +3012,12 @@ void WriteIndxRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
     pending.frame = frame;
     pending.row = n;
     pending.vertex_storage = vstorage;
-    pending.vertex_bytes = uint32_t(std::min<uint64_t>(uint64_t(vdwords) * 4, kMaxIndxVertexBytes));
+    const uint32_t vertex_cap = !in_scene && PresentationDiscovery() ? kMaxVertsDataBytes : kMaxIndxVertexBytes;
+    pending.vertex_bytes = uint32_t(std::min<uint64_t>(uint64_t(vdwords) * 4, vertex_cap));
     pending.stride = args.r[6];
     pending.index_storage = istorage;
-    pending.indices = std::min(args.r[4], kMaxGeoIndices);
+    const uint32_t index_cap = !in_scene && PresentationDiscovery() ? kMaxVertsDataBytes / 4 : kMaxGeoIndices;
+    pending.indices = std::min(args.r[4], index_cap);
     pending.index32 = index32;
   }
   AppendPs(row, dev);
@@ -3081,7 +3115,7 @@ void WriteTessRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
                 args.r[2], args.r[3], args.r[4], device, in_scene ? "true" : "false");
   row += buf;
   AppendRenderState(row, device);
-  if (!in_scene) AppendPictureViewport(row, device, false);  // (a reflection view's row: frame-map section 20)
+  if (!in_scene || PresentationDiscovery()) AppendPictureViewport(row, device, false);  // reflection or presentation discovery
   VsChoice vc;
   const bool vc_ok = ChooseVs(dev, &vc);
   if (vc_ok) {
@@ -4566,6 +4600,7 @@ void ReadSkyBlock(uint32_t device, FogFrame& f) {
 // pass and the blurs, whether the block was taken at the composite, and the reads that gave none.
 struct PostFrame {
   PostRegisters regs{};
+  DofChain dof;
   bool done = false;
   uint32_t tries = 0;
   uint32_t untold = 0;  // rectangles whose pixel shader could not be told (ObservePostDraw)
@@ -4661,6 +4696,9 @@ bool ReadPostRegisters(const uint32_t* regs, int n, float out[][4]) {
 // been the composite: it is counted in the frame as a try with "unread", so that a frame which
 // then has no block does not read "no-draw"; those counts have a bound of their own and do not
 // use up the reads above. A draw without a pixel shader (depth only) is no post rectangle.
+void SetPresentationEffectGain(float gain); // defined with the presentation capture below; lock held
+void SetPresentationDof(const DofBlock& block);
+bool ReadUiLiterals(uint32_t obj,float out[3][4]);
 void ObservePostDraw(uint32_t id, uint32_t device) {
   if (id != kHook_D3DDevice_BeginVertices) return;
   PostFrame& f = CurrentPostFrame();
@@ -4692,13 +4730,40 @@ void ObservePostDraw(uint32_t id, uint32_t device) {
     return;
   }
   const uint64_t hash = ps->hash;  // (`ps` is the cache's entry: not held across the reads below)
+  const bool presentation=g_presentation_frame.load(std::memory_order_relaxed);
+  if(presentation && hash==kPostDownsamplePs) {
+    uint32_t fetch[6]{};float literal[3][4]{};
+    constexpr float expected[3][4]={{0,0,0,0},{0,0,0,0},{.25f,4,0,0}};
+    f.dof.have_scene=ReadTextureFetch(device,0,fetch) && DofFetchMatches(fetch,kDofDownFetch) &&
+      ReadUiLiterals(ps_obj,literal) && std::memcmp(literal,expected,sizeof(expected))==0;
+    if(f.dof.have_scene) std::memcpy(f.dof.scene,fetch,sizeof(fetch));
+    return;
+  }
   if (hash == kPostBrightPs) {
     f.regs.have_bright = ReadPostRegisters(kPostBrightRegisters, 4, f.regs.bright);
+    if(presentation) {
+      f.dof.have_down=ReadTextureFetch(device,0,f.dof.down) && DofFetchMatches(f.dof.down,kDofBlurFetch);
+    }
     return;
   }
   if (hash == kPostBlurXPs || hash == kPostBlurYPs) {
     const int s = hash == kPostBlurYPs ? 1 : 0;
-    f.regs.have_blur[s] = ReadPostRegisters(kPostBlurRegisters, 2, f.regs.blur[s]);
+    if (g_presentation_frame.load(std::memory_order_relaxed)) {
+      uint32_t fetch[6]{};float values[2][4]{};
+      const bool source_read=ReadTextureFetch(device,0,fetch);
+      // The DOF chain follows bloom and uses the same shader hashes. It must
+      // not overwrite bloom's already captured weights with its own kernel.
+      const bool weights_read=ReadPostRegisters(kPostBlurRegisters,2,values);
+      if(source_read && ClassifyPostBlurSource(fetch)==PostBlurSource::kDepthOfField) {
+        RecordDofBlur(f.dof,uint32_t(s),fetch,weights_read ? values:nullptr);
+        return;
+      }
+      if(!source_read || ClassifyPostBlurSource(fetch)==PostBlurSource::kUnknown)
+        RecordDofBlur(f.dof,uint32_t(s),nullptr,nullptr);
+      RecordPresentationBloomBlur(f.regs,uint32_t(s),source_read ? fetch:nullptr,weights_read ? values:nullptr);
+    } else {
+      f.regs.have_blur[s] = ReadPostRegisters(kPostBlurRegisters, 2, f.regs.blur[s]);
+    }
     return;
   }
   if (hash == kPostRadialPs) {
@@ -4713,11 +4778,43 @@ void ObservePostDraw(uint32_t id, uint32_t device) {
     f.have_radial = true;
     return;
   }
-  if (hash != kPostCompositePs) return;
+  const bool effects = hash == 0xB863FDD3469557D4ull && g_presentation_frame.load(std::memory_order_relaxed);
+  const bool dof=hash==kPostDofPs && presentation;
+  if (hash != kPostCompositePs && !effects && !dof) return;
   PostRegisters regs = f.regs;
   regs.have_composite = ReadPostRegisters(kPostCompositeRegisters, 5, regs.composite);
+  DofBlock dof_block;
+  uint32_t dof_fetch[5][6]{};
+  if(dof) {
+    float projection[4]{},focus[4]{},caps[4]{},exponent[4]{},literal[3][4]{};
+    constexpr float expected[3][4]={{0,0,0,0},{1,2550,0,0},{.0721f,.2125f,.7154f,0}};
+    bool read=regs.have_composite && ReadPixelConstant(18,projection) && ReadPixelConstant(78,focus) &&
+      ReadPixelConstant(79,caps) && ReadPixelConstant(69,exponent) && ReadUiLiterals(ps_obj,literal) &&
+      std::memcmp(literal,expected,sizeof(expected))==0;
+    for(uint32_t slot=0;read && slot<5;slot++) read=ReadTextureFetch(device,slot,dof_fetch[slot]);
+    if(read) dof_block=MakeDofBlock(f.dof,dof_fetch,projection,focus,caps);
+    regs.have_composite=read && dof_block.valid;
+    regs.composite[4][0]=exponent[0]; // F51 exponent is c69.x; c78 is its DOF focus.
+    std::lock_guard<std::mutex> lock(g_scene_mutex);
+    if(PostFrameCurrent(f)) SetPresentationDof(DofBlock{}); // requested even on refusal
+  }
+  float effect_gain=0;
+  if(effects && regs.have_composite) {
+    float exponent[4]{};uint32_t fetch3[6]{};
+    effect_gain=regs.composite[2][0];
+    regs.have_composite=ReadPixelConstant(79,exponent) && ReadTextureFetch(device,3,fetch3) &&
+      std::isfinite(effect_gain) && effect_gain>=0 && effect_gain<=65536 &&
+      (fetch3[0]&3)==2 && (fetch3[1]&63)==6 && ((fetch3[5]>>9)&3)==1 &&
+      (fetch3[2]&8191)+1==560 && ((fetch3[2]>>13)&8191)+1==360;
+    // B863 adds TF3*c47.x before tone mapping; the remaining arithmetic is
+    // 37B1 with contrast c77.x, saturation/gain c78.xy and exponent c79.x.
+    regs.composite[2][0]=regs.composite[3][0];
+    regs.composite[3][0]=regs.composite[4][0];
+    regs.composite[3][1]=regs.composite[4][1];
+    regs.composite[4][0]=exponent[0];
+  }
   uint32_t fc[6] = {};
-  const bool read = regs.have_composite && ReadTextureFetch(device, kPostTableSlot, fc);
+  const bool read = regs.have_composite && ReadTextureFetch(device, dof ? 2:kPostTableSlot, fc);
   PostBlockReason why = PostBlockReason::kUnread;
   PostBlock block{};
   PostSource source;
@@ -4730,6 +4827,7 @@ void ObservePostDraw(uint32_t id, uint32_t device) {
       block = MakePostBlock(regs, fc, table, sizeof(table), &why);
       if (block.valid) {
         source.base = base;
+        source.presentation_kind=dof ? 2:effects ? 1:0;
         source.content = XXH3_64bits(table, sizeof(table));
         // The radial blur's registers, judged by SetPostRadial; a block without them is still valid.
         if (f.have_radial && !f.radial_bad) SetPostRadial(&block, f.radial[0], f.radial[1], f.radial[2]);
@@ -4742,6 +4840,8 @@ void ObservePostDraw(uint32_t id, uint32_t device) {
   if (!PostFrameCurrent(f)) return;
   if (block.valid) {
     g_builder.SetPost(block, source);
+    if(effects && g_presentation_frame.load(std::memory_order_relaxed)) SetPresentationEffectGain(effect_gain);
+    if(dof && g_presentation_frame.load(std::memory_order_relaxed)) SetPresentationDof(dof_block);
     f.done = true;
   } else {
     g_builder.CountPostTry(why);
@@ -6868,7 +6968,12 @@ void PublishScene(const FinishedScene& done) {
   LogShaderBreakdown(sc);
 }
 
+#include "presentation_capture.inc"
+
 }  // namespace
+
+UiPublisher& PresentationPublisher() { return g_presentation_publisher; }
+void SetPresentationWanted(bool wanted) { g_presentation_wanted.store(wanted, std::memory_order_relaxed); }
 
 render::ScenePublisher& Publisher() {
   static render::ScenePublisher publisher;
@@ -7117,6 +7222,14 @@ void OnXdkCall(uint32_t id, PPCContext& ctx, uint8_t*) {
   a.r[5] = ctx.r8.u32;
   a.r[6] = ctx.r9.u32;
   a.r[7] = ctx.r10.u32;
+  // 822A6318(r4=0) is the untiled bin reset the native UI masks observe
+  // (OnUiBinResetCall/Return); other arguments are the ordinary bin select.
+  if(id==kHook_SetBinSelect_822A6318 && ctx.r4.u32==0) OnUiBinResetCall(ctx.r3.u32);
+  if(id==kHook_D3DDevice_SetScissorRectcallee1callee0 || id==kHook_DrawIndx2_821EF988) {
+    if(g_presentation_frame.load(std::memory_order_relaxed))
+      BeginWindowCommands(ctx.r3.u32,id==kHook_DrawIndx2_821EF988 ? 1u : 0u);
+    else t_window={};
+  }
   if (IsDrawId(id)) {
     const bool nested = t_nesting.Enter();
     if (nested) g_nested_draws.fetch_add(1, std::memory_order_relaxed);
@@ -7127,6 +7240,11 @@ void OnXdkCall(uint32_t id, PPCContext& ctx, uint8_t*) {
       CaptureTimer timer;
       if (t_pending_draws & kPendingQuad) FlushPendingQuad();
       if (t_pending_draws & kPendingImpostor) FlushPendingImpostor();
+      if (t_pending_draws & kPendingUi) FlushPendingUi();
+    }
+    if(!nested && g_presentation_frame.load(std::memory_order_relaxed)) {
+      BeginUiMaskCommands(ctx.r3.u32);
+      if(id==kHook_DrawIndx2_821EF988) BeginUiMaskClear(a);
     }
     // Discovery evidence (t_gpu_pbool): whether this builder will flush the bool shadow.
     // A pointer of an earlier entry must not outlive it (a capture that ended between the clear
@@ -7162,8 +7280,56 @@ void OnXdkCall(uint32_t id, PPCContext& ctx, uint8_t*) {
   }
 }
 
+void OnUiBinResetCall(uint32_t device) {
+  if(!g_enabled.load(std::memory_order_relaxed) || !g_presentation_frame.load(std::memory_order_relaxed)) return;
+  // Outside a draw builder the indexed caller has finished its quad. The bin
+  // reset precedes the next target's tiled command allocation, so this owns
+  // the resolve while the primary command segment is still contiguous.
+  if(t_nesting.depth()==0) {
+    bool resolve=t_mask.copy_pending;
+    if((t_pending_draws & kPendingUi) && t_pending_ui.valid && t_pending_ui.mask &&
+       t_pending_ui.frame==g_swaps.load(std::memory_order_relaxed)+1 && t_pending_ui.mask_device==device) {
+      // Don't move ordinary UI/video capture earlier. For a mask, require its
+      // explicit copy to have been committed after the immediate draw first:
+      // the indexed caller has ended the draw and filled its storage by then.
+      uint32_t end=0,first=0,count=0;UiMaskCopy copy;
+      bool committed=ReadVirtualBe32(device+xdk::kDeviceCommandWriteOffset,&end) &&
+        ClassifyStream(t_pending_ui.mask_end,end,2048,&first,&count)==StreamSpan::kDwords;
+      committed=committed && copy.Read(committed ? ReadVirtual(first,count*4):nullptr,count);
+      {
+        static thread_local uint64_t frame=0;static thread_local uint32_t lines=0;
+        const uint64_t now=g_swaps.load(std::memory_order_relaxed)+1;
+        if(frame!=now) {frame=now;lines=0;}
+        if(lines++<4) REXLOG_INFO("[native] presentation mask: bin reset with pending quad at frame {} (quad end {:08X}, pointer {:08X}, {} dwords, committed {})",now,t_pending_ui.mask_end,end,count,committed);
+      }
+      if(committed) {FlushPendingUi();resolve=t_mask.copy_pending;}
+    }
+    if(resolve) BeginUiMaskCommands(device);
+  }
+  t_mask.reset_device=device;t_mask.reset_entry_valid=ReadVirtualBe32(device+xdk::kDeviceCommandWriteOffset,&t_mask.reset_entry);
+}
+void OnUiBinResetReturn(uint32_t device) {
+  if(!g_enabled.load(std::memory_order_relaxed) || !g_presentation_frame.load(std::memory_order_relaxed)) return;
+  uint32_t end=0,first=0,count=0;
+  bool valid=t_mask.reset_entry_valid && t_mask.reset_device==device &&
+    ReadVirtualBe32(device+xdk::kDeviceCommandWriteOffset,&end) &&
+    ClassifyStream(t_mask.reset_entry,end,128,&first,&count)==StreamSpan::kDwords;
+  valid=valid && UiMaskBinResetCommands(valid ? ReadVirtual(first,count*4):nullptr,count);
+  t_mask.reset_entry_valid=false;t_mask.select=valid ? UINT32_MAX:0;
+  t_mask.select_frame=valid ? g_swaps.load(std::memory_order_relaxed)+1:0;
+}
+
 void OnXdkReturn(uint32_t id, PPCContext&, uint8_t*) {
   if (!g_enabled.load(std::memory_order_relaxed) || id >= t_last_args.size()) return;
+  if(g_presentation_frame.load(std::memory_order_relaxed)) {
+    if(id==kHook_SetBinSelect_82B9E848) t_mask.select_frame=0;
+    if(id==kHook_SetBinSelect_822A6318 && t_last_args[id].r[1]==0) OnUiBinResetReturn(t_last_args[id].r[0]);
+    if(id==kHook_DrawIndx2_821EF988) EndUiMaskClear(t_last_args[id].r[0]);
+    if(id==kHook_D3DDevice_SetScissorRectcallee1callee0) ObserveVirtualWindow(t_last_args[id]);
+    if(id==kHook_D3DDevice_SetScissorRectcallee1callee0 || id==kHook_DrawIndx2_821EF988)
+      EndWindowCommands(t_last_args[id].r[0],id==kHook_DrawIndx2_821EF988 ? 1u : 0u);
+    if(id==kHook_IndirectBuffer_82286248) ObserveWindowBuffers(t_last_args[id]);
+  }
   if (id == kHook_VsLoadImmediate_821DFDE0) {
     CaptureTimer timer;
     OnVsLoadImmediate(t_last_args[id]);
@@ -7211,7 +7377,11 @@ void OnXdkReturn(uint32_t id, PPCContext&, uint8_t*) {
   // The pixel constants' model takes the bracket from the draws too, where
   // its uploads are followed: with records here, with discovery below (no
   // instruction is added to a draw that neither reads).
-  if (records) t_ps_loads.Observe(in_scene);
+  if (records || (outermost && g_presentation_frame.load(std::memory_order_relaxed))) t_ps_loads.Observe(in_scene);
+  if (outermost && g_presentation_frame.load(std::memory_order_relaxed)) {
+    ObserveUiDraw(id, args, device);
+    ObserveParticleDraw(id, args, device, in_scene);
+  }
   uint32_t water_frame = 0;
   const uint32_t* water_origin = nullptr;
   if (records && g_water_frame.load(std::memory_order_relaxed)) {
@@ -7258,7 +7428,9 @@ void OnXdkReturn(uint32_t id, PPCContext&, uint8_t*) {
 void OnSwap() {
   if (!g_enabled.load(std::memory_order_acquire)) return;
   SwapTimer timer;
+  if (t_pending_draws & kPendingUi) FlushPendingUi();
   const uint64_t swap = g_swaps.fetch_add(1, std::memory_order_relaxed) + 1;
+  FinishUiFrame(swap);
   // A run-time request: g_discovery_active was claimed by ArmDiscoveryNow, so no capture
   // is running or waiting for its delay; set the parameters up and let the code below
   // open the file and arm exactly as the environment path does.

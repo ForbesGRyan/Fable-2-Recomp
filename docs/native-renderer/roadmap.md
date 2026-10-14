@@ -2,6 +2,9 @@
 
 The order of work after sub-project 10 (the post chain), agreed with the user on 2026-10-10.
 Each item becomes a numbered sub-project (research, spec, plan, execution, review, local merge).
+On 2026-10-12 the user deferred water's remaining acceptance and selected HUD/UI/cutscenes
+as the next active subject (sub-project 14). Shadow correctness and MSAA remain queued.
+Deferred water work is saved in [TODO.md](../../TODO.md); its WITH_CONCERNS closure stands.
 Limits and follow-ups named here are described in `frame-map.md`, section 17, "Limits (10c)" and
 "Follow-ups (10c)", and in the earlier sections' own limits.
 
@@ -146,7 +149,23 @@ Limits and follow-ups named here are described in `frame-map.md`, section 17, "L
      position, and the native picture is the game's sampled a quarter pixel down and right
      (`frame-map.md` section 18, "The rasterising replay", "The darkness about the sun"); whether that
      is the console's first sample or the emulator's read-back is not known.
-6. **Presentation: HUD, menus, loading screens, cutscenes**
+6. **Presentation: HUD, menus, loading screens, cutscenes** (sub-project 14, **verified 2026-10-13; away-gated timing pending**)
+   - Native sprite/text/video/particle/fade presentation with frame-owned UI records,
+     native mask producers (sequential scratch target, kick-aware copy parser), menu
+     history/7e3 resolve, title particles, snow and soft-depth billboards, black fade,
+     F51 DOF (proven, unexercised). Hardware paired readbacks on build 73: HUD opaque UI
+     0.23/255 at 99.96%, pause 0.24 at 99.7%, Quests/Maps 0.24 at 99.2%, title 0.27 at
+     100%, movie 0.26-0.28 at 100% over four changing frames, "Scene paused" 0.25 at
+     99.9%. Transitions compose natively; the skip and the opening's 577CB/15675
+     distortion frames retain the guest picture explicitly. Full suite and the WARP
+     debug-layer run pass. User-present market profiling: +0.15 ms/frame, menu at 75 fps,
+     scene itself 23 fps (emulation bound). Open: the away-gated timing run (user check 116),
+     the opening clothing material 44B56763 (a further lighting family, clay natively),
+     half-resolution effects and distortion producers (guest retained). `fable2_native_ui`
+     defaults off; details in the plan's "Current status" and "Findings".
+   - [Plan](../superpowers/plans/2026-10-12-native-renderer-presentation.md);
+     research `.superpowers/sdd/presentation-research.md`;
+     ledger `.superpowers/sdd/2026-10-12-native-renderer-presentation/progress.md`.
    - The long-term goal: leave the emulated GPU. The sun switch has never run in a town, an
      interior, a menu, a loading screen or a cutscene.
 

@@ -240,7 +240,7 @@ class Record(unittest.TestCase):
         observer = _function(c, "void ObserveReflectionDraw(")
         self.assertLess(observer.index("const uint32_t epoch = g_light_tries_frame.load("), observer.index("ReadVirtualBe32("))
         self.assertLess(observer.index("t_reflection.frame = epoch;"), observer.index("ReadVirtualBe32("))
-        handoff = c[c.index("  if (records) t_ps_loads.Observe(in_scene);"):]
+        handoff = c[c.index("  if (records || (outermost && g_presentation_frame.load(std::memory_order_relaxed))) t_ps_loads.Observe(in_scene);"):]
         branch = ("  if (records && g_water_frame.load(std::memory_order_relaxed)) {\n"
                   "    ObserveReflectionDraw(id, args, device, in_scene);\n"
                   "    water_frame = t_reflection.frame;\n"
@@ -321,7 +321,7 @@ class Mirrors(unittest.TestCase):
         self.assertEqual(size, 464)
         self.assertIn("static_assert(sizeof(ClayWaterConstants) == %d &&" % size, self.LOGIC)
         # Two surface slots per record, four target slots, four own frame blocks and 256 reflection records (Task 17).
-        self.assertIn("static_assert(kClayWaterSlots == %d && kClayWaterStepSlots == %d);" % ((size + 255) // 256, 2 * 64 + 4 + 4 * 21 + 256), self.LOGIC)
+        self.assertIn("static_assert(kClayWaterSlots == %d && kClayWaterStepSlots == %d);" % ((size + 255) // 256, 2 * 64 + 4 + 4 * 37 + 256), self.LOGIC)   # four frame blocks of 37 slots (21 before the lanterns)
         # the registers under b137 alone are not in the block; those under b136 are, and the mirror asks the bool first
         self.assertFalse(set(S["ps_read_under"][137]) & set(self.CARRIED))
         self.assertTrue(set(S["ps_read_under"][136]) <= set(self.CARRIED))

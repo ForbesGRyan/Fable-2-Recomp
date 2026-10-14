@@ -2190,6 +2190,7 @@ inline constexpr const char* kClayPostCompositePs = FABLE2_CLAY_POST_HLSL R"hlsl
 Texture2D<float4> scene_target : register(t0);
 Texture2D<float4> bloom_target : register(t1);
 Texture2D<float4> previous_front : register(t2);
+Texture2D<float4> effect_target : register(t3);
 SamplerState linear_clamp : register(s1);
 float post_table(float u) {
   uint i = min(uint(512.0 * saturate(u) + 0.5), 511u);
@@ -2199,8 +2200,10 @@ float3 post_pow(float3 base, float exponent) {
   float3 b = abs(base);
   return (b > 0.0 && b < 3.0e38) ? exp2(exponent * log2(b)) : float3(0.0, 0.0, 0.0);
 }
+// PRESENTATION EFFECT TONE BEGIN
 float3 PostComposite(float3 scene, float3 bloom) {
-  float3 s = post_scene(scene);
+  float3 s = scene;
+  [branch] if (p_pad == 0) s = post_scene(scene);
   float L = post_lum(s);
   float e = p_c77y * post_table(p_c46x * L);
   float3 c = saturate(e * (L + saturate(p_c47x * L) * (s - L)));
@@ -2209,17 +2212,23 @@ float3 PostComposite(float3 scene, float3 bloom) {
   float3 t = scr + p_c77x * (scr - post_lum(scr));
   return saturate(post_pow(t, p_c78x));
 }
+// PRESENTATION EFFECT TONE END
+float3 PostSceneWithEffects(float4 pos) {
+  float3 scene=post_scene(scene_target.Load(int3(pos.xy,0)).rgb);
+  if(p_pad!=0) scene+=effect_target.SampleLevel(linear_clamp,(floor(pos.xy)+1)*s_texel,0).rgb*asfloat(p_pad);
+  return scene;
+}
 float3 PostBlended(float4 pos) {
   float3 veil = float3(0.0, 0.0, 0.0);
   if (p_bloom_on != 0) veil = bloom_target.SampleLevel(linear_clamp, (floor(pos.xy) + s_offset) * s_texel, 0.0).rgb;
-  float3 now = post_level(PostComposite(scene_target.Load(int3(pos.xy, 0)).rgb, veil));
+  float3 now = post_level(PostComposite(PostSceneWithEffects(pos), veil));
   float3 before = previous_front.Load(int3(pos.xy, 0)).rgb;
   before = (before > 0.0 && before < 3.0e38) ? min(before, 1.0) : float3(0.0, 0.0, 0.0);
   return post_level(saturate(now + (before - now) * min(p_previous, 1.0)));
 }
 float4 main(float4 pos : SV_Position) : SV_Target {
   if (p_previous > 0.0) return float4(PostBlended(pos), 1.0);
-  float3 scene = scene_target.Load(int3(pos.xy, 0)).rgb;
+  float3 scene = PostSceneWithEffects(pos);
   float3 bloom = float3(0.0, 0.0, 0.0);
   if (p_bloom_on != 0) bloom = bloom_target.SampleLevel(linear_clamp, (floor(pos.xy) + s_offset) * s_texel, 0.0).rgb;
   return float4(post_level(PostComposite(scene, bloom)), 1.0);
@@ -2284,6 +2293,136 @@ float4 main(float4 pos : SV_Position) : SV_Target {
   return float4(post_level(post_unit(sum)), 1.0);
 }
 )hlsl";
+
+#define FABLE2_DOF_HLSL FABLE2_CLAY_POST_HLSL R"hlsl(
+cbuffer Dof : register(b2) {
+  float4 d_projection_caps; // c18.xy, c79.xy
+  float4 d_focus;           // normalized c78
+  float4 d_blur[4];
+};
+// DOF AMOUNT BEGIN
+float DofAmount(float depth) {
+  float distance = d_projection_caps.y/(1.0-d_projection_caps.x-depth);
+  float near_amount = min(max((d_focus.y-distance)*d_focus.x,0.0),d_projection_caps.z);
+  float far_amount = min(max((distance-d_focus.z)*d_focus.w,0.0),d_projection_caps.w);
+  float amount = (distance > d_focus.z) ? far_amount : 0.0;
+  [branch] if (d_focus.y > distance) amount = near_amount;
+  return amount*(1.0-saturate(distance-2550.0));
+}
+// DOF AMOUNT END
+// DOF HDR RESOLVE BEGIN
+float DofStoredHalf(float value) {
+  // f32tof16 rounds differently from an R16 RTV at halfway boundaries.
+  // Clamp commutes with storage here: both bounds are representable in R16.
+  uint bits=asuint(clamp(value,0.0,31.875));
+  uint exponent=bits>>23;
+  if(exponent<102u) return 0.0;
+  uint shift=exponent<113u ? 126u-exponent:13u;
+  uint significand=exponent<113u ? (bits&0x7FFFFFu)|0x800000u:bits-0x38000000u;
+  uint half=significand>>shift;
+  uint remainder=significand&((1u<<shift)-1u),midpoint=1u<<(shift-1u);
+  if(remainder>midpoint || (remainder==midpoint && (half&1u)!=0)) ++half;
+  if(half<1024u) return float(half)/16777216.0;
+  return exp2(float(half>>10)-15.0)*(1.0+float(half&1023u)/1024.0);
+}
+float DofResolve(float value) {
+  // Ordinary RTV output first stores R16, then the SDK's resolve packs 7e3.
+  value=DofStoredHalf(value);
+  uint bits=asuint(clamp(value,0.0,31.875));
+  uint biased;
+  if(bits<0x3E800000u) biased=((bits&0x7FFFFFu)|0x800000u)>>min(125u-(bits>>23),24u);
+  else biased=bits+0xC2000000u;
+  uint packed=((biased+0x7FFFu+((biased>>16)&1u))>>16)&0x3FFu;
+  uint exponent=packed>>7,mantissa=packed&127u;
+  if(exponent==0) return float(mantissa)/512.0;
+  return exp2(float(exponent)-3.0)*(1.0+float(mantissa)/128.0);
+}
+// DOF HDR RESOLVE END
+float3 DofResolved(float3 v) {return float3(DofResolve(v.r),DofResolve(v.g),DofResolve(v.b));}
+)hlsl"
+
+inline constexpr const char* kClayPostDofDownPs=FABLE2_DOF_HLSL R"hlsl(
+Texture2D<float4> source : register(t0);
+SamplerState linear_clamp : register(s1);
+float3 DofDownTap(float2 p,float2 offset) {
+  return post_scene(source.SampleLevel(linear_clamp,(p+offset)*s_texel,0).rgb);
+}
+// DOF DOWNSAMPLE BEGIN
+float3 DofDownsample(float2 p) {
+  float3 v = DofDownTap(p,float2(.5,2.5))+DofDownTap(p,float2(.5,.5));
+  v += DofDownTap(p,float2(2.5,.5));
+  v += DofDownTap(p,float2(2.5,2.5));
+  return v*.25;
+}
+// DOF DOWNSAMPLE END
+float4 main(float4 pos:SV_Position):SV_Target {
+  float2 p=4.0*(floor(pos.xy)+s_offset);
+  return float4(DofResolved(DofDownsample(p)),1);
+}
+)hlsl";
+inline constexpr const char* kClayPostDofBlurPs=FABLE2_DOF_HLSL R"hlsl(
+Texture2D<float4> source : register(t0);
+float3 DofTap(float2 at,int offset) {return source.Load(int3(clamp(int2(at)+offset*s_dir,int2(0,0),s_last),0)).rgb;}
+// DOF BLUR BEGIN
+float3 DofBlur(float2 at,float4 a,float4 b) {
+  // Preserve the microcode's accumulation order, from -6 through centre.
+  float3 v = DofTap(at,-6)*b.z;
+  v += DofTap(at,-5)*b.y;
+  v += DofTap(at,-4)*b.x;
+  v += DofTap(at,-3)*a.w;
+  v += DofTap(at,-2)*a.z;
+  v += DofTap(at,-1)*a.y;
+  v += DofTap(at,6)*b.z;
+  v += DofTap(at,5)*b.y;
+  v += DofTap(at,4)*b.x;
+  v += DofTap(at,3)*a.w;
+  v += DofTap(at,2)*a.z;
+  v += DofTap(at,1)*a.y;
+  v += DofTap(at,0)*a.x;
+  return v;
+}
+// DOF BLUR END
+float4 main(float4 pos:SV_Position):SV_Target {
+  bool vertical=s_dir.y!=0;
+  float4 a=vertical ? d_blur[2]:d_blur[0],b=vertical ? d_blur[3]:d_blur[1];
+  return float4(DofResolved(DofBlur(floor(pos.xy),a,b)),1);
+}
+)hlsl";
+inline constexpr const char* kClayPostDofCompositePs=FABLE2_DOF_HLSL R"hlsl(
+Texture2D<float4> source : register(t0);
+Texture2D<float4> bloom : register(t1);
+Texture2D<float4> blurred : register(t2);
+Texture2D<float> depth : register(t3);
+SamplerState linear_clamp : register(s1);
+float DofTable(float u) {
+  uint i=min(uint(512.0*saturate(u)+.5),511u);
+  return p_table[i>>2][i&3];
+}
+// DOF TONE BEGIN
+float3 DofTone(float3 scene,float3 veil) {
+  float L = post_lum(scene);
+  float e = p_c77y*DofTable(p_c46x*L);
+  float3 c = saturate(e*(L+saturate(p_c47x*L)*(scene-L)));
+  float3 b = saturate(veil*p_c31x);
+  float3 screen = c+b*(1.0-c);
+  float3 t = screen+p_c77x*(screen-post_lum(screen));
+  return saturate(pow(abs(t),p_c78x));
+}
+// DOF TONE END
+float4 main(float4 pos:SV_Position):SV_Target {
+  int2 at=int2(pos.xy);
+  float2 uv=(floor(pos.xy)+2.0)*s_texel;
+  float3 sharp=post_scene(source.Load(int3(at,0)).rgb);
+  float3 soft=blurred.SampleLevel(linear_clamp,uv,0).rgb;
+  float guest_depth=floor(saturate(1.0-depth.Load(int3(at,0)))*16777215.0+.5)/16777215.0;
+  float amount=DofAmount(guest_depth);
+  float3 scene=sharp+amount*(soft-sharp);
+  float3 veil=0;
+  if(p_bloom_on!=0) veil=bloom.SampleLevel(linear_clamp,uv,0).rgb;
+  return float4(post_level(DofTone(scene,veil)),1);
+}
+)hlsl";
+#undef FABLE2_DOF_HLSL
 
 // The sun layer's three steps under the post layout (plan Task 14; described with the layer's other programs
 // below, "The sun layer"): the layer's depth, the reduction, the radial blur. They share the post steps' text

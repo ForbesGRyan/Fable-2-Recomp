@@ -33,6 +33,9 @@ def tested(vs=VS_B, ps=PS_A, slot=0, scale=None, **extra):
                  "evidence": "e"}, **extra)
 
 
+tested.__test__ = False  # a helper, not a test (pytest 8 collects the name)
+
+
 def vs_entry(uv=True):
     e = {"base": 0, "layout": "dot", "manual": True, "evidence": "e"}
     if uv:

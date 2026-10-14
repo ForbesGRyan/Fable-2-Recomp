@@ -668,7 +668,7 @@ class GenAlphaKindTest(unittest.TestCase):
         checked = {("tree-leaf" if family == "tree-leaf-multi" else family, ps, vs)
                    for family, pairs in light_check.FAMILIES.items() for ps, vs in pairs}
         self.assertEqual(table, checked)
-        self.assertEqual(len(table), 43)
+        self.assertEqual(len(table), 49)
         self.assertEqual(data["0x7CD57B81550F19E3"]["light"]["family"], "tree-leaf")
         self.assertEqual(data["0x7CD57B81550F19E3"]["light"]["vertex"],
                          ["0xA5846836C90E1192", "0xD7DD31B9BF194DE8", "0x2D40B53C926109BE"])

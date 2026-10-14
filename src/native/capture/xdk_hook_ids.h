@@ -43,6 +43,7 @@ constexpr uint32_t kHook_DrawIndx2_82B988C8 = 107;
 constexpr uint32_t kHook_DrawIndx2_82BA29B8 = 108;
 constexpr uint32_t kHook_DrawIndx2_82BA5448 = 109;
 constexpr uint32_t kHook_DrawIndx2_82BA5CE8 = 110;
+constexpr uint32_t kHook_SetBinSelect_822A6318 = 111;
 constexpr uint32_t kHook_SetBinSelect_82B9E848 = 112;
 constexpr uint32_t kHook_IndirectBuffer_82286248 = 113;
 constexpr uint32_t kHook_TileReplay_82B9ED28 = 114;

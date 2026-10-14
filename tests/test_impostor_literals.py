@@ -426,7 +426,7 @@ class ImpostorPassText(unittest.TestCase):
         self.assertEqual(self.front.count("CurrentImpostors()"), 6)
         self.assertIn("  const capture::ImpostorMode impostors = CurrentImpostors();\n"
                       "  if (impostors == capture::ImpostorMode::kOn) g_clay->SetImpostorReadback(FrameImpostorReadback());\n", self.front)
-        self.assertIn("CurrentCoverage(),\n                 impostors, water, post, st, tst);", self.front)
+        self.assertIn("CurrentLocalLights(), CurrentCoverage(), impostors, water, post, st, tst);", self.front)
         # (ledger ruling 47) the list is asked for the pictures only with the switch at `on` AND the native renderer on
         self.assertIn("bool ImpostorSwitchOn() { return CurrentImpostors() == capture::ImpostorMode::kOn; }", self.front)
         self.assertIn("bool ImpostorReadbackWanted() { return fable2::ImpostorPicturesInList(REXCVAR_GET(fable2_native_render), ImpostorSwitchOn()); }", self.front)

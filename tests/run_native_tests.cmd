@@ -1,5 +1,5 @@
 @echo off
-rem Standalone synthetic tests: no game files, GPU, SDL or audio device needed.
+rem Standalone synthetic tests: no game files, GPU hardware, SDL or audio device needed.
 setlocal
 set "ROOT=%~dp0.."
 set "SDK=%~1"
@@ -23,6 +23,25 @@ clang++ -std=c++23 "%~dp0native\test_native_render_state.cpp" -o "%OUT%\native_s
 "%OUT%\native_state.exe" || exit /b 1
 clang++ -std=c++23 "%~dp0native\test_native_shaders.cpp" -ld3dcompiler -o "%OUT%\native_shaders.exe" || exit /b 1
 "%OUT%\native_shaders.exe" || exit /b 1
+clang++ -std=c++23 "%~dp0native\test_presentation_shaders.cpp" -ld3dcompiler -o "%OUT%\presentation_shaders.exe" || exit /b 1
+"%OUT%\presentation_shaders.exe" || exit /b 1
+python "%ROOT%\tools\xdk_sigmatch\presentation_resolve_check.py" --fixtures "%OUT%\presentation_resolve.bin" || exit /b 1
+clang++ -std=c++23 "%~dp0native\test_presentation_resolve.cpp" -ld3dcompiler -ld3d11 -o "%OUT%\presentation_resolve.exe" || exit /b 1
+"%OUT%\presentation_resolve.exe" "%OUT%\presentation_resolve.bin" || exit /b 1
+python "%ROOT%\tools\xdk_sigmatch\presentation_resolve_check.py" --dof --fixtures "%OUT%\dof_resolve.bin" || exit /b 1
+"%OUT%\presentation_resolve.exe" "%OUT%\dof_resolve.bin" dof || exit /b 1
+clang++ -std=c++23 "%~dp0native\test_dof_block.cpp" -o "%OUT%\dof_block.exe" || exit /b 1
+"%OUT%\dof_block.exe" || exit /b 1
+clang++ -std=c++23 "%~dp0native\test_presentation_frame.cpp" -o "%OUT%\presentation_frame.exe" || exit /b 1
+"%OUT%\presentation_frame.exe" || exit /b 1
+clang++ -std=c++23 "%~dp0native\test_ui_mask.cpp" -o "%OUT%\ui_mask.exe" || exit /b 1
+rem Captured copy spans: the Maps view (16 cases, two crossing a ring kick) and the pause menu (two live spans, three negatives).
+"%OUT%\ui_mask.exe" "%~dp0native\fixtures\mask-copy-maps.bin" || exit /b 1
+"%OUT%\ui_mask.exe" "%~dp0native\fixtures\mask-copy-pause.bin" || exit /b 1
+"%OUT%\ui_mask.exe" || exit /b 1
+clang++ -std=c++23 "%~dp0native\test_ui_mask_gpu.cpp" -ld3dcompiler -ld3d11 -o "%OUT%\ui_mask_gpu.exe" || exit /b 1
+"%OUT%\ui_mask_gpu.exe" || exit /b 1
+"%OUT%\ui_mask_gpu.exe" gradient || exit /b 1
 clang++ -std=c++23 -I"%SDK%\include" "%~dp0native\test_water_sampler.cpp" -o "%OUT%\water_sampler.exe" || exit /b 1
 "%OUT%\water_sampler.exe" || exit /b 1
 clang++ -std=c++23 -I"%SDK%\include" "%~dp0native\test_emulated_frame_stats.cpp" -o "%OUT%\frame_stats.exe" || exit /b 1

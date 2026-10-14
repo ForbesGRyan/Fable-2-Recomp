@@ -436,6 +436,23 @@ class HandWrittenDumps(unittest.TestCase):
 
 
 class MaskShaderInstructions(unittest.TestCase):
+    def test_point_export_and_nested_predicate_counters(self):
+        # SDK interpreter.cpp: EQ/GE pushes test A.w/B.w and replicate a
+        # counter based on A.x/B.x. Inversion flips only 0/1; pop clamps at 0.
+        for op,holds in [('setp_eq_push',lambda x:x==0),('setp_ge_push',lambda x:x>=0)]:
+            for a in [0,1,2]:
+                for b in [-1,0,1]:
+                    text=f'/* 1 */ {op} r2, r0, r1\n/* 2 */ max oPts.x___, r2, r2'
+                    out,m=run(text,regs={0:[a]*4,1:[b]*4})
+                    expected=0 if a==0 and holds(b) else a+1
+                    self.assertEqual(out['oPts'][0],expected)
+                    self.assertEqual(m.p0,a==0 and holds(b))
+        for a,inv,pop in [(0,1,0),(1,0,0),(2,2,1),(3,3,2)]:
+            out,m=run('/* 1 */ setp_inv r1.x___, r0.x\n/* 2 */ setp_pop r2.x___, r0.x\n/* 3 */ max oC0, r1, r2',regs={0:[a]*4})
+            self.assertEqual(m.r[1][0],inv)
+            self.assertEqual(m.r[2][0],pop)
+            self.assertEqual(m.p0,a<=1)
+
     """Plan Task 2 of the shadows sub-project: what the two mask shaders need beyond the lit families."""
 
     def test_get_weights_by_hand(self):

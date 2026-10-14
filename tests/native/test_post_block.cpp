@@ -85,6 +85,12 @@ static int ValidTests() {
                 kPostBlurXPs == 0xEA83C7E7E24EC4C8ull && kPostBlurYPs == 0x28DBE18F313350BFull &&
                 kPostRadialPs == 0x4BE4344C27016E04ull);
   static_assert(sizeof(PostSource) == 16);
+  static_assert(offsetof(PostSource,content)==8 && offsetof(PostSource,presentation_kind)==4);
+  constexpr PostSource legacy_source{0x1FAA0000,0x9075910DFD72DC3Dull};
+  static_assert(legacy_source.base==0x1FAA0000 && legacy_source.content==0x9075910DFD72DC3Dull &&
+                legacy_source.presentation_kind==0);
+  constexpr PostSource dof_source{0x1FAA0000,7,2};
+  static_assert(dof_source.content==7 && dof_source.presentation_kind==2);
   const Inputs in;
   PostBlockReason why = PostBlockReason::kUnread;
   const PostBlock b = in.Make(&why);
@@ -559,8 +565,46 @@ static int LookTests() {
   return 0;
 }
 
+static int PresentationBlurSourceTests() {
+  uint32_t bloom[6]={0x82424802,0x12D9F087,0x00166117,0x01280C14,3,0x218};
+  uint32_t dof[6];std::memcpy(dof,bloom,sizeof(dof));dof[1]=(dof[1]&~63u)|29;
+  Inputs in;const PostBlock expected=in.Make();
+  float bloom_values[2][2][4];std::memcpy(bloom_values,in.regs.blur,sizeof(bloom_values));
+  float different_dof[2][4]={{1,0,0,0},{0,0,0,0}};
+  in.regs.have_blur[0]=in.regs.have_blur[1]=false;
+  if(ClassifyPostBlurSource(bloom)!=PostBlurSource::kBloom ||
+     ClassifyPostBlurSource(dof)!=PostBlurSource::kDepthOfField) return 260;
+  // The actual opening sequence: bloom X/Y, then DOF X/Y. The final block
+  // must retain bloom's earlier, different kernel rather than the DOF kernel.
+  for(uint32_t axis=0;axis<2;axis++) RecordPresentationBloomBlur(in.regs,axis,bloom,bloom_values[axis]);
+  for(uint32_t axis=0;axis<2;axis++) RecordPresentationBloomBlur(in.regs,axis,dof,different_dof);
+  const auto actual=in.Make();
+  if(!actual.valid || !(actual.parts&kPostPartBlur) ||
+     std::memcmp(actual.blur,expected.blur,sizeof(actual.blur))) return 261;
+  bloom[1]=(bloom[1]&~63u)|54;
+  if(ClassifyPostBlurSource(bloom)!=PostBlurSource::kBloom) return 262;
+  const uint32_t words[5]={0,1,2,2,5};
+  const uint32_t invalid[5]={bloom[0]&~3u,7,0,bloom[2]^(1u<<13),0};
+  for(uint32_t i=0;i<5;i++) {
+    uint32_t bad[6];std::memcpy(bad,bloom,sizeof(bad));bad[words[i]]=invalid[i];
+    if(ClassifyPostBlurSource(bad)!=PostBlurSource::kUnknown) return 263;
+    RecordPresentationBloomBlur(in.regs,0,bad,bloom_values[0]);
+    if(in.regs.have_blur[0] || !in.regs.have_blur[1]) return 264;
+    RecordPresentationBloomBlur(in.regs,0,bloom,bloom_values[0]);
+  }
+  RecordPresentationBloomBlur(in.regs,1,bloom,nullptr);
+  if(in.regs.have_blur[1] || !in.regs.have_blur[0] || (in.Make().parts&kPostPartBlur)) return 265;
+  RecordPresentationBloomBlur(in.regs,0,nullptr,bloom_values[0]);
+  if(in.regs.have_blur[0] || ClassifyPostBlurSource(nullptr)!=PostBlurSource::kUnknown) return 266;
+  // A fresh frame with only a DOF pass must not invent a bloom producer.
+  PostRegisters fresh{};RecordPresentationBloomBlur(fresh,0,dof,different_dof);
+  if(fresh.have_blur[0]) return 267;
+  return 0;
+}
+
 int main() {
-  for (int (*test)() : {ValidTests, RegisterTests, FetchTests, BytesTests, BlurTests, PairTests, ChoiceTests, NameTests, LookTests}) {
+  for (int (*test)() : {ValidTests, RegisterTests, FetchTests, BytesTests, BlurTests, PairTests, ChoiceTests, NameTests, LookTests,
+                       PresentationBlurSourceTests}) {
     if (const int code = test()) {
       std::printf("FAIL: post block case %d\n", code);
       return 1;

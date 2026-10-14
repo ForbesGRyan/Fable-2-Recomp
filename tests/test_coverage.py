@@ -174,7 +174,7 @@ class SwitchOff(unittest.TestCase):
     def test_the_switch_is_off_by_default_and_read_by_the_pass_alone(self):
         self.assertRegex(self.front, r'REXCVAR_DEFINE_STRING\(fable2_native_coverage, "off", "Fable2",')
         self.assertEqual(self.front.count("CurrentCoverage()"), 3)      # its definition, the Render's argument, the start line
-        self.assertIn("CurrentFog(), CurrentWind(), CurrentCoverage(),\n                 impostors, water, post, st, tst);", self.front)
+        self.assertIn("CurrentFog(), CurrentWind(),\n                 CurrentLocalLights(), CurrentCoverage(), impostors, water, post, st, tst);", self.front)
         self.assertIn('if (st.coverage_switch) REXLOG_INFO("[native] clay: {}", render::FormatCoverageText(st));', self.front)
         capture = (ROOT / "src" / "native" / "capture" / "capture.cpp").read_text(encoding="utf-8")
         for word in ("fable2_native_coverage", "CoverageOf", "CoveredSamples", "kCoveragePs"):   # the capture reads nothing for it

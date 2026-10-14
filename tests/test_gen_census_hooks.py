@@ -100,5 +100,25 @@ class GenTests(unittest.TestCase):
         self.assertIn("constexpr uint32_t kHook_D3DDevice_DrawVertices = 3;", out)  # near-miss '?' stripped
 
 
+class RepoHookTests(unittest.TestCase):
+    """The checked-in generated files, not a fixture: the native UI masks need the
+    822A6318 bin-reset hook to exist (it was once skipped for a header that is not compiled)."""
+
+    def test_bin_reset_hook_emitted(self):
+        inc = (ROOT / "src" / "native" / "capture" / "xdk_hooks.inc").read_text()
+        ids = (ROOT / "src" / "native" / "capture" / "xdk_hook_ids.h").read_text()
+        self.assertIn('FABLE2_XDK_HOOK(111, "SetBinSelect:822A6318", ProcessAndProcessAndProcess1046_822A6318)', inc)
+        self.assertIn("constexpr uint32_t kHook_SetBinSelect_822A6318 = 111;", ids)
+        self.assertNotIn("skipped SetBinSelect:822A6318", inc)
+
+    def test_bin_reset_not_overridden_elsewhere(self):
+        self.assertIsNone(gen.existing_override(ROOT / "src", "ProcessAndProcessAndProcess1046_822A6318"))
+
+    def test_capture_routes_bin_reset(self):
+        cpp = (ROOT / "src" / "native" / "capture" / "capture.cpp").read_text(errors="ignore")
+        self.assertIn("if(id==kHook_SetBinSelect_822A6318 && ctx.r4.u32==0) OnUiBinResetCall(ctx.r3.u32);", cpp)
+        self.assertIn("if(id==kHook_SetBinSelect_822A6318 && t_last_args[id].r[1]==0) OnUiBinResetReturn(t_last_args[id].r[0]);", cpp)
+
+
 if __name__ == "__main__":
     unittest.main()

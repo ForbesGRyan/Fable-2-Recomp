@@ -9,6 +9,8 @@ static_assert(xdk::kDeviceVertexFetchOffset + xdk::kDeviceTextureFetchStride * 1
               xdk::kDeviceVertexFetchOffset + 8 * 48);
 // VGT_HOS_CNTL (0x2285) in the 0x2280 run shadowed from +0x2964.
 static_assert(xdk::kDeviceHosCntlOffset == 0x2964 + 4 * (0x2285 - 0x2280));
+static_assert(xdk::DeviceRegShadowOffset(0x2280)==0x2964);
+static_assert(xdk::DeviceRegShadowOffset(0x2281)==0x2968);
 // Pixel constant bank: r6 = device + 0x1780 for r5 = 0x4400 (0x8221E148), right
 // after the 256 x float4 vertex bank.
 static_assert(xdk::kDevicePsConstantsOffset == 0x1780);
@@ -48,7 +50,11 @@ static_assert(xdk::DeviceRegShadowOffset(0x220B) == 0x2934 + 4 * 11);
 static_assert(xdk::DeviceRegShadowOffset(0x220C) == 0);
 static_assert(xdk::DeviceRegShadowOffset(0x21FF) == 0);
 // Other runs are not covered by this function (VGT_HOS_CNTL has its own constant).
-static_assert(xdk::DeviceRegShadowOffset(0x2285) == 0);
+static_assert(xdk::DeviceRegShadowOffset(0x2285) == xdk::kDeviceHosCntlOffset);
+  static_assert(xdk::DeviceRegShadowOffset(0x2300)==0x29B8);
+  static_assert(xdk::DeviceRegShadowOffset(0x2302)==0x29C0);
+  static_assert(xdk::DeviceRegShadowOffset(0x2325)==0x2A4C);
+  static_assert(xdk::DeviceRegShadowOffset(0x2326)==0);
 // The 0x2100 run ends where the 0x2180 run's shadow starts (+0x2920), and the
 // 0x2200 run ends where the 0x2280 run's starts (+0x2964).
 static_assert(xdk::kDeviceRegShadowBase2100 + 4 * 21 == 0x2920);

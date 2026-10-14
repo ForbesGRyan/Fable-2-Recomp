@@ -5,6 +5,15 @@ menus and video. Capture the game's presentation draws as immutable frame-owned
 inputs and replay them natively, including frames with no world scene. Preserve
 input/navigation in the existing game; this is faithful rendering, not a UI redesign.
 
+## Implementation and integration status (2026-10-14)
+
+The opening problem statement and evidence below describe the initial captures.
+Native presentation is implemented in `16db251`, with opening-character lighting
+in `234bced`, and integrated with local lights and anisotropic filtering. The
+[presentation plan](../plans/2026-10-12-native-renderer-presentation.md) and
+[integration report](../../INTEGRATION_STATUS.md) separate implementation,
+validation, unsupported routes and outstanding acceptance.
+
 ## Evidence and routes
 
 Run 775 (HUD/pause/return, 100 seconds) has stable binaries, eleven guest windows,

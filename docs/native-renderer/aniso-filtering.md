@@ -30,7 +30,7 @@ Acceptance 1 (ratio within 0.8..1.2 at override 3, before figure beside it): met
 
 Bounded WARP/D3D debug run (100 s, exe `0889B3EC...58B4`): 0 D3D12 errors, warning 1328 four times, ready line "texture filtering 4x anisotropic, anisotropic_override mode 3". Native suite, Python suite (1851 tests; six errors from a non-ASCII comment fixed in fdf7d25) and the release build pass. Cost was recorded, not gated (ruling 5).
 
-Runtime toggle run `aniso_warp_toggle` (WARP/debug, 120 s, exe `0889B3EC...58B4`, `RUN UNCHECKED`): the rebuild path was NOT exercised. The remote-control server is compiled into Debug builds only (`FABLE2_REMOTE_CONTROL`), so `tools/fable2_control.py cvar anisotropic_override 0` was refused at 52 s and 69 s (WinError 10061); the run itself logged one ready line (generation 1, 4x anisotropic), 0 D3D12 errors and warning 1328 only (`warp_toggle_result.json`). User check 112 carries the F3-console toggle instead.
+Runtime toggle run `aniso_warp_toggle` (WARP/debug, 120 s, exe `0889B3EC...58B4`, `RUN UNCHECKED`): the rebuild path was NOT exercised. The remote-control server is compiled into Debug builds only (`FABLE2_REMOTE_CONTROL`), so `tools/fable2_control.py cvar anisotropic_override 0` was refused at 52 s and 69 s (WinError 10061); the run itself logged one ready line (generation 1, 4x anisotropic), 0 D3D12 errors and warning 1328 only (`warp_toggle_result.json`). User check 118 carries the F3-console toggle instead.
 
 ## Limits
 
@@ -41,7 +41,7 @@ Runtime toggle run `aniso_warp_toggle` (WARP/debug, 120 s, exe `0889B3EC...58B4`
 - Mipped textures with mag linear and min point would be approximated; none was seen.
 - A mode change rebuilds the pass (a one-frame hitch; the texture cache is kept, nothing is uploaded again); the rebuild path was not exercised at run time (the toggle run could not reach the Debug-only control server); a failed rebuild turns the renderer off until F6, as a failed device change does today.
 - The judged box is small (2108 px) and one texture type; the cvar is looked up by name once per frame plus once in the water block.
-- User confirmation is pending (user check 112).
+- User confirmation is pending (user check 118).
 
 ## Rulings
 
@@ -62,7 +62,7 @@ Runtime toggle run `aniso_warp_toggle` (WARP/debug, 120 s, exe `0889B3EC...58B4`
 15. The "before" run swaps the before exe into the worktree build folder and restores the after exe (hash checked), because the driver starts the game only from its allow-listed folder.
 16. The judged ground box is the dirt path at rows 392..426, cols 106..168, not the brief's default box (near railing and dog) nor the deck box (edge-dominated, secondary only).
 17. One final fix wave: the before-control run, a runtime toggle run, the three packing checks, the comment and document fixes.
-18. Acceptance 2b's figure is the RMS of the exposure-normalised native luminance difference over the mean control luminance, judged against the same-exe run-to-run floor; the toggle run used the client's `cvar NAME VALUE` syntax and fell back to user check 112 when the port was refused.
+18. Acceptance 2b's figure is the RMS of the exposure-normalised native luminance difference over the mean control luminance, judged against the same-exe run-to-run floor; the toggle run used the client's `cvar NAME VALUE` syntax and fell back to user check 118 when the port was refused.
 
 ## Evidence
 

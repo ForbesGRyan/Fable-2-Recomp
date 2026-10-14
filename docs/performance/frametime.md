@@ -39,8 +39,13 @@ emulation work:
 
 ## The levers
 
-All SDK changes are cvars in `tools/perf/sdk-perf.patch` (against the submodule's 0c6d1de),
-default off until merged; the app-side ones are environment variables.
+The experimental SDK changes live in `tools/perf/sdk-perf.patch` against SDK
+`0c6d1de`. The patch defines the async/deferred/coalescing defaults used by the
+measurements below, but the normal `build.cmd` / `prepare_runtime_sdk.py` path
+does not apply it. Normal runtime builds therefore do not gain these SDK levers
+merely by merging the app branch. The app-side thread-placement defaults and
+uncapped configuration are already in master. The frame meter supports both SDK
+layouts and omits queue/GPU counters when the SDK does not expose them.
 
 1. `--d3d12_async_submit=true`: the deferred command list is replayed and executed on a worker
    thread ("D3D12 Submit"); the emulation thread reserves the fence value at hand-over and flushes
@@ -74,10 +79,15 @@ to a conclusion).
 
 ## How to run and measure
 
-Since commit 7425ff2 every lever is the default, and since e821f2f a plain launch is also
-uncapped (`[perf] uncapped_frame_rate = true` in fable2_config.toml seeds
-`guest_vblank_pacing=false`; without it the `vsync` cvar holds the game at 30 fps, as seen in
-log 024). To measure:
+In the private SDK used for these measurements, commit `7425ff2` made the
+SDK levers default on. This is not the normal runtime build. App commit `e821f2f`
+makes a plain launch uncapped (`[perf] uncapped_frame_rate = true` in
+`fable2_config.toml` seeds `guest_vblank_pacing=false`); a launcher or explicit
+setting can still select a cap. Historical log 024 shows the old 30 fps pacing.
+To reproduce the experimental SDK measurements, build/stage a private SDK with
+`tools/perf/build_sdk_sym.cmd` and `tools/perf/stage_sdk_perf.ps1`, keep its headers,
+import libraries and DLLs matched, and use the same configuration. For a bounded
+measurement after that preparation:
 
 ```
 tools\drive_game.ps1 -BootSave Hero000 -Total 100 -Env @{REX_VSYNC="0"; FABLE2_GUEST_WORK_LOG="1"; FABLE2_HITCH_MS="12"}
@@ -117,8 +127,14 @@ the CMake manifest step ran for minutes.
   gives the per-tile structure); a presenter queue of its own would remove the swap flush and
   the Present lock.
 - RivaTuner Statistics Server hooks the process (user check below).
-- Merging: the SDK patch into the submodule with the cvars default on, the thread placement and
-  the uncapped launcher as the default.
+- App integration: frame-meter compatibility was already cherry-picked as
+  `a227629`; the 2026-10-14 merge of `9869594` records the remaining branch
+  ancestry with no source delta. Thread placement and uncapped app configuration
+  are already included. See [integration status](../INTEGRATION_STATUS.md).
+- Remaining SDK work: choose whether to adopt `tools/perf/sdk-perf.patch` into
+  the normal source/build path, validate the matched runtime/plugins and decide
+  its async/deferred defaults. The patch passes an apply check on the current
+  clean SDK, but has not been applied by this integration.
 
 ## User checks
 

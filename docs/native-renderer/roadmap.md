@@ -8,6 +8,12 @@ Deferred water work is saved in [TODO.md](../../TODO.md); its WITH_CONCERNS clos
 Limits and follow-ups named here are described in `frame-map.md`, section 17, "Limits (10c)" and
 "Follow-ups (10c)", and in the earlier sections' own limits.
 
+Integration snapshot (2026-10-14): local lights, presentation through `234bced`
+and anisotropic filtering through `b9011ca` are combined with the current
+master history. See [integration status](../INTEGRATION_STATUS.md) for validation
+and [user checks](user-checks.md) for acceptance. Canonical check numbers are
+107-110 for local lights, 111-117 for presentation and 118 for filtering.
+
 ## Order
 
 1. **Foliage: wind and coverage** (sub-project 11, **done 2026-10-11**; `frame-map.md` section 18,
@@ -325,18 +331,18 @@ Limits and follow-ups named here are described in `frame-map.md`, section 17, "L
   and pools miss, motion/near branch/other regions unseen; user checks101–106 first).
 - SDK B2 copy interface and further monitor experiments remain separate user decisions.
 - Default of `--fable2_native_local_lights` (on, ruling 7 of the local lights spec: the user asked for the light; `off` restores the picture of before; user checks 107 to 110 judge it at night, indoors and at the campfire).
-- Integration order of the unmerged branches: per the user, `native-renderer-aniso` (sub-project 15) merges into `native-renderer-water` first, after the presentation session commits; `native-renderer-lanterns` (local lights) rebases onto that afterwards (ledger ruling 5: it stays on `3c84229` until then). No push.
-- User checks 40 to 110 in `user-checks.md`.
+- The earlier branch-order handoff is superseded by the 2026-10-14 integration: local lights were already on master, presentation includes them, and filtering merges over presentation. Integration preserves the original dirty water checkout. Local publication remains pending.
+- User checks 40 to 118 in `user-checks.md`.
 
 
 ## Post-closure campfire follow-ups (2026-10-12)
 
-User verification found missing ground texture, then a colour mismatch and an untextured large trunk near the campfire. Three previously unsupported seven-light material variants are now registered with checked shader pairs: two terrain shaders and one bark shader. Offline proofs, affected tests and release build passed. Runs 766/767 confirm bark and ground colour with user feedback, original split screenshots, valid light inputs and full discovery audits. Both follow-up plans are complete. Reports: [ground](campfire-ground-fix.md), [tree](campfire-tree-fix.md). The water project's historical WITH_CONCERNS closure and pending water checks remain as recorded; these follow-ups address the reported campfire material/lighting defects. Changes are local and uncommitted.
+User verification found missing ground texture, then a colour mismatch and an untextured large trunk near the campfire. Three previously unsupported seven-light material variants are now registered with checked shader pairs: two terrain shaders and one bark shader. Offline proofs, affected tests and release build passed. Runs 766/767 confirm bark and ground colour with user feedback, original split screenshots, valid light inputs and full discovery audits. Both follow-up plans are complete. Reports: [ground](campfire-ground-fix.md), [tree](campfire-tree-fix.md). The water project's historical WITH_CONCERNS closure and pending water checks remain as recorded; these follow-ups address the reported campfire material/lighting defects. The campfire fixes are committed as `2f1001b` and included in master.
 
 
 ## Post-closure bridge water ripples (2026-10-12)
 
-The bridge lake's missing fine ripples were caused by native linear filtering while the game used its default 4x anisotropic override. A one-setting linear control reproduces the native smoothness. Native water now follows the shared setting per eligible normal map; point/single-level maps retain their original filters. Run 774 restores measured detail from 26% to 96–97% of the game's, with both existing colour measures passing. Full native checks, targeted water checks, release build and bounded software/debug check pass. Original screenshots and own-frame captures confirm twelve water surfaces and fourteen distant-tree groups drawn. Report: [water ripple fix](water-ripple-fix.md). This defect is fixed by captured hardware evidence; the offered user visual confirmation is pending. Historical reflection/default-off decisions retain their scope. Local changes remain uncommitted.
+The bridge lake's missing fine ripples were caused by native linear filtering while the game used its default 4x anisotropic override. A one-setting linear control reproduces the native smoothness. Native water now follows the shared setting per eligible normal map; point/single-level maps retain their original filters. Run 774 restores measured detail from 26% to 96–97% of the game's, with both existing colour measures passing. Full native checks, targeted water checks, release build and bounded software/debug check pass. Original screenshots and own-frame captures confirm twelve water surfaces and fourteen distant-tree groups drawn. Report: [water ripple fix](water-ripple-fix.md). This defect is fixed by captured hardware evidence; the offered user visual confirmation is pending. Historical reflection/default-off decisions retain their scope. The ripple fix is committed as `3c84229` and included in master; moving acceptance remains pending.
 
 ## Post-closure local lights (2026-10-13)
 
@@ -350,10 +356,10 @@ Criteria (evidence in the worktree's `out/native-evidence/lighting/lanterns/`, g
 4. Cost: **met**. GPU busy median 30.38 to 30.64 ms on against 30.43 to 30.62 ms off, frame median 37.47 to 37.54 against 37.45 to 37.61 ms, about 0.0 ms against the +0.5 ms bound (`timing.txt`; both runs at about 26.5 fps with the machine in use).
 5. Documents: **met**. What is drawn and what is not are in frame-map section 14; user checks 107 to 110 added and checks 32a, 38 and 59 re-read.
 
-Limits: no lanterns in the water's reflection (spec ruling 6); the lantern vector at the vertex at rest, not the swayed position; no specular per light; no per-light shadow map (slot 9) and no `b135` path, so a post's shadow fanning from a lamp is missing; slots after the sun are not read; a set whose sun is not the frame's, or past 64 lanterns a frame, is refused and counted; the presentation session's crowd and building pairs are not covered; night, interiors and the campfire were never seen by the agent (user checks 107 to 110).
+Limits: no lanterns in the water's reflection (spec ruling 6); the lantern vector at the vertex at rest, not the swayed position; no specular per light; no per-light shadow map (slot 9) and no `b135` path, so a post's shadow fanning from a lamp is missing; slots after the sun are not read; a set whose sun is not the frame's, or past 64 lanterns a frame, is refused and counted; presentation's registered crowd/building/character pairs are now included in the merged table; visual acceptance of their lanterns remains pending; night, interiors and the campfire were never seen by the agent (user checks 107 to 110).
 
 Follow-ups:
-- The crowd and building pairs (four- and seven-light object shaders, Murgo) after the presentation session commits them: run `--multi-lanterns` on them and draw them with their lanterns.
+- The integrated crowd, building and opening-character pairs use the shared multi-light table. Recheck their lanterns in the moving town/interior views; the integrated offline proof is recorded in the integration report.
 - Deferred minors worth doing (`.superpowers/sdd/2026-10-13-native-renderer-local-lights/progress.md`): a shared helper (`LanternSpot`) for the leaf vertex path, which repeats `LocalLight`'s distance, range and cone statements without a mutation control; hoisting the two plant calls above the ambient branch (the root-word textured program grew from 24 KB to 42 KB); `lanterns_draws` for the early coverage records drawn in the tail (lit, but not counted in the `Light:` line); and the set slot a skipped record can take (`AddLightSet` is called before the record is known to be kept: call it only when the record is not skipped).
 
 ## Sub-project 15: anisotropic texture filtering (2026-10-13)

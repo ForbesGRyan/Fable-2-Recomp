@@ -74,7 +74,16 @@ Build/test while the game is closed. Do not change display settings or resize
 evidence. A bounded software/debug run is not the historical 240-second stress
 gate. Store raw evidence and scripts in `out/native-evidence/presentation/`.
 
-## Current status (2026-10-13, build 73)
+## Integration update (2026-10-14)
+
+Presentation and opening-character lighting through `234bced` are integrated
+with local lights and anisotropic filtering. [Integration status](../../INTEGRATION_STATUS.md)
+records the current build and checks. User checks 111-117 remain the presentation
+checks; filtering is check 118. The implementation-era handoff constraints above
+and the findings below describe their original sessions. Integration changes
+neither the experimental defaults nor the pending visual/timing acceptance.
+
+## Hardware status (2026-10-13, build 73)
 
 Verified on hardware (user-present runs, RUN UNCHECKED, zero D3D messages,
 stable binaries) with paired native/guest readbacks of the same GPU callback:
@@ -107,8 +116,9 @@ own baseline on this branch, not a presentation effect.
 Away-gated (run 869, 20:36, unattended, RUN CLEAN): native UI on at the
 market holds 30.1 fps in every window, frame 33.31 ms, guest work 6.58 ms,
 present 4.45 ms; the user-present 23 fps above came from sharing the machine
-(present 13 ms there). The UI-off half waits for the next idle window
-(`timing_when_idle.ps1 -Only ui-off`).
+(present 13 ms there). The latest saved UI-off attempt was refused at 22:35
+after 1800 s of gate waiting. A fresh quiet comparison remains required; the historical waiter must
+not be assumed alive. Recheck both configurations on the integrated binary.
 
 Open: criterion 9's UI-off half (user check 116:
 `out/native-evidence/presentation/timing_ab.ps1`); F51's native DOF is proven but
